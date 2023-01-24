@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -34,7 +34,7 @@ let spec =
         |> verbose_flags
         |> from_flag
         |> wait_for_recheck_flag
-        |> flag "--all" no_arg ~doc:"Ignore absence of an @flow pragma"
+        |> flag "--all" truthy ~doc:"Ignore absence of an @flow pragma"
         |> anon "filename" (optional string)
       );
   }

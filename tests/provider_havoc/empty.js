@@ -8,14 +8,14 @@
 function test() {
   let foo: {n: Set<string>} = { n: new Set() }
 
-  let si = new Set();
+  let si = new Set<empty>();
   (function () { declare var x: ?string; si = si.add(x)})(); // error
 
   foo = { n: si };
 }
 
 function arr() {
-  let arr = [];
+  let arr: Array<empty> = [];
   arr = [1,2,3]; // error
 }
 
@@ -29,14 +29,14 @@ function arr_ok() {
 function fn() {
   let fn = (x: number) => 42;
   function havoc() {
-    fn = (y => 42); // error
+    fn = (y => 42); // error in old inference, no error in LTI
   }
 }
 
 function fn_completely_unannotated() {
-  let fn = x => 42;
+  let fn = (x: number) => 42;
   function havoc() {
-    fn = (y => 42); // error, x has number as LB
+    fn = (y => 42); // error in old inference, no error in LTI
   }
   fn(52);
 }
@@ -44,17 +44,17 @@ function fn_completely_unannotated() {
 function obj_this_empty() {
   let obj = {
     f() {
-      let b = this.b; // unrelated error, but as a result b is tvar with no lowers
-      b = 42; // error
+      let b = this.b; // Error: object-this-reference
+      b = 42; // no error since `this` is any-typed above.
     }
   }
 }
 
 function reversed() {
-  let rts = [];
+  let rts: Array<number> = [];
 
   function initRts(): void {
-    rts = []; // error, redefinition has no lowers and its an invariant check
+    rts = [];
   }
 
   function getRts(): Array<number> {
@@ -67,7 +67,7 @@ declare class Set<+T> {
 }
 
 function set_replace() {
-  let si = new Set();
+  let si = new Set<number>();
 
   si = new Set<string>(); // error
 
@@ -75,13 +75,13 @@ function set_replace() {
 }
 
 function set_add() {
-  let si = new Set();
+  let si = new Set<number>();
 
   si = si.add(42); // error
 }
 
 function set_app() {
-  let si = new Set();
+  let si = new Set<empty>();
 
   si = si.add(42); // error
 

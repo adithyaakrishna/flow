@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,15 +18,19 @@ type buf = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1
 (* Addresses are represented as integers, but are well-typed via a phantom
  * type parameter. The type checker will ensure that a `foo addr` is not
  * passed where a `bar addr` is expected. *)
-type 'k addr [@@immediate]
+type +'k addr [@@immediate]
 
-type serialized_tag = Serialized_resolved_requires
+val null_addr : [ `null ] addr
 
 exception Out_of_shared_memory
 
 exception Hash_table_full
 
 exception Heap_full
+
+exception Invalid_address of int * int64
+
+exception Invalid_header of int * int64
 
 val connect : handle -> worker_id:int -> unit
 
@@ -50,6 +54,10 @@ val heap_size : unit -> int
 
 val init : config -> num_workers:int -> (handle, unit) result
 
+val commit_transaction : unit -> unit
+
+val is_init_transaction : unit -> bool
+
 module type Key = sig
   type t
 
@@ -62,10 +70,6 @@ module type Value = sig
   type t
 
   val description : string
-end
-
-module type SerializedTag = sig
-  val value : serialized_tag
 end
 
 module type AddrValue = sig
@@ -83,27 +87,11 @@ module type NoCache = sig
 
   val get : key -> value option
 
-  val get_old : key -> value option
-
-  val remove_old_batch : KeySet.t -> unit
+  val remove : key -> unit
 
   val remove_batch : KeySet.t -> unit
 
   val mem : key -> bool
-
-  val mem_old : key -> bool
-
-  val oldify : key -> unit
-
-  val oldify_batch : KeySet.t -> unit
-
-  val revive_batch : KeySet.t -> unit
-end
-
-module type NoCacheTag = sig
-  include NoCache
-
-  val iter : (value -> unit) -> unit
 end
 
 module type DebugCacheType = sig
@@ -155,11 +143,15 @@ module WithCache (Key : Key) (Value : Value) :
 module NoCache (Key : Key) (Value : Value) :
   NoCache with type key = Key.t and type value = Value.t and module KeySet = Flow_set.Make(Key)
 
-module NoCacheTag (Key : Key) (Value : Value) (_ : SerializedTag) :
-  NoCacheTag with type key = Key.t and type value = Value.t and module KeySet = Flow_set.Make(Key)
+module NoCacheAddr (Key : Key) (Value : AddrValue) : sig
+  include
+    NoCache
+      with type key = Key.t
+       and type value = Value.t addr
+       and module KeySet = Flow_set.Make(Key)
 
-module NoCacheAddr (Key : Key) (Value : AddrValue) :
-  NoCache with type key = Key.t and type value = Value.t addr and module KeySet = Flow_set.Make(Key)
+  val add : Key.t -> Value.t addr -> Value.t addr
+end
 
 val debug_value_size : Obj.t -> int
 
@@ -186,39 +178,31 @@ module NewAPI : sig
    * space and (2) consume all of the allocated space. *)
   type chunk
 
-  (* Phantom type tag for string objects. *)
-  type heap_string
+  type +'k parse_kind
 
-  (* Phantom type tag for addr map objects, which are arrays of addresses to
-   * another kind of object. For example, a `heap_string addr_tbl addr` is an
-   * array of addresses to string objects. *)
-  type 'a addr_tbl
+  type 'k parse = [ `parse of 'k parse_kind ]
 
-  (* Phantom type tag for optional objects. *)
-  type 'a opt
+  type 'k entity = [ `entity of 'k ]
 
-  (* Phantom type tag for ASTs. *)
-  type ast
+  type 'k sklist = [ `sklist of 'k ]
 
-  (* Phantom type tag for docblock, which contains information contained in the
-   * leading comment of a file. *)
-  type docblock
+  type 'k sknode = [ `sknode of 'k ]
 
-  (* Phantom type tag for aloc table. An aloc table provides the concrete
-   * location for a given keyed location in a signature. *)
-  type aloc_table
+  type 'k tbl = [ `tbl of 'k ]
 
-  (* Phantom type tag for type sig, which contains a serialized representation
-   * of the visible exports of a file. See Type_sig_bin *)
-  type type_sig
+  type dependency =
+    [ `haste_module
+    | `file
+    ]
 
-  (* Phantom type tag for file sig, which contains a serialized representation
-   * of the imports/requires of a file. *)
-  type file_sig
+  type resolved_module =
+    [ `haste_module
+    | `file
+    | `string
+    | `null
+    ]
 
-  (* Phantom type tag for checked file objects. A checked file contains
-   * references to the filename, any local definitions, exports, etc. *)
-  type checked_file
+  type entity_reader = { read: 'a. 'a entity addr -> 'a addr option } [@@unboxed]
 
   (* Before writing to the heap, we first calculate the required size (in words)
    * for all the heap objects we would like to write. We will pass this size
@@ -226,98 +210,293 @@ module NewAPI : sig
    * writes. *)
   type size = int
 
+  type 'a prep = size * (chunk -> 'a)
+
   (* Allocate the requested space (in words) in the heap. All writes must be
    * done within the provided callback, and the writes must fully consume all
    * allocated space. *)
-  val alloc : size -> (chunk -> 'a) -> 'a
+  val alloc : 'a prep -> 'a
 
-  (* headers *)
+  (* prepare *)
 
-  val header_size : size
+  val prepare_map : 'a prep -> ('a -> 'b) -> 'b prep
+
+  val prepare_product : 'a prep -> 'b prep -> ('a * 'b) prep
+
+  val prepare_const : 'a -> 'a prep
+
+  val prepare_opt : ('a -> 'b prep) -> 'a option -> 'b option prep
+
+  val prepare_iter : ('a -> unit prep) -> 'a array -> unit prep
+
+  module Prepare_syntax : sig
+    val ( let+ ) : 'a prep -> ('a -> 'b) -> 'b prep
+
+    val ( and+ ) : 'a prep -> 'b prep -> ('a * 'b) prep
+  end
 
   (* strings *)
 
-  val string_size : string -> size
+  val prepare_write_string : string -> [ `string ] addr prep
 
-  val write_string : chunk -> string -> heap_string addr
+  val read_string : [ `string ] addr -> string
 
-  val read_string : heap_string addr -> string
+  val compare_string : [ `string ] addr -> [ `string ] addr -> int
+
+  (* hash *)
+
+  val prepare_write_int64 : int64 -> [ `int64 ] addr prep
+
+  val read_int64 : [ `int64 ] addr -> int64
 
   (* addr tbl *)
 
-  val addr_tbl_size : 'a array -> size
+  val prepare_write_addr_tbl : 'k addr prep array -> 'k tbl addr prep
 
-  val write_addr_tbl : (chunk -> 'a -> 'k addr) -> chunk -> 'a array -> 'k addr_tbl addr
+  val read_addr_tbl_generic : ('k addr -> 'a) -> 'k tbl addr -> (int -> (int -> 'a) -> 'b) -> 'b
 
-  val read_addr_tbl_generic :
-    ('k addr -> 'a) -> 'k addr_tbl addr -> (int -> (int -> 'a) -> 'b) -> 'b
+  val read_addr_tbl : ('k addr -> 'a) -> 'k tbl addr -> 'a array
 
-  val read_addr_tbl : ('k addr -> 'a) -> 'k addr_tbl addr -> 'a array
+  (* skip lists *)
 
-  (* opt *)
+  val prepare_write_sklist : 'a sklist addr prep
 
-  val write_opt : (chunk -> 'a -> 'k addr) -> chunk -> 'a option -> 'k opt addr
+  val prepare_write_sknode : unit -> ('a addr -> 'a sknode addr) prep
 
-  val read_opt : ('a addr -> 'b) -> 'a opt addr -> 'b option
+  val sklist_iter : ('a addr -> unit) -> 'a sklist addr -> unit
+
+  val sklist_is_empty : 'a sklist addr -> bool
+
+  (* entities *)
+
+  val prepare_write_entity : ('k addr option -> 'k entity addr) prep
+
+  val entity_advance : 'k entity addr -> 'k addr option -> unit
+
+  val entity_read_committed : 'k entity addr -> 'k addr option
+
+  val entity_read_latest : 'k entity addr -> 'k addr option
+
+  val entity_rollback : _ entity addr -> unit
+
+  val entity_changed : _ entity addr -> bool
+
+  val entity_reader_committed : entity_reader
+
+  val entity_reader_latest : entity_reader
 
   (* ast *)
 
-  val prepare_write_ast : string -> size * (chunk -> ast addr)
+  val prepare_write_serialized_ast : string -> [ `ast ] addr prep
 
-  val read_ast : ast addr -> string
+  val read_ast : [ `ast ] addr -> string
 
   (* file sig *)
 
-  val prepare_write_file_sig : string -> size * (chunk -> file_sig addr)
+  val prepare_write_serialized_file_sig : string -> [ `file_sig ] addr prep
 
-  val read_file_sig : file_sig addr -> string
+  val read_file_sig : [ `file_sig ] addr -> string
+
+  (* exports *)
+
+  val prepare_write_serialized_exports : string -> [ `exports ] addr prep
+
+  val read_exports : [ `exports ] addr -> string
+
+  (* requires *)
+
+  val prepare_write_requires : string array -> size * (chunk -> [ `requires ] addr)
+
+  val read_requires : [ `requires ] addr -> string array
+
+  (* resolved requires *)
+
+  val resolved_requires_size : size
+
+  val prepare_write_resolved_requires :
+    (resolved_module tbl addr -> dependency tbl addr -> [ `resolved_requires ] addr) prep
+
+  val get_resolved_modules : [ `resolved_requires ] addr -> resolved_module tbl addr
+
+  val get_phantom_dependencies : [ `resolved_requires ] addr -> dependency tbl addr
+
+  val read_dependency :
+    ([ `haste_module ] addr -> 'a) -> ([ `file ] addr -> 'a) -> dependency addr -> 'a
+
+  val read_resolved_module :
+    resolved_module addr -> (dependency addr, [ `string ] addr option) Result.t
+
+  (* imports *)
+
+  val prepare_write_serialized_imports : string -> [ `imports ] addr prep
+
+  val read_imports : [ `imports ] addr -> string
+
+  (* package info *)
+
+  val prepare_write_package_info : string -> [ `package_info ] addr prep
+
+  val read_package_info : [ `package_info ] addr -> string
+
+  (* cas_digest *)
+
+  val prepare_write_cas_digest : Cas_digest.t -> [ `cas_digest ] addr prep
+
+  val read_cas_digest : [ `cas_digest ] addr -> Cas_digest.t
 
   (* docblock *)
 
-  val docblock_size : string -> size
+  val prepare_write_docblock : string -> [ `docblock ] addr prep
 
-  val write_docblock : chunk -> string -> docblock addr
-
-  val read_docblock : docblock addr -> string
+  val read_docblock : [ `docblock ] addr -> string
 
   (* aloc table *)
 
-  val aloc_table_size : string -> size
+  val prepare_write_aloc_table : string -> [ `aloc_table ] addr prep
 
-  val write_aloc_table : chunk -> string -> aloc_table addr
-
-  val read_aloc_table : aloc_table addr -> string
+  val read_aloc_table : [ `aloc_table ] addr -> string
 
   (* type sig *)
 
-  val type_sig_size : int -> size
+  val prepare_write_type_sig : int -> (buf -> unit) -> [ `type_sig ] addr prep
 
-  val write_type_sig : chunk -> int -> (buf -> unit) -> type_sig addr
+  val read_type_sig : [ `type_sig ] addr -> (buf -> 'a) -> 'a
 
-  val read_type_sig : type_sig addr -> (buf -> 'a) -> 'a
+  val type_sig_buf : [ `type_sig ] addr -> buf
 
-  val type_sig_buf : type_sig addr -> buf
+  (* parse data *)
 
-  (* checked file *)
+  val prepare_write_untyped_parse : ([ `int64 ] addr -> [ `untyped ] parse addr) prep
 
-  val checked_file_size : size
+  val prepare_write_typed_parse :
+    ([ `int64 ] addr ->
+    [ `exports ] addr ->
+    [ `requires ] addr ->
+    [ `resolved_requires ] entity addr ->
+    [ `imports ] addr ->
+    [ `file ] entity addr ->
+    [ `int64 ] entity addr ->
+    [ `cas_digest ] addr option ->
+    [ `typed ] parse addr
+    )
+    prep
 
-  val write_checked_file :
-    chunk ->
-    ast addr ->
-    docblock addr ->
-    aloc_table addr ->
-    type_sig addr ->
-    file_sig addr ->
-    checked_file addr
+  val prepare_write_package_parse :
+    ([ `int64 ] addr -> [ `package_info ] addr -> [ `package ] parse addr) prep
 
-  val file_ast : checked_file addr -> ast addr
+  val is_typed : [> ] parse addr -> bool
 
-  val file_docblock : checked_file addr -> docblock addr
+  val is_package : [> ] parse addr -> bool
 
-  val file_aloc_table : checked_file addr -> aloc_table addr
+  val coerce_typed : [> ] parse addr -> [ `typed ] parse addr option
 
-  val file_type_sig : checked_file addr -> type_sig addr
+  val coerce_package : [> ] parse addr -> [ `package ] parse addr option
 
-  val file_sig : checked_file addr -> file_sig addr
+  val get_file_hash : [> ] parse addr -> [ `int64 ] addr
+
+  val get_ast : [ `typed ] parse addr -> [ `ast ] addr option
+
+  val get_docblock : [ `typed ] parse addr -> [ `docblock ] addr option
+
+  val get_aloc_table : [ `typed ] parse addr -> [ `aloc_table ] addr option
+
+  val get_type_sig : [ `typed ] parse addr -> [ `type_sig ] addr option
+
+  val get_file_sig : [ `typed ] parse addr -> [ `file_sig ] addr option
+
+  val get_exports : [ `typed ] parse addr -> [ `exports ] addr
+
+  val get_requires : [ `typed ] parse addr -> [ `requires ] addr
+
+  val get_resolved_requires : [ `typed ] parse addr -> [ `resolved_requires ] entity addr
+
+  val get_imports : [ `typed ] parse addr -> [ `imports ] addr
+
+  val get_leader : [ `typed ] parse addr -> [ `file ] entity addr
+
+  val get_sig_hash : [ `typed ] parse addr -> [ `int64 ] entity addr
+
+  val get_cas_digest : [ `typed ] parse addr -> [ `cas_digest ] addr option
+
+  val get_package_info : [ `package ] parse addr -> [ `package_info ] addr
+
+  val set_ast : [ `typed ] parse addr -> [ `ast ] addr -> unit
+
+  val set_docblock : [ `typed ] parse addr -> [ `docblock ] addr -> unit
+
+  val set_aloc_table : [ `typed ] parse addr -> [ `aloc_table ] addr -> unit
+
+  val set_type_sig : [ `typed ] parse addr -> [ `type_sig ] addr -> unit
+
+  val set_file_sig : [ `typed ] parse addr -> [ `file_sig ] addr -> unit
+
+  val set_cas_digest : [ `typed ] parse addr -> [ `cas_digest ] addr -> unit
+
+  (* haste info *)
+
+  val prepare_write_haste_info : ([ `haste_module ] addr -> [ `haste_info ] addr) prep
+
+  val get_haste_module : [ `haste_info ] addr -> [ `haste_module ] addr
+
+  val haste_info_equal : [ `haste_info ] addr -> [ `haste_info ] addr -> bool
+
+  (* file data *)
+
+  type file_kind =
+    | Source_file
+    | Json_file
+    | Resource_file
+    | Lib_file
+
+  val prepare_write_file :
+    file_kind ->
+    ([ `string ] addr ->
+    [ `typed | `untyped | `package ] parse entity addr ->
+    [ `haste_info ] entity addr ->
+    [ `file ] sklist addr option ->
+    [ `file ] addr
+    )
+    prep
+
+  val get_file_kind : [ `file ] addr -> file_kind
+
+  val get_file_name : [ `file ] addr -> [ `string ] addr
+
+  val get_file_dependents : [ `file ] addr -> [ `file ] sklist addr option
+
+  val get_haste_info : [ `file ] addr -> [ `haste_info ] entity addr
+
+  val get_parse : [ `file ] addr -> [ `typed | `untyped | `package ] parse entity addr
+
+  val files_equal : [ `file ] addr -> [ `file ] addr -> bool
+
+  val file_changed : [ `file ] addr -> bool
+
+  (* haste module *)
+
+  val prepare_write_haste_module :
+    ([ `string ] addr -> [ `file ] entity addr -> [ `file ] sklist addr -> [ `haste_module ] addr)
+    prep
+
+  val haste_modules_equal : [ `haste_module ] addr -> [ `haste_module ] addr -> bool
+
+  val get_haste_name : [ `haste_module ] addr -> [ `string ] addr
+
+  val get_haste_provider : [ `haste_module ] addr -> [ `file ] entity addr
+
+  val get_haste_dependents : [ `haste_module ] addr -> [ `file ] sklist addr
+
+  val add_haste_provider : [ `haste_module ] addr -> [ `file ] addr -> [ `haste_info ] addr -> unit
+
+  val get_haste_all_providers_exclusive : [ `haste_module ] addr -> [ `file ] addr list
+
+  val remove_haste_provider_exclusive : [ `haste_module ] addr -> [ `file ] addr -> unit
+
+  (* file sets *)
+
+  val file_set_add : [ `file ] sklist addr -> [ `file ] sknode addr -> bool
+
+  val file_set_remove : [ `file ] sklist addr -> [ `file ] addr -> bool
+
+  val file_set_mem : [ `file ] sklist addr -> [ `file ] addr -> bool
 end

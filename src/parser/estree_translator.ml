@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -51,7 +51,6 @@ with type t = Impl.t = struct
       | Some (File_key.JsonFile src)
       | Some (File_key.ResourceFile src) ->
         string src
-      | Some File_key.Builtins -> string "(global)"
       | None -> null
     in
     obj
@@ -160,13 +159,13 @@ with type t = Impl.t = struct
           [("object", expression _object); ("body", statement body)]
       | (loc, TypeAlias alias) -> type_alias (loc, alias)
       | (loc, OpaqueType opaque_t) -> opaque_type ~declare:false (loc, opaque_t)
-      | (loc, Switch { Switch.discriminant; cases; comments }) ->
+      | (loc, Switch { Switch.discriminant; cases; comments; exhaustive_out = _ }) ->
         node
           ?comments
           "SwitchStatement"
           loc
           [("discriminant", expression discriminant); ("cases", array_of_list case cases)]
-      | (loc, Return { Return.argument; comments }) ->
+      | (loc, Return { Return.argument; comments; return_out = _ }) ->
         node ?comments "ReturnStatement" loc [("argument", option expression argument)]
       | (loc, Throw { Throw.argument; comments }) ->
         node ?comments "ThrowStatement" loc [("argument", expression argument)]
@@ -240,6 +239,7 @@ with type t = Impl.t = struct
       | (loc, DeclareVariable d) -> declare_variable (loc, d)
       | (loc, DeclareFunction d) -> declare_function (loc, d)
       | (loc, DeclareClass d) -> declare_class (loc, d)
+      | (loc, DeclareEnum enum) -> declare_enum (loc, enum)
       | (loc, DeclareInterface i) -> declare_interface (loc, i)
       | (loc, DeclareTypeAlias a) -> declare_type_alias (loc, a)
       | (loc, DeclareOpaqueType t) -> opaque_type ~declare:true (loc, t)
@@ -258,79 +258,79 @@ with type t = Impl.t = struct
             ("body", block body);
             ( "kind",
               match kind with
-              | DeclareModule.CommonJS _ -> string "CommonJS"
-              | DeclareModule.ES _ -> string "ES"
+              | DeclareModule.CommonJS -> string "CommonJS"
+              | DeclareModule.ES -> string "ES"
             );
           ]
       | ( loc,
           DeclareExportDeclaration
             { DeclareExportDeclaration.specifiers; declaration; default; source; comments }
-        ) ->
-        begin
-          match specifiers with
-          | Some (ExportNamedDeclaration.ExportBatchSpecifier (_, None)) ->
-            node
-              ?comments
-              "DeclareExportAllDeclaration"
-              loc
-              [("source", option string_literal source)]
-          | _ ->
-            let declaration =
-              match declaration with
-              | Some (DeclareExportDeclaration.Variable v) -> declare_variable v
-              | Some (DeclareExportDeclaration.Function f) -> declare_function f
-              | Some (DeclareExportDeclaration.Class c) -> declare_class c
-              | Some (DeclareExportDeclaration.DefaultType t) -> _type t
-              | Some (DeclareExportDeclaration.NamedType t) -> type_alias t
-              | Some (DeclareExportDeclaration.NamedOpaqueType t) -> opaque_type ~declare:true t
-              | Some (DeclareExportDeclaration.Interface i) -> interface_declaration i
-              | None -> null
-            in
-            node
-              ?comments
-              "DeclareExportDeclaration"
-              loc
-              [
-                ( "default",
-                  bool
-                    (match default with
-                    | Some _ -> true
-                    | None -> false)
-                );
-                ("declaration", declaration);
-                ("specifiers", export_specifiers specifiers);
-                ("source", option string_literal source);
-              ]
-        end
+        ) -> begin
+        match specifiers with
+        | Some (ExportNamedDeclaration.ExportBatchSpecifier (_, None)) ->
+          node
+            ?comments
+            "DeclareExportAllDeclaration"
+            loc
+            [("source", option string_literal source)]
+        | _ ->
+          let declaration =
+            match declaration with
+            | Some (DeclareExportDeclaration.Variable v) -> declare_variable v
+            | Some (DeclareExportDeclaration.Function f) -> declare_function f
+            | Some (DeclareExportDeclaration.Class c) -> declare_class c
+            | Some (DeclareExportDeclaration.DefaultType t) -> _type t
+            | Some (DeclareExportDeclaration.NamedType t) -> type_alias t
+            | Some (DeclareExportDeclaration.NamedOpaqueType t) -> opaque_type ~declare:true t
+            | Some (DeclareExportDeclaration.Interface i) -> interface_declaration i
+            | Some (DeclareExportDeclaration.Enum enum) -> declare_enum enum
+            | None -> null
+          in
+          node
+            ?comments
+            "DeclareExportDeclaration"
+            loc
+            [
+              ( "default",
+                bool
+                  (match default with
+                  | Some _ -> true
+                  | None -> false)
+              );
+              ("declaration", declaration);
+              ("specifiers", export_specifiers specifiers);
+              ("source", option string_literal source);
+            ]
+      end
       | (loc, DeclareModuleExports { DeclareModuleExports.annot; comments }) ->
         node ?comments "DeclareModuleExports" loc [("typeAnnotation", type_annotation annot)]
       | ( loc,
           ExportNamedDeclaration
             { ExportNamedDeclaration.specifiers; declaration; source; export_kind; comments }
-        ) ->
-        begin
-          match specifiers with
-          | Some (ExportNamedDeclaration.ExportBatchSpecifier (_, None)) ->
-            node
-              ?comments
-              "ExportAllDeclaration"
-              loc
-              [
-                ("source", option string_literal source);
-                ("exportKind", string (string_of_export_kind export_kind));
-              ]
-          | _ ->
-            node
-              ?comments
-              "ExportNamedDeclaration"
-              loc
-              [
-                ("declaration", option statement declaration);
-                ("specifiers", export_specifiers specifiers);
-                ("source", option string_literal source);
-                ("exportKind", string (string_of_export_kind export_kind));
-              ]
-        end
+        ) -> begin
+        match specifiers with
+        | Some (ExportNamedDeclaration.ExportBatchSpecifier (_, exported)) ->
+          node
+            ?comments
+            "ExportAllDeclaration"
+            loc
+            [
+              ("source", option string_literal source);
+              ("exported", option identifier exported);
+              ("exportKind", string (string_of_export_kind export_kind));
+            ]
+        | _ ->
+          node
+            ?comments
+            "ExportNamedDeclaration"
+            loc
+            [
+              ("declaration", option statement declaration);
+              ("specifiers", export_specifiers specifiers);
+              ("source", option string_literal source);
+              ("exportKind", string (string_of_export_kind export_kind));
+            ]
+      end
       | ( loc,
           ExportDefaultDeclaration
             {
@@ -497,6 +497,22 @@ with type t = Impl.t = struct
           "TypeCastExpression"
           loc
           [("expression", expression expr); ("typeAnnotation", type_annotation annot)]
+      | ( loc,
+          TSTypeCast { TSTypeCast.expression = expr; kind = TSTypeCast.Satisfies annot; comments }
+        ) ->
+        node
+          ?comments
+          "SatisfiesExpression"
+          loc
+          [("expression", expression expr); ("typeAnnotation", _type annot)]
+      | (loc, TSTypeCast { TSTypeCast.expression = expr; kind = TSTypeCast.As annot; comments }) ->
+        node
+          ?comments
+          "AsExpression"
+          loc
+          [("expression", expression expr); ("typeAnnotation", _type annot)]
+      | (loc, TSTypeCast { TSTypeCast.expression = expr; kind = TSTypeCast.AsConst; comments }) ->
+        node ?comments "AsConstExpression" loc [("expression", expression expr)]
       | (loc, Assignment { Assignment.left; operator; right; comments }) ->
         let operator =
           match operator with
@@ -580,6 +596,7 @@ with type t = Impl.t = struct
                 { Call.comments; arguments = (_, { ArgList.comments = args_comments; _ }); _ } as
                 call;
               optional;
+              filtered_out = _;
             }
         ) ->
         let comments =
@@ -594,14 +611,16 @@ with type t = Impl.t = struct
           (call_node_properties call @ [("optional", bool optional)])
       | (loc, Member ({ Member.comments; _ } as member)) ->
         node ?comments "MemberExpression" loc (member_node_properties member)
-      | (loc, OptionalMember { OptionalMember.member = { Member.comments; _ } as member; optional })
-        ->
+      | ( loc,
+          OptionalMember
+            { OptionalMember.member = { Member.comments; _ } as member; optional; filtered_out = _ }
+        ) ->
         node
           ?comments
           "OptionalMemberExpression"
           loc
           (member_node_properties member @ [("optional", bool optional)])
-      | (loc, Yield { Yield.argument; delegate; comments }) ->
+      | (loc, Yield { Yield.argument; delegate; comments; result_out = _ }) ->
         node
           ?comments
           "YieldExpression"
@@ -624,8 +643,6 @@ with type t = Impl.t = struct
             ("filter", option expression filter);
           ]
       | (_loc, Identifier id) -> identifier id
-      | (loc, Literal ({ Literal.value = Ast.Literal.BigInt _; _ } as lit)) ->
-        bigint_literal (loc, lit)
       | (loc, Literal lit) -> literal (loc, lit)
       | (loc, TemplateLiteral lit) -> template_literal (loc, lit)
       | (loc, TaggedTemplate tagged) -> tagged_template (loc, tagged)
@@ -828,6 +845,8 @@ with type t = Impl.t = struct
           ("implements", implements);
           ("mixins", array_of_list interface_extends mixins);
         ]
+    and declare_enum (loc, { Statement.EnumDeclaration.id; body; comments }) =
+      node ?comments "DeclareEnum" loc [("id", identifier id); ("body", enum_body body)]
     and declare_interface (loc, { Statement.Interface.id; tparams; body; extends; comments }) =
       node
         ?comments
@@ -1031,86 +1050,96 @@ with type t = Impl.t = struct
           []
       in
       node ?comments "PropertyDefinition" loc props
-    and enum_declaration (loc, { Statement.EnumDeclaration.id; body; comments }) =
+    and enum_body body =
       let open Statement.EnumDeclaration in
-      let enum_body =
-        match body with
-        | (loc, BooleanBody { BooleanBody.members; explicit_type; has_unknown_members; comments })
-          ->
-          node
-            ?comments:(format_internal_comments comments)
-            "EnumBooleanBody"
-            loc
-            [
-              ( "members",
-                array_of_list
-                  (fun (loc, { InitializedMember.id; init }) ->
-                    node
-                      "EnumBooleanMember"
-                      loc
-                      [("id", identifier id); ("init", boolean_literal init)])
-                  members
-              );
-              ("explicitType", bool explicit_type);
-              ("hasUnknownMembers", bool has_unknown_members);
-            ]
-        | (loc, NumberBody { NumberBody.members; explicit_type; has_unknown_members; comments }) ->
-          node
-            ?comments:(format_internal_comments comments)
-            "EnumNumberBody"
-            loc
-            [
-              ( "members",
-                array_of_list
-                  (fun (loc, { InitializedMember.id; init }) ->
-                    node
-                      "EnumNumberMember"
-                      loc
-                      [("id", identifier id); ("init", number_literal init)])
-                  members
-              );
-              ("explicitType", bool explicit_type);
-              ("hasUnknownMembers", bool has_unknown_members);
-            ]
-        | (loc, StringBody { StringBody.members; explicit_type; has_unknown_members; comments }) ->
-          let members =
-            match members with
-            | StringBody.Defaulted defaulted_members ->
-              List.map
+      match body with
+      | (loc, BooleanBody { BooleanBody.members; explicit_type; has_unknown_members; comments }) ->
+        node
+          ?comments:(format_internal_comments comments)
+          "EnumBooleanBody"
+          loc
+          [
+            ( "members",
+              array_of_list
+                (fun (loc, { InitializedMember.id; init }) ->
+                  node
+                    "EnumBooleanMember"
+                    loc
+                    [("id", identifier id); ("init", boolean_literal init)])
+                members
+            );
+            ("explicitType", bool explicit_type);
+            ("hasUnknownMembers", bool has_unknown_members);
+          ]
+      | (loc, NumberBody { NumberBody.members; explicit_type; has_unknown_members; comments }) ->
+        node
+          ?comments:(format_internal_comments comments)
+          "EnumNumberBody"
+          loc
+          [
+            ( "members",
+              array_of_list
+                (fun (loc, { InitializedMember.id; init }) ->
+                  node "EnumNumberMember" loc [("id", identifier id); ("init", number_literal init)])
+                members
+            );
+            ("explicitType", bool explicit_type);
+            ("hasUnknownMembers", bool has_unknown_members);
+          ]
+      | (loc, StringBody { StringBody.members; explicit_type; has_unknown_members; comments }) ->
+        let members =
+          match members with
+          | StringBody.Defaulted defaulted_members ->
+            List.map
+              (fun (loc, { DefaultedMember.id }) ->
+                node "EnumDefaultedMember" loc [("id", identifier id)])
+              defaulted_members
+          | StringBody.Initialized initialized_members ->
+            List.map
+              (fun (loc, { InitializedMember.id; init }) ->
+                node "EnumStringMember" loc [("id", identifier id); ("init", string_literal init)])
+              initialized_members
+        in
+        node
+          ?comments:(format_internal_comments comments)
+          "EnumStringBody"
+          loc
+          [
+            ("members", array members);
+            ("explicitType", bool explicit_type);
+            ("hasUnknownMembers", bool has_unknown_members);
+          ]
+      | (loc, SymbolBody { SymbolBody.members; has_unknown_members; comments }) ->
+        node
+          ?comments:(format_internal_comments comments)
+          "EnumSymbolBody"
+          loc
+          [
+            ( "members",
+              array_of_list
                 (fun (loc, { DefaultedMember.id }) ->
                   node "EnumDefaultedMember" loc [("id", identifier id)])
-                defaulted_members
-            | StringBody.Initialized initialized_members ->
-              List.map
+                members
+            );
+            ("hasUnknownMembers", bool has_unknown_members);
+          ]
+      | (loc, BigIntBody { BigIntBody.members; explicit_type; has_unknown_members; comments }) ->
+        node
+          ?comments:(format_internal_comments comments)
+          "EnumBigIntBody"
+          loc
+          [
+            ( "members",
+              array_of_list
                 (fun (loc, { InitializedMember.id; init }) ->
-                  node "EnumStringMember" loc [("id", identifier id); ("init", string_literal init)])
-                initialized_members
-          in
-          node
-            ?comments:(format_internal_comments comments)
-            "EnumStringBody"
-            loc
-            [
-              ("members", array members);
-              ("explicitType", bool explicit_type);
-              ("hasUnknownMembers", bool has_unknown_members);
-            ]
-        | (loc, SymbolBody { SymbolBody.members; has_unknown_members; comments }) ->
-          node
-            ?comments:(format_internal_comments comments)
-            "EnumSymbolBody"
-            loc
-            [
-              ( "members",
-                array_of_list
-                  (fun (loc, { DefaultedMember.id }) ->
-                    node "EnumDefaultedMember" loc [("id", identifier id)])
-                  members
-              );
-              ("hasUnknownMembers", bool has_unknown_members);
-            ]
-      in
-      node ?comments "EnumDeclaration" loc [("id", identifier id); ("body", enum_body)]
+                  node "EnumBigIntMember" loc [("id", identifier id); ("init", bigint_literal init)])
+                members
+            );
+            ("explicitType", bool explicit_type);
+            ("hasUnknownMembers", bool has_unknown_members);
+          ]
+    and enum_declaration (loc, { Statement.EnumDeclaration.id; body; comments }) =
+      node ?comments "EnumDeclaration" loc [("id", identifier id); ("body", enum_body body)]
     and interface_declaration (loc, { Statement.Interface.id; tparams; body; extends; comments }) =
       node
         ?comments
@@ -1243,7 +1272,7 @@ with type t = Impl.t = struct
             ]
         )
       | SpreadProperty (loc, { SpreadProperty.argument; comments }) ->
-        node ?comments "SpreadProperty" loc [("argument", expression argument)]
+        node ?comments "SpreadElement" loc [("argument", expression argument)]
     and object_pattern_property =
       let open Pattern.Object in
       function
@@ -1293,28 +1322,11 @@ with type t = Impl.t = struct
         "ComprehensionBlock"
         loc
         [("left", pattern left); ("right", expression right); ("each", bool each)]
-    and literal (loc, { Literal.value; raw; comments }) =
-      let value_ =
-        match value with
-        | Literal.String str -> string str
-        | Literal.Boolean b -> bool b
-        | Literal.Null -> null
-        | Literal.Number f -> number f
-        | Literal.BigInt _ -> failwith "We should not create Literal nodes for bigints"
-        | Literal.RegExp { Literal.RegExp.pattern; flags } -> regexp loc pattern flags
-      in
-      let props =
-        match value with
-        | Literal.RegExp { Literal.RegExp.pattern; flags } ->
-          let regex = obj [("pattern", string pattern); ("flags", string flags)] in
-          [("value", value_); ("raw", string raw); ("regex", regex)]
-        | _ -> [("value", value_); ("raw", string raw)]
-      in
-      node ?comments "Literal" loc props
     and number_literal (loc, { NumberLiteral.value; raw; comments }) =
       node ?comments "Literal" loc [("value", number value); ("raw", string raw)]
-    and bigint_literal (loc, { Literal.raw; comments; _ }) =
-      node ?comments "BigIntLiteral" loc [("value", null); ("bigint", string raw)]
+    and bigint_literal (loc, { BigIntLiteral.raw; comments; _ }) =
+      let bigint = String.sub raw 0 (String.length raw - 1) in
+      node ?comments "Literal" loc [("value", null); ("bigint", string bigint); ("raw", string raw)]
     and string_literal (loc, { StringLiteral.value; raw; comments }) =
       node ?comments "Literal" loc [("value", string value); ("raw", string raw)]
     and boolean_literal (loc, { BooleanLiteral.value; comments }) =
@@ -1325,6 +1337,20 @@ with type t = Impl.t = struct
           "false"
       in
       node ?comments "Literal" loc [("value", bool value); ("raw", string raw)]
+    and regexp_literal (loc, { Literal.raw; comments; _ }, { Literal.RegExp.pattern; flags }) =
+      let value = regexp loc pattern flags in
+      let regex = obj [("pattern", string pattern); ("flags", string flags)] in
+      node ?comments "Literal" loc [("value", value); ("raw", string raw); ("regex", regex)]
+    and null_literal (loc, { Literal.raw; comments; _ }) =
+      node ?comments "Literal" loc [("value", null); ("raw", string raw)]
+    and literal (loc, ({ Literal.value; raw; comments } as lit)) =
+      match value with
+      | Literal.String str -> string_literal (loc, { StringLiteral.value = str; raw; comments })
+      | Literal.Boolean b -> boolean_literal (loc, { BooleanLiteral.value = b; comments })
+      | Literal.Null -> null_literal (loc, lit)
+      | Literal.Number f -> number_literal (loc, { NumberLiteral.value = f; raw; comments })
+      | Literal.BigInt n -> bigint_literal (loc, { BigIntLiteral.value = n; raw; comments })
+      | Literal.RegExp r -> regexp_literal (loc, lit, r)
     and template_literal (loc, { Expression.TemplateLiteral.quasis; expressions; comments }) =
       node
         ?comments
@@ -1365,14 +1391,17 @@ with type t = Impl.t = struct
     and variable_declarator (loc, { Statement.VariableDeclaration.Declarator.id; init }) =
       node "VariableDeclarator" loc [("id", pattern id); ("init", option expression init)]
     and variance (loc, { Variance.kind; comments }) =
-      let kind =
-        Variance.(
-          match kind with
-          | Plus -> string "plus"
-          | Minus -> string "minus"
-        )
+      let open Variance in
+      let kind_str =
+        match kind with
+        | Plus -> "plus"
+        | Minus -> "minus"
+        | Readonly -> "readonly"
+        | In -> "in"
+        | Out -> "out"
+        | InOut -> "in-out"
       in
-      node ?comments "Variance" loc [("kind", kind)]
+      node ?comments "Variance" loc [("kind", string kind_str)]
     and _type (loc, t) =
       Type.(
         match t with
@@ -1385,7 +1414,7 @@ with type t = Impl.t = struct
         | Number comments -> number_type loc comments
         | BigInt comments -> bigint_type loc comments
         | String comments -> string_type loc comments
-        | Boolean comments -> boolean_type loc comments
+        | Boolean { raw = _; comments } -> boolean_type loc comments
         | Nullable t -> nullable_type loc t
         | Function fn -> function_type (loc, fn)
         | Object o -> object_type ~include_inexact:true (loc, o)
@@ -1397,12 +1426,17 @@ with type t = Impl.t = struct
         | Union t -> union_type (loc, t)
         | Intersection t -> intersection_type (loc, t)
         | Typeof t -> typeof_type (loc, t)
+        | Keyof t -> keyof_type (loc, t)
+        | ReadOnly t -> read_only_type (loc, t)
         | Tuple t -> tuple_type (loc, t)
         | StringLiteral s -> string_literal_type (loc, s)
         | NumberLiteral n -> number_literal_type (loc, n)
         | BigIntLiteral n -> bigint_literal_type (loc, n)
         | BooleanLiteral b -> boolean_literal_type (loc, b)
         | Exists comments -> exists_type loc comments
+        | Unknown comments -> unknown_type loc comments
+        | Never comments -> never_type loc comments
+        | Undefined comments -> undefined_type loc comments
       )
     and any_type loc comments = node ?comments "AnyTypeAnnotation" loc []
     and mixed_type loc comments = node ?comments "MixedTypeAnnotation" loc []
@@ -1416,6 +1450,9 @@ with type t = Impl.t = struct
     and boolean_type loc comments = node ?comments "BooleanTypeAnnotation" loc []
     and nullable_type loc { Type.Nullable.argument; comments } =
       node ?comments "NullableTypeAnnotation" loc [("typeAnnotation", _type argument)]
+    and unknown_type loc comments = node ?comments "UnknownTypeAnnotation" loc []
+    and never_type loc comments = node ?comments "NeverTypeAnnotation" loc []
+    and undefined_type loc comments = node ?comments "UndefinedTypeAnnotation" loc []
     and function_type
         ( loc,
           {
@@ -1649,8 +1686,43 @@ with type t = Impl.t = struct
     and typeof_qualifier (loc, { Type.Typeof.Target.id; qualification }) =
       let qualification = typeof_expr qualification in
       node "QualifiedTypeofIdentifier" loc [("qualification", qualification); ("id", identifier id)]
-    and tuple_type (loc, { Type.Tuple.types; comments }) =
-      node ?comments "TupleTypeAnnotation" loc [("types", array_of_list _type types)]
+    and keyof_type (loc, { Type.Keyof.argument; comments }) =
+      node ?comments "KeyofTypeAnnotation" loc [("argument", _type argument)]
+    and read_only_type (loc, { Type.ReadOnly.argument; comments }) =
+      node ?comments "ReadOnlyTypeAnnotation" loc [("argument", _type argument)]
+    and tuple_type (loc, { Type.Tuple.elements; comments }) =
+      node
+        ?comments
+        "TupleTypeAnnotation"
+        loc
+        [
+          ( "elementTypes",
+            array_of_list
+              (function
+                | (_, Type.Tuple.UnlabeledElement annot) -> _type annot
+                | (loc, Type.Tuple.LabeledElement e) -> tuple_labeled_element loc e
+                | (loc, Type.Tuple.SpreadElement e) -> tuple_spread_element loc e)
+              elements
+          );
+        ]
+    and tuple_labeled_element
+        ?comments loc { Type.Tuple.LabeledElement.name; annot; variance = variance_; optional } =
+      node
+        ?comments
+        "TupleTypeLabeledElement"
+        loc
+        [
+          ("label", identifier name);
+          ("elementType", _type annot);
+          ("variance", option variance variance_);
+          ("optional", bool optional);
+        ]
+    and tuple_spread_element ?comments loc { Type.Tuple.SpreadElement.name; annot } =
+      node
+        ?comments
+        "TupleTypeSpreadElement"
+        loc
+        [("label", option identifier name); ("typeAnnotation", _type annot)]
     and string_literal_type (loc, { Ast.StringLiteral.value; raw; comments }) =
       node
         ?comments
@@ -1663,8 +1735,7 @@ with type t = Impl.t = struct
         "NumberLiteralTypeAnnotation"
         loc
         [("value", number value); ("raw", string raw)]
-    and bigint_literal_type (loc, { Ast.BigIntLiteral.bigint; comments; _ }) =
-      let raw = bigint in
+    and bigint_literal_type (loc, { Ast.BigIntLiteral.raw; comments; _ }) =
       node ?comments "BigIntLiteralTypeAnnotation" loc [("value", null); ("raw", string raw)]
     and boolean_literal_type (loc, { Ast.BooleanLiteral.value; comments }) =
       node
@@ -1695,6 +1766,7 @@ with type t = Impl.t = struct
           {
             Type.TypeParam.name = (_, { Identifier.name; comments });
             bound;
+            bound_kind;
             variance = tp_var;
             default;
           }
@@ -1703,14 +1775,19 @@ with type t = Impl.t = struct
         ?comments
         "TypeParameter"
         loc
-        [
-          (* we track the location of the name, but don't expose it here for
-             backwards-compatibility. TODO: change this? *)
-          ("name", string name);
-          ("bound", hint type_annotation bound);
-          ("variance", option variance tp_var);
-          ("default", option _type default);
-        ]
+        ([
+           (* we track the location of the name, but don't expose it here for
+              backwards-compatibility. TODO: change this? *)
+           ("name", string name);
+           ("bound", hint type_annotation bound);
+           ("variance", option variance tp_var);
+           ("default", option _type default);
+         ]
+        @
+        match bound_kind with
+        | Type.TypeParam.Colon -> []
+        | Type.TypeParam.Extends -> [("usesExtendsBound", bool true)]
+        )
     and type_args (loc, { Type.TypeArgs.arguments; comments }) =
       node
         ?comments:(format_internal_comments comments)
@@ -1821,13 +1898,12 @@ with type t = Impl.t = struct
         | JSX.ExpressionContainer.Expression expr -> expression expr
         | JSX.ExpressionContainer.EmptyExpression ->
           let empty_loc =
-            Loc.
-              {
-                loc with
-                start = { loc.start with column = loc.start.column + 1 };
-                _end = { loc._end with column = loc._end.column - 1 };
-              }
-            
+            let open Loc in
+            {
+              loc with
+              start = { loc.start with column = loc.start.column + 1 };
+              _end = { loc._end with column = loc._end.column - 1 };
+            }
           in
 
           node "JSXEmptyExpression" empty_loc []

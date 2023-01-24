@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -185,8 +185,8 @@ let standard_list_diff (old_list : 'a list) (new_list : 'a list) : 'a diff_resul
         (* We are only removing the first element of the insertion. We make sure to indicate
            that the rest of the insert should have a leading separator between it and the replace. *)
         (i2, Replace (y, x))
-        ::
-        convert_to_replace ((i2, Insert { items = rst; separator; leading_separator = true }) :: t)
+        :: convert_to_replace
+             ((i2, Insert { items = rst; separator; leading_separator = true }) :: t)
       | h :: t -> h :: convert_to_replace t
     in
     (* Deletes are added for every element of old_list that does not have a
@@ -899,18 +899,26 @@ let program
       let id = diff_if_changed_nonopt_fn identifier id1 id2 in
       let tparams = diff_if_changed_opt type_params tparams1 tparams2 in
       let params = diff_if_changed_ret_opt function_params params1 params2 in
+      let returns = diff_if_changed type_annotation_hint return1 return2 |> Base.Option.return in
       let params =
-        match (is_arrow, params1, params2, params) with
+        match (is_arrow, params1, params2, params, returns) with
+        (* reprint the parameter if it's the single parameter of a lambda, or when return annotation
+           has changed to add () to avoid syntax errors. *)
         | ( true,
             (l, { Params.params = [_p1]; rest = None; this_ = None; comments = _ }),
             (_, { Params.params = [_p2]; rest = None; this_ = None; comments = _ }),
-            Some [_]
+            Some [_],
+            _
+          )
+        | ( true,
+            (l, { Params.params = [_p1]; rest = None; this_ = None; comments = _ }),
+            (_, { Params.params = [_p2]; rest = None; this_ = None; comments = _ }),
+            _,
+            Some (_ :: _)
           ) ->
-          (* reprint the parameter if it's the single parameter of a lambda to add () *)
           Some [replace l (Params params1) (Params params2)]
         | _ -> params
       in
-      let returns = diff_if_changed type_annotation_hint return1 return2 |> Base.Option.return in
       let fnbody = diff_if_changed_ret_opt function_body_any body1 body2 in
       let comments = syntax_opt loc comments1 comments2 in
       join_diff_list [id; tparams; params; returns; fnbody; comments]
@@ -1348,6 +1356,7 @@ let program
       | ((loc, TypeCast t1), (_, TypeCast t2)) -> Some (type_cast loc t1 t2)
       | ((loc, Logical l1), (_, Logical l2)) -> logical loc l1 l2
       | ((loc, Array arr1), (_, Array arr2)) -> array loc arr1 arr2
+      | ((_, TSTypeCast _), (_, TypeCast _)) -> None
       | (expr, (loc, TypeCast t2)) -> Some (type_cast_added parent expr loc t2)
       | ((loc, Update update1), (_, Update update2)) -> update loc update1 update2
       | ((loc, Sequence seq1), (_, Sequence seq2)) -> sequence loc seq1 seq2
@@ -1396,10 +1405,10 @@ let program
       ((loc1, lit1) : Loc.t * Loc.t Ast.BigIntLiteral.t)
       ((loc2, lit2) : Loc.t * Loc.t Ast.BigIntLiteral.t) : node change list option =
     let open Ast.BigIntLiteral in
-    let { approx_value = value1; bigint = bigint1; comments = comments1 } = lit1 in
-    let { approx_value = value2; bigint = bigint2; comments = comments2 } = lit2 in
+    let { value = value1; raw = raw1; comments = comments1 } = lit1 in
+    let { value = value2; raw = raw2; comments = comments2 } = lit2 in
     let value_diff =
-      if value1 = value2 && String.equal bigint1 bigint2 then
+      if value1 = value2 && String.equal raw1 raw2 then
         Some []
       else
         Some [replace loc1 (BigIntLiteral (loc1, lit1)) (BigIntLiteral (loc2, lit2))]
@@ -2158,17 +2167,20 @@ let program
       (stmt1 : (Loc.t, Loc.t) Ast.Statement.Return.t)
       (stmt2 : (Loc.t, Loc.t) Ast.Statement.Return.t) : node change list option =
     let open Ast.Statement.Return in
-    let { argument = argument1; comments = comments1 } = stmt1 in
-    let { argument = argument2; comments = comments2 } = stmt2 in
-    let comments = syntax_opt loc comments1 comments2 in
-    join_diff_list
-      [
-        comments;
-        diff_if_changed_nonopt_fn
-          (expression ~parent:(StatementParentOfExpression (loc, Ast.Statement.Return stmt2)))
-          argument1
-          argument2;
-      ]
+    let { argument = argument1; comments = comments1; return_out = ro1 } = stmt1 in
+    let { argument = argument2; comments = comments2; return_out = ro2 } = stmt2 in
+    if ro1 != ro2 then
+      None
+    else
+      let comments = syntax_opt loc comments1 comments2 in
+      join_diff_list
+        [
+          comments;
+          diff_if_changed_nonopt_fn
+            (expression ~parent:(StatementParentOfExpression (loc, Ast.Statement.Return stmt2)))
+            argument1
+            argument2;
+        ]
   and throw_statement
       loc
       (stmt1 : (Loc.t, Loc.t) Ast.Statement.Throw.t)
@@ -2202,19 +2214,28 @@ let program
       (stmt1 : (Loc.t, Loc.t) Ast.Statement.Switch.t)
       (stmt2 : (Loc.t, Loc.t) Ast.Statement.Switch.t) : node change list option =
     let open Ast.Statement.Switch in
-    let { discriminant = discriminant1; cases = cases1; comments = comments1 } = stmt1 in
-    let { discriminant = discriminant2; cases = cases2; comments = comments2 } = stmt2 in
-    let discriminant =
-      Some
-        (diff_if_changed
-           (expression ~parent:(StatementParentOfExpression (loc, Ast.Statement.Switch stmt2)))
-           discriminant1
-           discriminant2
-        )
+    let { discriminant = discriminant1; cases = cases1; comments = comments1; exhaustive_out = ex1 }
+        =
+      stmt1
     in
-    let cases = diff_and_recurse_no_trivial switch_case cases1 cases2 in
-    let comments = syntax_opt loc comments1 comments2 in
-    join_diff_list [discriminant; cases; comments]
+    let { discriminant = discriminant2; cases = cases2; comments = comments2; exhaustive_out = ex2 }
+        =
+      stmt2
+    in
+    if ex1 != ex2 then
+      None
+    else
+      let discriminant =
+        Some
+          (diff_if_changed
+             (expression ~parent:(StatementParentOfExpression (loc, Ast.Statement.Switch stmt2)))
+             discriminant1
+             discriminant2
+          )
+      in
+      let cases = diff_and_recurse_no_trivial switch_case cases1 cases2 in
+      let comments = syntax_opt loc comments1 comments2 in
+      join_diff_list [discriminant; cases; comments]
   and switch_case
       ((loc, s1) : (Loc.t, Loc.t) Ast.Statement.Switch.Case.t)
       ((_, s2) : (Loc.t, Loc.t) Ast.Statement.Switch.Case.t) : node change list option =
@@ -2366,9 +2387,13 @@ let program
       | (Number c1, Number c2)
       | (BigInt c1, BigInt c2)
       | (String c1, String c2)
-      | (Boolean c1, Boolean c2)
       | (Exists c1, Exists c2) ->
         diff_if_changed_ret_opt (syntax_opt loc1) c1 c2
+      | (Boolean { raw = r1; comments = c1 }, Boolean { raw = r2; comments = c2 }) ->
+        if r1 == r2 then
+          diff_if_changed_ret_opt (syntax_opt loc1) c1 c2
+        else
+          None
       | (Function fn1, Function fn2) -> diff_if_changed_ret_opt (function_type loc1) fn1 fn2
       | (Interface i1, Interface i2) -> diff_if_changed_ret_opt (interface_type loc1) i1 i2
       | (Generic g1, Generic g2) -> diff_if_changed_ret_opt (generic_type loc1) g1 g2
@@ -2609,11 +2634,46 @@ let program
       (loc : Loc.t) (t1 : (Loc.t, Loc.t) Ast.Type.Tuple.t) (t2 : (Loc.t, Loc.t) Ast.Type.Tuple.t) :
       node change list option =
     let open Ast.Type.Tuple in
-    let { types = types1; comments = comments1 } = t1 in
-    let { types = types2; comments = comments2 } = t2 in
-    let types_diff = diff_and_recurse_nonopt_no_trivial type_ types1 types2 in
+    let { elements = elements1; comments = comments1 } = t1 in
+    let { elements = elements2; comments = comments2 } = t2 in
+    let elements_diff = diff_and_recurse_no_trivial tuple_element elements1 elements2 in
     let comments_diff = syntax_opt loc comments1 comments2 in
-    join_diff_list [types_diff; comments_diff]
+    join_diff_list [elements_diff; comments_diff]
+  and tuple_element
+      (e1 : (Loc.t, Loc.t) Ast.Type.Tuple.element) (e2 : (Loc.t, Loc.t) Ast.Type.Tuple.element) :
+      node change list option =
+    let open Ast.Type.Tuple in
+    match (e1, e2) with
+    | ((_, UnlabeledElement annot1), (_, UnlabeledElement annot2)) ->
+      Some (diff_if_changed type_ annot1 annot2)
+    | ((_, LabeledElement e1), (_, LabeledElement e2)) -> tuple_labeled_element e1 e2
+    | ((_, SpreadElement e1), (_, SpreadElement e2)) -> tuple_spread_element e1 e2
+    | _ -> None
+  and tuple_labeled_element
+      (t1 : (Loc.t, Loc.t) Ast.Type.Tuple.LabeledElement.t)
+      (t2 : (Loc.t, Loc.t) Ast.Type.Tuple.LabeledElement.t) : node change list option =
+    let open Ast.Type.Tuple.LabeledElement in
+    let { name = name1; annot = annot1; variance = var1; optional = opt1 } = t1 in
+    let { name = name2; annot = annot2; variance = var2; optional = opt2 } = t2 in
+    let name_diff = Some (diff_if_changed identifier name1 name2) in
+    let annot_diff = Some (diff_if_changed type_ annot1 annot2) in
+    let variance_diff = diff_if_changed_ret_opt variance var1 var2 in
+    let optional_diff =
+      if opt1 = opt2 then
+        Some []
+      else
+        None
+    in
+    join_diff_list [name_diff; annot_diff; variance_diff; optional_diff]
+  and tuple_spread_element
+      (e1 : (Loc.t, Loc.t) Ast.Type.Tuple.SpreadElement.t)
+      (e2 : (Loc.t, Loc.t) Ast.Type.Tuple.SpreadElement.t) : node change list option =
+    let open Ast.Type.Tuple.SpreadElement in
+    let { name = name1; annot = annot1 } = e1 in
+    let { name = name2; annot = annot2 } = e2 in
+    let name_diff = diff_if_changed_nonopt_fn identifier name1 name2 in
+    let annot_diff = Some (diff_if_changed type_ annot1 annot2) in
+    join_diff_list [name_diff; annot_diff]
   and type_args (pi1 : (Loc.t, Loc.t) Ast.Type.TypeArgs.t) (pi2 : (Loc.t, Loc.t) Ast.Type.TypeArgs.t)
       : node change list option =
     let open Ast.Type.TypeArgs in
@@ -3048,19 +3108,45 @@ let program
       ((loc1, t_param1) : (Loc.t, Loc.t) Ast.Type.TypeParam.t)
       ((_, t_param2) : (Loc.t, Loc.t) Ast.Type.TypeParam.t) : node change list =
     let open Ast.Type.TypeParam in
-    let { name = name1; bound = bound1; variance = variance1; default = default1 } = t_param1 in
-    let { name = name2; bound = bound2; variance = variance2; default = default2 } = t_param2 in
+    let {
+      name = name1;
+      bound = bound1;
+      bound_kind = bound_kind1;
+      variance = variance1;
+      default = default1;
+    } =
+      t_param1
+    in
+    let {
+      name = name2;
+      bound = bound2;
+      bound_kind = bound_kind2;
+      variance = variance2;
+      default = default2;
+    } =
+      t_param2
+    in
     let variance_diff = diff_if_changed_ret_opt variance variance1 variance2 in
     let name_diff = diff_if_changed identifier name1 name2 |> Base.Option.return in
     let bound_diff = diff_if_changed type_annotation_hint bound1 bound2 |> Base.Option.return in
+    let bound_kind_diff =
+      if bound_kind1 = bound_kind2 then
+        Some []
+      else
+        None
+    in
     let default_diff = diff_if_changed_nonopt_fn type_ default1 default2 in
-    let result = join_diff_list [variance_diff; name_diff; bound_diff; default_diff] in
+    let result =
+      join_diff_list [variance_diff; name_diff; bound_diff; bound_kind_diff; default_diff]
+    in
     Base.Option.value
       result
       ~default:[replace loc1 (TypeParam (loc1, t_param1)) (TypeParam (loc1, t_param2))]
   and variance (var1 : Loc.t Ast.Variance.t option) (var2 : Loc.t Ast.Variance.t option) :
       node change list option =
+    let open Ast.Variance in
     match (var1, var2) with
+    | (Some (_, { kind = Readonly | In | Out | InOut; _ }), Some _) -> None
     | (Some (loc1, var1), Some (_, var2)) ->
       Some [replace loc1 (Variance (loc1, var1)) (Variance (loc1, var2))]
     | (Some (loc1, var1), None) -> Some [delete loc1 (Variance (loc1, var1))]

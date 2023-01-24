@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -24,41 +24,55 @@ let include_organize_imports_actions only =
   include_code_action ~only Lsp.CodeActionKind.source_organize_imports
 
 let layout_options options =
-  Js_layout_generator.
-    {
-      default_opts with
-      bracket_spacing = Options.format_bracket_spacing options;
-      single_quotes = Options.format_single_quotes options;
-    }
-  
+  let open Js_layout_generator in
+  {
+    default_opts with
+    bracket_spacing = Options.format_bracket_spacing options;
+    single_quotes = Options.format_single_quotes options;
+  }
+
+let autofix_insert_type_annotation_helper ~options ~ast ~diagnostics ~uri new_ast =
+  let open Lsp in
+  let diff = Insert_type.mk_diff ast new_ast in
+  let opts = layout_options options in
+  let edits =
+    Replacement_printer.mk_loc_patch_ast_differ ~opts diff
+    |> Flow_lsp_conversions.flow_loc_patch_to_lsp_edits
+  in
+  [
+    CodeAction.Action
+      {
+        CodeAction.title = "insert type annotation";
+        kind = CodeActionKind.quickfix;
+        (* Handing back the diagnostics we were given is a placeholder for
+           eventually generating the diagnostics for the errors we are fixing *)
+        diagnostics;
+        action = CodeAction.EditOnly WorkspaceEdit.{ changes = UriMap.singleton uri edits };
+      };
+  ]
 
 let autofix_exports_code_actions
     ~options ~full_cx ~ast ~file_sig ~tolerable_errors ~typed_ast ~diagnostics uri loc =
-  let open Lsp in
   let open Autofix_exports in
   let fixable_locs = set_of_fixable_signature_verification_locations tolerable_errors in
   if LocSet.mem loc fixable_locs then
-    match fix_signature_verification_error_at_loc ~full_cx ~file_sig ~typed_ast ast loc with
-    | new_ast ->
-      let diff = Insert_type.mk_diff ast new_ast in
-      let opts = layout_options options in
-      let edits =
-        Replacement_printer.mk_loc_patch_ast_differ ~opts diff
-        |> Flow_lsp_conversions.flow_loc_patch_to_lsp_edits
-      in
-      [
-        CodeAction.Action
-          {
-            CodeAction.title = "insert type annotation";
-            kind = CodeActionKind.quickfix;
-            (* Handing back the diagnostics we were given is a placeholder for
-               eventually generating the diagnostics for the errors we are fixing *)
-            diagnostics;
-            action = CodeAction.EditOnly WorkspaceEdit.{ changes = UriMap.singleton uri edits };
-          };
-      ]
+    fix_signature_verification_error_at_loc ~full_cx ~file_sig ~typed_ast ast loc
+    |> autofix_insert_type_annotation_helper ~options ~ast ~diagnostics ~uri
   else
     []
+
+let autofix_missing_func_param_types_code_actions
+    ~options ~full_cx ~ast ~file_sig ~tolerable_errors:_ ~typed_ast ~diagnostics uri loc =
+  let open Autofix_missing_local_param_annots in
+  let fixable_locs = map_of_fixable_missing_local_params full_cx in
+  let entry =
+    Base.List.find ~f:(fun (err_loc, _) -> Loc.contains err_loc loc) (LocMap.elements fixable_locs)
+  in
+  match entry with
+  | Some (_, type_t) ->
+    fix_missing_param_annot_at_loc ~cx:full_cx ~file_sig ~typed_ast ast loc type_t
+    |> autofix_insert_type_annotation_helper ~options ~ast ~diagnostics ~uri
+  | None -> []
 
 let refactor_extract_code_actions
     ~options
@@ -71,7 +85,7 @@ let refactor_extract_code_actions
     ~only
     uri
     loc =
-  if Options.refactor options && include_extract_refactors only then
+  if include_extract_refactors only then
     if Loc.(loc.start = loc._end) then
       []
     else
@@ -120,8 +134,8 @@ let refactor_extract_code_actions
     []
 
 let main_of_package ~reader package_dir =
-  let json_path = package_dir ^ "/package.json" in
-  match Package_heaps.Reader.get_package ~reader json_path with
+  let file_key = File_key.JsonFile (package_dir ^ "/package.json") in
+  match Parsing_heaps.Reader.get_package_info ~reader file_key with
   | Some (Ok package) -> Package_json.main package
   | Some (Error _)
   | None ->
@@ -216,11 +230,15 @@ let from_of_source ~options ~reader ~src_dir source =
   | Export_index.Global -> None
   | Export_index.Builtin from -> Some from
   | Export_index.File_key from ->
-    (match Module_heaps.Reader.get_info ~reader ~audit:Expensive.ok from with
+    (match Parsing_heaps.get_file_addr from with
     | None -> None
-    | Some { Module_heaps.module_name; _ } ->
-      let node_resolver_dirnames = Options.file_options options |> Files.node_resolver_dirnames in
-      path_of_modulename ~node_resolver_dirnames ~reader src_dir from module_name)
+    | Some addr ->
+      (match Parsing_heaps.Reader.get_parse ~reader addr with
+      | None -> None
+      | Some _ ->
+        let module_name = Parsing_heaps.Reader.get_haste_name ~reader addr in
+        let node_resolver_dirnames = Options.file_options options |> Files.node_resolver_dirnames in
+        path_of_modulename ~node_resolver_dirnames ~reader src_dir from module_name))
 
 let text_edits_of_import ~options ~reader ~src_dir ~ast kind name source =
   let from = from_of_source ~options ~reader ~src_dir source in
@@ -257,9 +275,9 @@ let preferred_import ~ast ~exports name loc =
     else
       Export_search.get_values name exports
   in
-  if Export_index.ExportSet.cardinal files = 1 then
+  if Export_index.ExportMap.cardinal files = 1 then
     (* there must be exactly 1 result to autofix it *)
-    Some (Export_index.ExportSet.choose files)
+    Some (fst (Export_index.ExportMap.choose files))
   else
     None
 
@@ -271,7 +289,7 @@ let suggest_imports ~options ~reader ~ast ~diagnostics ~exports ~name uri loc =
     else
       Export_search.get_values name exports
   in
-  if Export_index.ExportSet.is_empty files then
+  if Export_index.ExportMap.is_empty files then
     []
   else
     let src_dir = Lsp_helpers.lsp_uri_to_path uri |> Filename.dirname |> Base.Option.return in
@@ -284,8 +302,8 @@ let suggest_imports ~options ~reader ~ast ~diagnostics ~exports ~name uri loc =
       )
     in
     let rev_actions =
-      Export_index.ExportSet.fold
-        (fun (source, export_kind) acc ->
+      Export_index.ExportMap.fold
+        (fun (source, export_kind) _num acc ->
           match text_edits_of_import ~options ~reader ~src_dir ~ast export_kind name source with
           | None -> acc
           | Some { edits; title; from = _ } ->
@@ -371,21 +389,39 @@ let loc_opt_intersects ~loc ~error_loc =
   | None -> true
   | Some loc -> Loc.intersects error_loc loc
 
-let ast_transform_of_error ?loc = function
+let ast_transforms_of_error ?loc = function
+  | Error_message.EDeprecatedBool error_loc ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Replace `bool` with `boolean`";
+          diagnostic_title = "replace_bool";
+          transform =
+            Autofix_replace_type.replace_type ~f:(function
+                | Flow_ast.Type.Boolean { raw = _; comments } ->
+                  Flow_ast.Type.Boolean { raw = `Boolean; comments }
+                | unexpected -> unexpected
+                );
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
   | Error_message.EEnumInvalidMemberAccess { reason; suggestion = Some fixed_prop_name; _ } ->
     let error_loc = Reason.loc_of_reason reason in
     if loc_opt_intersects ~error_loc ~loc then
       let original_prop_name = reason |> Reason.desc_of_reason |> Reason.string_of_desc in
       let title = Printf.sprintf "Replace %s with `%s`" original_prop_name fixed_prop_name in
-      Some
+      [
         {
           title;
           diagnostic_title = "replace_enum_prop_typo_at_target";
           transform = Autofix_prop_typo.replace_prop_typo_at_target ~fixed_prop_name;
           target_loc = error_loc;
-        }
+        };
+      ]
     else
-      None
+      []
   | Error_message.EClassToObject (reason_class, reason_obj, _) ->
     let error_loc = Reason.loc_of_reason reason_class in
     if loc_opt_intersects ~error_loc ~loc then
@@ -393,15 +429,16 @@ let ast_transform_of_error ?loc = function
       let original = reason_obj |> Reason.desc_of_reason ~unwrap:false |> Reason.string_of_desc in
       let title = Utils_js.spf "Rewrite %s as an interface" original in
       let diagnostic_title = "replace_obj_with_interface" in
-      Some
+      [
         {
           title;
           diagnostic_title;
           transform = Autofix_interface.replace_object_at_target;
           target_loc = obj_loc;
-        }
+        };
+      ]
     else
-      None
+      []
   | Error_message.EMethodUnbinding { reason_op; reason_prop; _ } ->
     let error_loc = Reason.loc_of_reason reason_op in
     if loc_opt_intersects ~error_loc ~loc then
@@ -409,15 +446,192 @@ let ast_transform_of_error ?loc = function
       let original = reason_prop |> Reason.desc_of_reason ~unwrap:false |> Reason.string_of_desc in
       let title = Utils_js.spf "Rewrite %s as an arrow function" original in
       let diagnostic_title = "replace_method_with_arrow" in
-      Some
+      [
         {
           title;
           diagnostic_title;
           transform = Autofix_method.replace_method_at_target;
           target_loc = method_loc;
-        }
+        };
+      ]
     else
-      None
+      []
+  | Error_message.EUnusedPromise { loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Insert `await`";
+          diagnostic_title = "insert_await";
+          transform = Autofix_unused_promise.insert_await;
+          target_loc = error_loc;
+        };
+        {
+          title = "Insert `void`";
+          diagnostic_title = "insert_void";
+          transform = Autofix_unused_promise.insert_void;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSUnknown; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `mixed`";
+          diagnostic_title = "convert_unknown_type";
+          transform = Autofix_ts_syntax.convert_unknown_type;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSNever; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `empty`";
+          diagnostic_title = "convert_never_type";
+          transform = Autofix_ts_syntax.convert_never_type;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSUndefined; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `void`";
+          diagnostic_title = "convert_undefined_type";
+          transform = Autofix_ts_syntax.convert_undefined_type;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSKeyof; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `$Keys<T>`";
+          diagnostic_title = "convert_keyof_type";
+          transform = Autofix_ts_syntax.convert_keyof_type;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSTypeParamExtends; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `: T`";
+          diagnostic_title = "convert_type_param_extends";
+          transform = Autofix_ts_syntax.convert_type_param_extends;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSReadonlyVariance; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `+`";
+          diagnostic_title = "convert_readonly_variance";
+          transform = Autofix_ts_syntax.convert_readonly_variance;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSInOutVariance `In; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `-`";
+          diagnostic_title = "convert_in_variance";
+          transform = Autofix_ts_syntax.convert_in_variance;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSInOutVariance `Out; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `+`";
+          diagnostic_title = "convert_out_variance";
+          transform = Autofix_ts_syntax.convert_out_variance;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSInOutVariance `InOut; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Remove";
+          diagnostic_title = "remove_in_out_variance";
+          transform = Autofix_ts_syntax.remove_in_out_variance;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSTypeCast `As; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to type cast `(<expr>: <type>)`";
+          diagnostic_title = "convert_as_expression";
+          transform = Autofix_ts_syntax.convert_as_expression;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSTypeCast `Satisfies; loc = error_loc } ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to type cast `(<expr>: <type>)`";
+          diagnostic_title = "convert_satisfies_expression";
+          transform = Autofix_ts_syntax.convert_satisfies_expression;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSReadonlyType (Some `Array); loc = error_loc }
+    ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `$ReadOnlyArray`";
+          diagnostic_title = "convert_readonly_array_type";
+          transform = Autofix_ts_syntax.convert_readonly_array_type;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
+  | Error_message.ETSSyntax { kind = Error_message.TSReadonlyType (Some `Tuple); loc = error_loc }
+    ->
+    if loc_opt_intersects ~error_loc ~loc then
+      [
+        {
+          title = "Convert to `$ReadOnly`";
+          diagnostic_title = "convert_readonly_tuple_type";
+          transform = Autofix_ts_syntax.convert_readonly_tuple_type;
+          target_loc = error_loc;
+        };
+      ]
+    else
+      []
   | error_message ->
     (match error_message |> Error_message.friendly_message_of_msg with
     | Error_message.PropMissing
@@ -425,15 +639,16 @@ let ast_transform_of_error ?loc = function
       if loc_opt_intersects ~error_loc ~loc then
         let title = Printf.sprintf "Replace `%s` with `%s`" prop_name suggestion in
         let diagnostic_title = "replace_prop_typo_at_target" in
-        Some
+        [
           {
             title;
             diagnostic_title;
             transform = Autofix_prop_typo.replace_prop_typo_at_target ~fixed_prop_name:suggestion;
             target_loc = error_loc;
-          }
+          };
+        ]
       else
-        None
+        []
     | Error_message.IncompatibleUse
         { loc = error_loc; upper_kind = Error_message.IncompatibleGetPropT _; reason_lower; _ } ->
       (match (loc_opt_intersects ~error_loc ~loc, Reason.desc_of_reason reason_lower) with
@@ -444,15 +659,16 @@ let ast_transform_of_error ?loc = function
             (Reason.string_of_desc r)
         in
         let diagnostic_title = "add_optional_chaining" in
-        Some
+        [
           {
             title;
             diagnostic_title;
             transform = Autofix_optional_chaining.add_optional_chaining;
             target_loc = error_loc;
-          }
-      | _ -> None)
-    | _ -> None)
+          };
+        ]
+      | _ -> [])
+    | _ -> [])
 
 let code_actions_of_errors ~options ~reader ~env ~ast ~diagnostics ~errors ~only uri loc =
   let include_quick_fixes = include_quick_fixes only in
@@ -463,7 +679,8 @@ let code_actions_of_errors ~options ~reader ~env ~ast ~diagnostics ~errors ~only
           Flow_error.msg_of_error error
           |> Error_message.map_loc_of_error_message (Parsing_heaps.Reader.loc_of_aloc ~reader)
         with
-        | Error_message.EBuiltinLookupFailed { reason; name = Some name }
+        | Error_message.EBuiltinLookupFailed
+            { reason; name = Some name; potential_generator = None }
           when Options.autoimports options ->
           let error_loc = Reason.loc_of_reason reason in
           let actions =
@@ -486,20 +703,22 @@ let code_actions_of_errors ~options ~reader ~env ~ast ~diagnostics ~errors ~only
         | error_message ->
           let actions =
             if include_quick_fixes then
-              match ast_transform_of_error ~loc error_message with
-              | None -> actions
-              | Some { title; diagnostic_title; transform; target_loc } ->
-                autofix_in_upstream_file
-                  ~reader
-                  ~diagnostics
-                  ~ast
-                  ~options
-                  ~title
-                  ~diagnostic_title
-                  ~transform
-                  uri
-                  target_loc
-                :: actions
+              let quick_fixes =
+                ast_transforms_of_error ~loc error_message
+                |> Base.List.map ~f:(fun { title; diagnostic_title; transform; target_loc } ->
+                       autofix_in_upstream_file
+                         ~reader
+                         ~diagnostics
+                         ~ast
+                         ~options
+                         ~title
+                         ~diagnostic_title
+                         ~transform
+                         uri
+                         target_loc
+                   )
+              in
+              quick_fixes @ actions
             else
               actions
           in
@@ -566,26 +785,22 @@ let code_actions_of_parse_errors ~diagnostics ~uri ~loc parse_errors =
     parse_errors
 
 (** List of code actions we implement. *)
-let supported_code_actions options =
-  let actions =
-    [
-      Lsp.CodeActionKind.quickfix;
-      add_missing_imports_kind;
-      Lsp.CodeActionKind.kind_of_string "source.organizeImports.flow";
-    ]
-  in
-  if Options.refactor options then
-    Lsp.CodeActionKind.refactor_extract :: actions
-  else
-    actions
+let supported_code_actions =
+  [
+    Lsp.CodeActionKind.quickfix;
+    add_missing_imports_kind;
+    Lsp.CodeActionKind.kind_of_string "source.organizeImports.flow";
+    Lsp.CodeActionKind.refactor_extract;
+  ]
 
 (** Determines if at least one of the kinds in [only] is supported. *)
-let kind_is_supported ~options only =
+let kind_is_supported only =
   match only with
   | None -> true
   | Some only ->
-    let supported = supported_code_actions options in
-    Base.List.exists ~f:(fun kind -> Lsp.CodeActionKind.contains_kind kind supported) only
+    Base.List.exists
+      ~f:(fun kind -> Lsp.CodeActionKind.contains_kind kind supported_code_actions)
+      only
 
 let organize_imports_code_action uri =
   let open Lsp in
@@ -643,6 +858,16 @@ let code_actions_at_loc
         ~only
         uri
         loc
+    @ autofix_missing_func_param_types_code_actions
+        ~options
+        ~full_cx:cx
+        ~ast
+        ~file_sig
+        ~tolerable_errors
+        ~typed_ast
+        ~diagnostics
+        uri
+        loc
   in
   let error_fixes =
     code_actions_of_errors
@@ -691,7 +916,8 @@ let autofix_imports ~options ~env ~reader ~cx ~ast ~uri =
           Flow_error.msg_of_error error
           |> Error_message.map_loc_of_error_message (Parsing_heaps.Reader.loc_of_aloc ~reader)
         with
-        | Error_message.EBuiltinLookupFailed { reason; name = Some name }
+        | Error_message.EBuiltinLookupFailed
+            { reason; name = Some name; potential_generator = None }
           when Options.autoimports options ->
           let name = Reason.display_string_of_name name in
           let error_loc = Reason.loc_of_reason reason in
@@ -761,7 +987,7 @@ let autofix_imports ~options ~env ~reader ~cx ~ast ~uri =
   in
   edits
 
-let autofix_exports ~options ~env ~profiling ~file_key ~file_content =
+let autofix_exports ~options ~profiling ~file_key ~file_content =
   let open Autofix_exports in
   let file_artifacts =
     let ((_, parse_errs) as intermediate_result) =
@@ -770,7 +996,7 @@ let autofix_exports ~options ~env ~profiling ~file_key ~file_content =
     if not (Flow_error.ErrorSet.is_empty parse_errs) then
       Error parse_errs
     else
-      Type_contents.type_parse_artifacts ~options ~env ~profiling file_key intermediate_result
+      Type_contents.type_parse_artifacts ~options ~profiling file_key intermediate_result
   in
   match file_artifacts with
   | Ok
@@ -806,7 +1032,7 @@ let insert_type
     if not (Flow_error.ErrorSet.is_empty parse_errs) then
       Error parse_errs
     else
-      Type_contents.type_parse_artifacts ~options ~env ~profiling file_key intermediate_result
+      Type_contents.type_parse_artifacts ~options ~profiling file_key intermediate_result
   in
   match file_artifacts with
   | Ok (Parse_artifacts { ast; file_sig; _ }, Typecheck_artifacts { cx = full_cx; typed_ast }) ->

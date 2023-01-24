@@ -1,25 +1,19 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-open Base.Result
-open Utils_js
-
 let loc_of_aloc = Parsing_heaps.Reader.loc_of_aloc
 
 module Get_def_result = struct
   type t =
-    (* the final location of the definition *)
-    | Def of Loc.t
-    (* if an intermediate get-def failed, return partial progress and the error message *)
+    | Def of Loc.t  (** the final location of the definition *)
     | Partial of Loc.t * string
-    (* the input loc didn't point at anything you can call get-def on *)
-    | Bad_loc
-    (* an unexpected, internal error *)
-    | Def_error of string
+        (** if an intermediate get-def failed, return partial progress and the error message *)
+    | Bad_loc  (** the input loc didn't point at anything you can call get-def on *)
+    | Def_error of string  (** an unexpected, internal error *)
 end
 
 open Get_def_result
@@ -30,48 +24,33 @@ let extract_member_def ~reader cx this name =
     (match SMap.find_opt name result_map with
     | Some (None, t) -> Ok (TypeUtil.loc_of_t t |> loc_of_aloc ~reader)
     | Some (Some x, _) -> Ok (loc_of_aloc ~reader x)
-    | None -> Error (spf "failed to find member %s in members map" name))
+    | None -> Error (Printf.sprintf "failed to find member %s in members map" name))
   | Error msg -> Error msg
 
-(* turns typed AST into normal AST so we can run Scope_builder on it *)
-(* TODO(vijayramamurthy): make scope builder polymorphic *)
-class type_killer (reader : Parsing_heaps.Reader.reader) =
-  object
-    inherit [ALoc.t, ALoc.t * Type.t, Loc.t, Loc.t] Flow_polymorphic_ast_mapper.mapper
-
-    method on_loc_annot x = loc_of_aloc ~reader x
-
-    method on_type_annot (x, _) = loc_of_aloc ~reader x
-  end
-
-let rec process_request ~options ~reader ~cx ~is_legit_require ~typed_ast :
+let rec process_request ~options ~reader ~cx ~is_legit_require ~ast ~typed_ast :
     (ALoc.t, ALoc.t * Type.t) Get_def_request.t -> (Loc.t, string) result = function
   | Get_def_request.Identifier { name = _; loc = (aloc, type_) } ->
     let loc = loc_of_aloc ~reader aloc in
-    let ast = (new type_killer reader)#program typed_ast in
     let scope_info =
       Scope_builder.program ~enable_enums:(Context.enable_enums cx) ~with_types:true ast
     in
     let all_uses = Scope_api.With_Loc.all_uses scope_info in
-    Loc_collections.(
-      let matching_uses = LocSet.filter (fun use -> Loc.contains use loc) all_uses in
-      begin
-        match LocSet.elements matching_uses with
-        | [use] ->
-          let def = Scope_api.With_Loc.def_of_use scope_info use in
-          let def_loc = def.Scope_api.With_Loc.Def.locs |> Nel.hd in
-          Ok def_loc
-        | [] ->
-          process_request
-            ~options
-            ~reader
-            ~cx
-            ~is_legit_require
-            ~typed_ast
-            (Get_def_request.Type (aloc, type_))
-        | _ :: _ :: _ -> Error "Scope builder found multiple matching identifiers"
-      end
-    )
+    let matching_uses = Loc_collections.LocSet.filter (fun use -> Loc.contains use loc) all_uses in
+    (match Loc_collections.LocSet.elements matching_uses with
+    | [use] ->
+      let def = Scope_api.With_Loc.def_of_use scope_info use in
+      let def_loc = def.Scope_api.With_Loc.Def.locs |> Nel.hd in
+      Ok def_loc
+    | [] ->
+      process_request
+        ~options
+        ~reader
+        ~cx
+        ~is_legit_require
+        ~ast
+        ~typed_ast
+        (Get_def_request.Type (aloc, type_))
+    | _ :: _ :: _ -> Error "Scope builder found multiple matching identifiers")
   | Get_def_request.(Member { prop_name = name; object_source }) ->
     let obj_t =
       match object_source with
@@ -113,50 +92,54 @@ let rec process_request ~options ~reader ~cx ~is_legit_require ~typed_ast :
         Ok (loc_of_aloc ~reader aloc)
     in
     loop v
-  | Get_def_request.Require ((source_loc, name), require_loc) ->
+  | Get_def_request.Require (source_loc, name) ->
     let module_t = Type.OpenT (Context.find_require cx source_loc) |> Members.resolve_type cx in
     (* function just so we don't do the work unless it's actually needed. *)
     let get_imported_file () =
-      let filename =
-        Module_heaps.Reader.get_file
-          ~reader
-          ~audit:Expensive.warn
-          (Module_js.imported_module
-             ~options
-             ~reader:(Abstract_state_reader.State_reader reader)
-             ~node_modules_containers:!Files.node_modules_containers
-             (Context.file cx)
-             require_loc
-             name
-          )
+      let resolved_module =
+        Module_js.imported_module
+          ~options
+          ~reader:(Abstract_state_reader.State_reader reader)
+          ~node_modules_containers:!Files.node_modules_containers
+          (Context.file cx)
+          name
       in
-      match filename with
-      | Some file -> Ok Loc.{ none with source = Some file }
-      | None -> Error (spf "Failed to find imported file %s" name)
+      let provider =
+        match resolved_module with
+        | Ok m -> Parsing_heaps.Reader.get_provider ~reader m
+        | Error _ ->
+          (* TODO: We reach this codepath for requires that might resolve to
+           * builtin modules. During check we check the master context, which we
+           * can also do here. *)
+          None
+      in
+      match provider with
+      | None -> Error (Printf.sprintf "Failed to find imported file %s" name)
+      | Some addr ->
+        let file = Parsing_heaps.read_file_key addr in
+        Ok Loc.{ none with source = Some file }
     in
-    Type.(
-      (match module_t with
-      | ModuleT (_, { cjs_export; _ }, _) ->
-        (* If we have a location for the cjs export, go there. Otherwise
-           * fall back to just the top of the file *)
-        let loc =
-          match cjs_export with
-          | Some t -> TypeUtil.loc_of_t t |> loc_of_aloc ~reader (* This can return Loc.none *)
-          | None -> Loc.none
-        in
-        if loc = Loc.none then
-          get_imported_file ()
-        else
-          Ok loc
-      | AnyT _ -> get_imported_file ()
-      | _ ->
-        Error
-          (spf
-             "Internal Flow Error: Expected ModuleT for %S, but got %S!"
-             name
-             (string_of_ctor module_t)
-          ))
-    )
+    (match module_t with
+    | Type.ModuleT (_, { Type.cjs_export; _ }, _) ->
+      (* If we have a location for the cjs export, go there. Otherwise
+         * fall back to just the top of the file *)
+      let loc =
+        match cjs_export with
+        | Some t -> TypeUtil.loc_of_t t |> loc_of_aloc ~reader (* This can return Loc.none *)
+        | None -> Loc.none
+      in
+      if loc = Loc.none then
+        get_imported_file ()
+      else
+        Ok loc
+    | Type.AnyT _ -> get_imported_file ()
+    | _ ->
+      Error
+        (Printf.sprintf
+           "Internal Flow Error: Expected ModuleT for %S, but got %S!"
+           name
+           (Type.string_of_ctor module_t)
+        ))
   | Get_def_request.JsxAttribute { component_t = (_, component_t); name; loc } ->
     let reason = Reason.mk_reason (Reason.RCustom name) loc in
     let props_object =
@@ -170,6 +153,7 @@ let rec process_request ~options ~reader ~cx ~is_legit_require ~typed_ast :
       ~reader
       ~cx
       ~is_legit_require
+      ~ast
       ~typed_ast
       Get_def_request.(Member { prop_name = name; object_source = ObjectType (loc, props_object) })
 
@@ -186,7 +170,7 @@ module Depth = struct
   let add loc { length; locs } = { length = length + 1; locs = loc :: locs }
 end
 
-let get_def ~options ~reader ~cx ~file_sig ~typed_ast requested_loc =
+let get_def ~options ~reader ~cx ~file_sig ~ast ~typed_ast requested_loc =
   let require_aloc_map = File_sig.With_ALoc.(require_loc_map file_sig.module_sig) in
   let is_legit_require (source_aloc, _) =
     SMap.exists
@@ -214,7 +198,7 @@ let get_def ~options ~reader ~cx ~file_sig ~typed_ast requested_loc =
       with
       | OwnDef aloc -> Def (loc_of_aloc ~reader aloc)
       | Request request ->
-        (match process_request ~options ~reader ~cx ~is_legit_require ~typed_ast request with
+        (match process_request ~options ~reader ~cx ~is_legit_require ~ast ~typed_ast request with
         | Ok res_loc ->
           (* two scenarios where we stop trying to recur:
              - when req_loc = res_loc, meaning we've reached a fixed point so

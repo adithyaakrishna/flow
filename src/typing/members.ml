@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -51,7 +51,7 @@ let rec merge_type cx =
   | (DefT (_, _, VoidT), (MaybeT _ as t))
   | ((MaybeT _ as t), DefT (_, _, VoidT)) ->
     t
-  | ((DefT (_, _, FunT (_, _, ft1)) as fun1), (DefT (_, _, FunT (_, _, ft2)) as fun2)) ->
+  | ((DefT (_, _, FunT (_, ft1)) as fun1), (DefT (_, _, FunT (_, ft2)) as fun2)) ->
     (* Functions with different number of parameters cannot be merged into a
      * single function type. Instead, we should turn them into a union *)
     let params =
@@ -106,7 +106,6 @@ let rec merge_type cx =
             bogus_trust (),
             FunT
               ( dummy_static reason,
-                dummy_prototype,
                 mk_functiontype reason tins tout ~rest_param ~def_reason:reason ~params_names
               )
           )
@@ -141,10 +140,6 @@ let rec merge_type cx =
     in
     let obj_kind =
       match (o1.flags.obj_kind, o2.flags.obj_kind) with
-      | (UnsealedInFile s1, UnsealedInFile s2) when s1 = s2 -> UnsealedInFile s1
-      | (UnsealedInFile _, _)
-      | (_, UnsealedInFile _) ->
-        UnsealedInFile None
       | ( Indexed { key = k1; value = v1; dict_polarity = Polarity.Positive; _ },
           Indexed { key = k2; value = v2; dict_polarity = Polarity.Positive; _ }
         ) ->
@@ -219,13 +214,39 @@ let rec merge_type cx =
         bogus_trust (),
         ArrT (ArrayAT (merge_type cx (t1, t2), tuple_types))
       )
-  | (DefT (_, _, ArrT (TupleAT (t1, ts1))), DefT (_, _, ArrT (TupleAT (t2, ts2))))
-    when List.length ts1 = List.length ts2 ->
+  | ( DefT (_, _, ArrT (TupleAT { elem_t = t1; elements = ts1 })),
+      DefT (_, _, ArrT (TupleAT { elem_t = t2; elements = ts2 }))
+    )
+    when List.length ts1 = List.length ts2
+         && List.for_all2
+              (fun (TupleElement { polarity = p1; _ }) (TupleElement { polarity = p2; _ }) ->
+                Polarity.equal (p1, p2))
+              ts1
+              ts2 ->
     DefT
       ( locationless_reason (RCustom "tuple"),
         bogus_trust (),
         ArrT
-          (TupleAT (merge_type cx (t1, t2), Base.List.map2_exn ~f:(merge_type cx |> curry) ts1 ts2))
+          (TupleAT
+             {
+               elem_t = merge_type cx (t1, t2);
+               elements =
+                 Base.List.map2_exn
+                   ~f:
+                     (fun (TupleElement { name = name1; t = t1; polarity })
+                          (TupleElement { name = name2; t = t2; polarity = _ }) ->
+                     let name =
+                       if name1 = name2 then
+                         name1
+                       else
+                         None
+                     in
+                     let t = merge_type cx (t1, t2) in
+                     TupleElement { name; t; polarity })
+                   ts1
+                   ts2;
+             }
+          )
       )
   | (DefT (_, _, ArrT (ROArrayAT elemt1)), DefT (_, _, ArrT (ROArrayAT elemt2))) ->
     DefT
@@ -267,8 +288,8 @@ let instantiate_poly_t cx t args =
               | ({ default = None; _ }, []) -> (AnyT.error (reason_of_t t), [], true)
               | (_, t :: ts) -> (t, ts, too_few_args)
             in
-            (SMap.add typeparam.name t map, ts, too_few_args))
-          (SMap.empty, args, false)
+            (Subst_name.Map.add typeparam.name t map, ts, too_few_args))
+          (Subst_name.Map.empty, args, false)
           type_params
       in
       if too_few_args then (
@@ -316,7 +337,7 @@ let intersect_members cx members =
       map
 
 and instantiate_type = function
-  | ThisClassT (_, t, _)
+  | ThisClassT (_, t, _, _)
   | DefT (_, _, ClassT t)
   | (AnyT _ as t)
   | DefT (_, _, TypeT (_, t))
@@ -415,7 +436,7 @@ let rec extract_type cx this_t =
   | DefT (_, _, PolyT { t_out = sub_type; _ }) ->
     (* TODO: replace type parameters with stable/proper names? *)
     extract_type cx sub_type
-  | ThisClassT (_, DefT (_, _, InstanceT (static, _, _, _)), _)
+  | ThisClassT (_, DefT (_, _, InstanceT (static, _, _, _)), _, _)
   | DefT (_, _, ClassT (DefT (_, _, InstanceT (static, _, _, _)))) ->
     extract_type cx static
   | DefT (_, _, FunT _) as t -> Success t
@@ -430,6 +451,9 @@ let rec extract_type cx this_t =
   | DefT (reason, _, SingletonBoolT _)
   | DefT (reason, _, BoolT _) ->
     get_builtin_type cx reason (OrdinaryName "Boolean") |> extract_type cx
+  | DefT (reason, _, SingletonBigIntT _)
+  | DefT (reason, _, BigIntT _) ->
+    get_builtin_type cx reason (OrdinaryName "BigInt") |> extract_type cx
   | DefT (reason, _, SymbolT) ->
     get_builtin_type cx reason (OrdinaryName "Symbol") |> extract_type cx
   | DefT (reason, _, CharSetT _) ->
@@ -440,17 +464,16 @@ let rec extract_type cx this_t =
   | OpaqueT (_, { super_t = Some t; _ }) ->
     extract_type cx t
   | DefT (reason, _, ArrT arrtype) ->
-    let (builtin, elemt) =
+    let (builtin, elem_t) =
       match arrtype with
-      | ArrayAT (elemt, _) -> (get_builtin cx (OrdinaryName "Array") reason, elemt)
-      | TupleAT (elemt, _)
-      | ROArrayAT elemt ->
-        (get_builtin cx (OrdinaryName "$ReadOnlyArray") reason, elemt)
+      | ArrayAT (elem_t, _) -> (get_builtin cx (OrdinaryName "Array") reason, elem_t)
+      | TupleAT { elem_t; _ }
+      | ROArrayAT elem_t ->
+        (get_builtin cx (OrdinaryName "$ReadOnlyArray") reason, elem_t)
     in
     let array_t = resolve_type cx builtin in
-    Some [elemt] |> instantiate_poly_t cx array_t |> instantiate_type |> extract_type cx
+    Some [elem_t] |> instantiate_poly_t cx array_t |> instantiate_type |> extract_type cx
   | EvalT (t, defer, id) -> eval_evalt cx t defer id |> extract_type cx
-  | BoundT _
   | InternalT (ChoiceKitT (_, _))
   | TypeDestructorTriggerT _
   | DefT (_, _, ClassT _)
@@ -549,10 +572,8 @@ let rec extract_members ?(exclude_proto_members = false) cx = function
     in
     let named_exports = NameUtils.display_smap_of_namemap named_exports in
     SuccessModule (named_exports, cjs_export)
-  | Success (DefT (_, _, FunT (static, proto, _))) ->
-    let members = extract_members_as_map ~exclude_proto_members cx static in
-    let prot_members = extract_members_as_map ~exclude_proto_members cx proto in
-    Success (AugmentableSMap.augment prot_members ~with_bindings:members)
+  | Success (DefT (_, _, FunT (static, _))) ->
+    Success (extract_members_as_map ~exclude_proto_members cx static)
   | Success (DefT (enum_reason, trust, EnumObjectT enum) as enum_object_t) ->
     let { members; representation_t; _ } = enum in
     let enum_t = mk_enum_type ~trust enum_reason enum in

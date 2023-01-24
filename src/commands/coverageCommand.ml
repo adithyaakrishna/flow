@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -33,7 +33,7 @@ let spec =
         |> wait_for_recheck_flag
         |> flag
              "--color"
-             no_arg
+             truthy
              ~doc:
                ("Print the file with colors showing which parts have unknown types "
                ^ "(blue for 'empty' and red for 'any'). "
@@ -41,14 +41,14 @@ let spec =
                )
         |> flag
              "--debug"
-             no_arg
+             truthy
              ~doc:
                ("Print debugging info about each range in the file to stderr. "
                ^ "Cannot be used with --json or --pretty"
                )
         |> path_flag
-        |> flag "--all" no_arg ~doc:"Ignore absence of @flow pragma"
-        |> flag "--show-trust" no_arg ~doc:"EXPERIMENTAL: Include trust information in output"
+        |> flag "--all" truthy ~doc:"Ignore absence of @flow pragma"
+        |> flag "--show-trust" truthy ~doc:"EXPERIMENTAL: Include trust information in output"
         |> anon "file" (optional string)
       );
   }
@@ -311,9 +311,15 @@ let main
   (* pretty implies json *)
   let json = json || pretty in
   if color && json then
-    raise (CommandSpec.Failed_to_parse ("--color", "Can't be used with json flags"));
+    raise
+      (CommandSpec.Failed_to_parse
+         { arg = "--color"; msg = "Can't be used with json flags"; details = None }
+      );
   if debug && json then
-    raise (CommandSpec.Failed_to_parse ("--debug", "Can't be used with json flags"));
+    raise
+      (CommandSpec.Failed_to_parse
+         { arg = "--debug"; msg = "Can't be used with json flags"; details = None }
+      );
 
   let request =
     ServerProt.Request.COVERAGE { input = file; force = all; wait_for_recheck; trust }

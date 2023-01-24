@@ -1,206 +1,206 @@
-Error ----------------------------------------------------------------------------------------------- base_class.js:9:46
+Error ----------------------------------------------------------------------------------------------- base_class.js:8:46
 
 Cannot initialize property `annotatedInitializedFieldInvalid` with `'asdf'` because string [1] is incompatible with
 number [2]. [incompatible-type]
 
-   base_class.js:9:46
-   9|   annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   base_class.js:8:46
+   8|   annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                    ^^^^^^ [1]
 
 References:
-   base_class.js:9:37
-   9|   annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   base_class.js:8:37
+   8|   annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                           ^^^^^^ [2]
 
 
-Error ---------------------------------------------------------------------------------------------- base_class.js:16:53
+Error ---------------------------------------------------------------------------------------------- base_class.js:14:53
 
 Cannot initialize property `annotatedInitializedFieldInvalid` with `'asdf'` because string [1] is incompatible with
 number [2]. [incompatible-type]
 
-   base_class.js:16:53
-   16|   static annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   base_class.js:14:53
+   14|   static annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                            ^^^^^^ [1]
 
 References:
-   base_class.js:16:44
-   16|   static annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   base_class.js:14:44
+   14|   static annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                   ^^^^^^ [2]
+
+
+Error ----------------------------------------------------------------------------------------------- base_class.js:23:2
+
+Cannot cast `o.annotatedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
+
+   base_class.js:23:2
+   23| (o.annotatedField: string); // Error: number ~> string
+        ^^^^^^^^^^^^^^^^
+
+References:
+   base_class.js:4:19
+    4|   annotatedField: number;
+                         ^^^^^^ [1]
+   base_class.js:23:20
+   23| (o.annotatedField: string); // Error: number ~> string
+                          ^^^^^^ [2]
+
+
+Error ----------------------------------------------------------------------------------------------- base_class.js:25:2
+
+Cannot cast `Base.annotatedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
+
+   base_class.js:25:2
+   25| (Base.annotatedField: string); // Error: number ~> string
+        ^^^^^^^^^^^^^^^^^^^
+
+References:
+   base_class.js:10:26
+   10|   static annotatedField: number;
+                                ^^^^^^ [1]
+   base_class.js:25:23
+   25| (Base.annotatedField: string); // Error: number ~> string
+                             ^^^^^^ [2]
+
+
+Error ----------------------------------------------------------------------------------------------- base_class.js:31:2
+
+Cannot cast `o.initializedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
+
+   base_class.js:31:2
+   31| (o.initializedField: string); // Error: number ~> string
+        ^^^^^^^^^^^^^^^^^^
+
+References:
+   base_class.js:5:22
+    5|   initializedField = 42;
+                            ^^ [1]
+   base_class.js:31:22
+   31| (o.initializedField: string); // Error: number ~> string
+                            ^^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------- base_class.js:33:2
 
-Cannot cast `o.annotatedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
-
-   base_class.js:33:2
-   33| (o.annotatedField: string); // Error: number ~> string
-        ^^^^^^^^^^^^^^^^
-
-References:
-   base_class.js:5:19
-    5|   annotatedField: number;
-                         ^^^^^^ [1]
-   base_class.js:33:20
-   33| (o.annotatedField: string); // Error: number ~> string
-                          ^^^^^^ [2]
-
-
-Error ----------------------------------------------------------------------------------------------- base_class.js:35:2
-
-Cannot cast `Base.annotatedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
-
-   base_class.js:35:2
-   35| (Base.annotatedField: string); // Error: number ~> string
-        ^^^^^^^^^^^^^^^^^^^
-
-References:
-   base_class.js:12:26
-   12|   static annotatedField: number;
-                                ^^^^^^ [1]
-   base_class.js:35:23
-   35| (Base.annotatedField: string); // Error: number ~> string
-                             ^^^^^^ [2]
-
-
-Error ----------------------------------------------------------------------------------------------- base_class.js:41:2
-
-Cannot cast `o.initializedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
-
-   base_class.js:41:2
-   41| (o.initializedField: string); // Error: number ~> string
-        ^^^^^^^^^^^^^^^^^^
-
-References:
-   base_class.js:6:22
-    6|   initializedField = 42;
-                            ^^ [1]
-   base_class.js:41:22
-   41| (o.initializedField: string); // Error: number ~> string
-                            ^^^^^^ [2]
-
-
-Error ----------------------------------------------------------------------------------------------- base_class.js:43:2
-
 Cannot cast `Base.initializedField` to number because string [1] is incompatible with number [2]. [incompatible-cast]
 
-   base_class.js:43:2
-   43| (Base.initializedField: number); // Error: string ~> number
+   base_class.js:33:2
+   33| (Base.initializedField: number); // Error: string ~> number
         ^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   base_class.js:13:29
-   13|   static initializedField = 'asdf';
+   base_class.js:11:29
+   11|   static initializedField = 'asdf';
                                    ^^^^^^ [1]
-   base_class.js:43:25
-   43| (Base.initializedField: number); // Error: string ~> number
+   base_class.js:33:25
+   33| (Base.initializedField: number); // Error: string ~> number
                                ^^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- base_class.js:49:2
+Error ----------------------------------------------------------------------------------------------- base_class.js:39:2
 
 Cannot cast `o.initializedFieldWithThis` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   base_class.js:49:2
-   49| (o.initializedFieldWithThis: string); // Error: number ~> string
+   base_class.js:39:2
+   39| (o.initializedFieldWithThis: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   base_class.js:6:22
-    6|   initializedField = 42;
-                            ^^ [1]
-   base_class.js:49:30
-   49| (o.initializedFieldWithThis: string); // Error: number ~> string
+   base_class.js:6:29
+    6|   initializedFieldWithThis: number = this.initializedField;
+                                   ^^^^^^ [1]
+   base_class.js:39:30
+   39| (o.initializedFieldWithThis: string); // Error: number ~> string
                                     ^^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- base_class.js:51:2
+Error ----------------------------------------------------------------------------------------------- base_class.js:41:2
 
 Cannot cast `Base.initializedFieldWithThis` to number because string [1] is incompatible with number [2].
 [incompatible-cast]
 
-   base_class.js:51:2
-   51| (Base.initializedFieldWithThis: number); // Error: string ~> number
+   base_class.js:41:2
+   41| (Base.initializedFieldWithThis: number); // Error: string ~> number
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   base_class.js:13:29
-   13|   static initializedField = 'asdf';
-                                   ^^^^^^ [1]
-   base_class.js:51:33
-   51| (Base.initializedFieldWithThis: number); // Error: string ~> number
+   base_class.js:12:36
+   12|   static initializedFieldWithThis: string = this.initializedField;
+                                          ^^^^^^ [1]
+   base_class.js:41:33
+   41| (Base.initializedFieldWithThis: number); // Error: string ~> number
                                        ^^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- base_class.js:59:2
+Error ----------------------------------------------------------------------------------------------- base_class.js:49:2
 
 Cannot cast `o.annotatedInitializedFieldValid` to number because null or undefined [1] is incompatible with number [2].
 [incompatible-cast]
 
-   base_class.js:59:2
-   59| (o.annotatedInitializedFieldValid: number); // Error: ?number ~> number
+   base_class.js:49:2
+   49| (o.annotatedInitializedFieldValid: number); // Error: ?number ~> number
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   base_class.js:8:35
-    8|   annotatedInitializedFieldValid: ?number = 42;
+   base_class.js:7:35
+    7|   annotatedInitializedFieldValid: ?number = 42;
                                          ^^^^^^^ [1]
-   base_class.js:59:36
-   59| (o.annotatedInitializedFieldValid: number); // Error: ?number ~> number
+   base_class.js:49:36
+   49| (o.annotatedInitializedFieldValid: number); // Error: ?number ~> number
                                           ^^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- base_class.js:61:2
+Error ----------------------------------------------------------------------------------------------- base_class.js:51:2
 
 Cannot cast `Base.annotatedInitializedFieldValid` to number because null or undefined [1] is incompatible with
 number [2]. [incompatible-cast]
 
-   base_class.js:61:2
-   61| (Base.annotatedInitializedFieldValid: number); // Error: ?number ~> number
+   base_class.js:51:2
+   51| (Base.annotatedInitializedFieldValid: number); // Error: ?number ~> number
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   base_class.js:15:42
-   15|   static annotatedInitializedFieldValid: ?number = 42;
+   base_class.js:13:42
+   13|   static annotatedInitializedFieldValid: ?number = 42;
                                                 ^^^^^^^ [1]
-   base_class.js:61:39
-   61| (Base.annotatedInitializedFieldValid: number); // Error: ?number ~> number
+   base_class.js:51:39
+   51| (Base.annotatedInitializedFieldValid: number); // Error: ?number ~> number
                                              ^^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- base_class.js:70:2
+Error ----------------------------------------------------------------------------------------------- base_class.js:60:2
 
 Cannot cast `o.annotatedInitializedFieldInvalid` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   base_class.js:70:2
-   70| (o.annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   base_class.js:60:2
+   60| (o.annotatedInitializedFieldInvalid: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   base_class.js:9:37
-    9|   annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   base_class.js:8:37
+    8|   annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                            ^^^^^^ [1]
-   base_class.js:70:38
-   70| (o.annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   base_class.js:60:38
+   60| (o.annotatedInitializedFieldInvalid: string); // Error: number ~> string
                                             ^^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- base_class.js:72:2
+Error ----------------------------------------------------------------------------------------------- base_class.js:62:2
 
 Cannot cast `Base.annotatedInitializedFieldInvalid` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   base_class.js:72:2
-   72| (Base.annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   base_class.js:62:2
+   62| (Base.annotatedInitializedFieldInvalid: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   base_class.js:16:44
-   16|   static annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   base_class.js:14:44
+   14|   static annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                   ^^^^^^ [1]
-   base_class.js:72:41
-   72| (Base.annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   base_class.js:62:41
+   62| (Base.annotatedInitializedFieldInvalid: string); // Error: number ~> string
                                                ^^^^^^ [2]
 
 
@@ -212,6 +212,230 @@ Classes may not have fields named `constructor`.
         ^^^^^^^^^^^
 
 
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:38:7
+
+`getterFirst1` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   38|   get getterFirst1(): number { return 1 } // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:39:7
+
+`getterFirst1` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   39|   set getterFirst1(a: mixed) {} // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:42:7
+
+`getterFirst2` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   42|   get getterFirst2(): number { return 1 } // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:44:7
+
+`getterFirst2` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   44|   set getterFirst2(a: mixed) {} // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:48:7
+
+`setterFirst1` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   48|   set setterFirst1(a: mixed): number { return 1 } // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:49:7
+
+`setterFirst1` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   49|   get setterFirst1() {} // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:52:7
+
+`setterFirst2` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   52|   set setterFirst2(a: mixed): number { return 1 } // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:54:7
+
+`setterFirst2` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   54|   get setterFirst2() {} // error
+             ^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:57:7
+
+`propFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   57|   get propFirst(): number { return 1 } // error
+             ^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:58:7
+
+`propFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   58|   set propFirst(a: number) {} // error
+             ^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:61:7
+
+`methodFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   61|   get methodFirst(): number { return 1 } // error
+             ^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:62:7
+
+`methodFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   62|   set methodFirst(a: mixed) {} // error
+             ^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:67:3
+
+`propFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   67|   propFirst = 2; // error
+         ^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:70:3
+
+`methodFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   70|   methodFirst = () => {}; // error
+         ^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:73:3
+
+`getterFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   73|   getterFirst = 1; // error
+         ^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:76:3
+
+`setterFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   76|   setterFirst = 1; // error
+         ^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:81:3
+
+`methodFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   81|   methodFirst() {} // error
+         ^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:84:3
+
+`propFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   84|   propFirst() {} // error
+         ^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:87:3
+
+`getterFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   87|   getterFirst() {} // error
+         ^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------- class_duplicate_members.js:90:3
+
+`setterFirst` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   90|   setterFirst() {}; // error
+         ^^^^^^^^^^^
+
+
+Error --------------------------------------------------------------------------------- class_duplicate_members.js:96:10
+
+`a` has already been declared in this class. Static class member names must be unique. [duplicate-class-member]
+
+   96|   static a = () => {}; // error
+                ^
+
+
+Error --------------------------------------------------------------------------------- class_duplicate_members.js:97:14
+
+`a` has already been declared in this class. Static class member names must be unique. [duplicate-class-member]
+
+   97|   static get a(): () => void { return () => {}; } // error
+                    ^
+
+
+Error --------------------------------------------------------------------------------- class_duplicate_members.js:98:14
+
+`a` has already been declared in this class. Static class member names must be unique. [duplicate-class-member]
+
+   98|   static set a(a: mixed) { } // error
+                    ^
+
+
+Error --------------------------------------------------------------------------------- class_duplicate_members.js:99:10
+
+`a` has already been declared in this class. Static class member names must be unique. [duplicate-class-member]
+
+   99|   static a() {} // error
+                ^
+
+
+Error -------------------------------------------------------------------------------- class_duplicate_members.js:105:11
+
+`a` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   105|   declare a: string; // error
+                  ^
+
+
+Error -------------------------------------------------------------------------------- class_duplicate_members.js:108:11
+
+`b` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   108|   declare b: string; // error
+                  ^
+
+
+Error -------------------------------------------------------------------------------- class_duplicate_members.js:111:11
+
+`c` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   111|   declare c: () => void; // error
+                  ^
+
+
+Error -------------------------------------------------------------------------------- class_duplicate_members.js:114:11
+
+`d` has already been declared in this class. Class member names must be unique. [duplicate-class-member]
+
+   114|   declare d: void; // error
+                  ^
+
+
 Error ----------------------------------------------------------------------- declared_class_constructor_property.js:8:3
 
 Classes may not have fields named `constructor`.
@@ -220,454 +444,454 @@ Classes may not have fields named `constructor`.
         ^^^^^^^^^^^
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:9:51
+Error -------------------------------------------------------------------------------------------- derived_class.js:8:51
 
 Cannot initialize property `base_annotatedInitializedFieldInvalid` with `'asdf'` because string [1] is incompatible with
 number [2]. [incompatible-type]
 
-   derived_class.js:9:51
-   9|   base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:8:51
+   8|   base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                         ^^^^^^ [1]
 
 References:
-   derived_class.js:9:42
-   9|   base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:8:42
+   8|   base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:16:58
+Error ------------------------------------------------------------------------------------------- derived_class.js:14:58
 
 Cannot initialize property `base_annotatedInitializedFieldInvalid` with `'asdf'` because string [1] is incompatible with
 number [2]. [incompatible-type]
 
-   derived_class.js:16:58
-   16|   static base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:14:58
+   14|   static base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                                 ^^^^^^ [1]
 
 References:
-   derived_class.js:16:49
-   16|   static base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:14:49
+   14|   static base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                        ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:28:52
+Error ------------------------------------------------------------------------------------------- derived_class.js:25:52
 
 Cannot initialize property `child_annotatedInitializedFieldInvalid` with `'asdf'` because string [1] is incompatible
 with number [2]. [incompatible-type]
 
-   derived_class.js:28:52
-   28|   child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:25:52
+   25|   child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                           ^^^^^^ [1]
 
 References:
-   derived_class.js:28:43
-   28|   child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:25:43
+   25|   child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                  ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:35:59
+Error ------------------------------------------------------------------------------------------- derived_class.js:31:59
 
 Cannot initialize property `child_annotatedInitializedFieldInvalid` with `'asdf'` because string [1] is incompatible
 with number [2]. [incompatible-type]
 
-   derived_class.js:35:59
-   35|   static child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:31:59
+   31|   static child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                                  ^^^^^^ [1]
 
 References:
-   derived_class.js:35:50
-   35|   static child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:31:50
+   31|   static child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                         ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:61:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:43:2
 
 Cannot cast `o.base_annotatedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
 
-   derived_class.js:61:2
-   61| (o.base_annotatedField: string); // Error: number ~> string
+   derived_class.js:43:2
+   43| (o.base_annotatedField: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:5:24
-    5|   base_annotatedField: number;
+   derived_class.js:4:24
+    4|   base_annotatedField: number;
                               ^^^^^^ [1]
-   derived_class.js:61:25
-   61| (o.base_annotatedField: string); // Error: number ~> string
+   derived_class.js:43:25
+   43| (o.base_annotatedField: string); // Error: number ~> string
                                ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:63:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:45:2
 
 Cannot cast `Child.base_annotatedField` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:63:2
-   63| (Child.base_annotatedField: string); // Error: number ~> string
+   derived_class.js:45:2
+   45| (Child.base_annotatedField: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:12:31
-   12|   static base_annotatedField: number;
+   derived_class.js:10:31
+   10|   static base_annotatedField: number;
                                      ^^^^^^ [1]
-   derived_class.js:63:29
-   63| (Child.base_annotatedField: string); // Error: number ~> string
+   derived_class.js:45:29
+   45| (Child.base_annotatedField: string); // Error: number ~> string
                                    ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:66:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:48:2
 
 Cannot cast `o.child_annotatedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
 
-   derived_class.js:66:2
-   66| (o.child_annotatedField: string); // Error: number ~> string
+   derived_class.js:48:2
+   48| (o.child_annotatedField: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:24:25
-   24|   child_annotatedField: number;
+   derived_class.js:21:25
+   21|   child_annotatedField: number;
                                ^^^^^^ [1]
-   derived_class.js:66:26
-   66| (o.child_annotatedField: string); // Error: number ~> string
+   derived_class.js:48:26
+   48| (o.child_annotatedField: string); // Error: number ~> string
                                 ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:68:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:50:2
 
 Cannot cast `Child.child_annotatedField` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:68:2
-   68| (Child.child_annotatedField: string); // Error: number ~> string
+   derived_class.js:50:2
+   50| (Child.child_annotatedField: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:31:32
-   31|   static child_annotatedField: number;
+   derived_class.js:27:32
+   27|   static child_annotatedField: number;
                                       ^^^^^^ [1]
-   derived_class.js:68:30
-   68| (Child.child_annotatedField: string); // Error: number ~> string
+   derived_class.js:50:30
+   50| (Child.child_annotatedField: string); // Error: number ~> string
                                     ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:74:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:56:2
 
 Cannot cast `o.base_initializedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
 
-   derived_class.js:74:2
-   74| (o.base_initializedField: string); // Error: number ~> string
+   derived_class.js:56:2
+   56| (o.base_initializedField: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:6:27
-    6|   base_initializedField = 42;
+   derived_class.js:5:27
+    5|   base_initializedField = 42;
                                  ^^ [1]
-   derived_class.js:74:27
-   74| (o.base_initializedField: string); // Error: number ~> string
+   derived_class.js:56:27
+   56| (o.base_initializedField: string); // Error: number ~> string
                                  ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:76:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:58:2
 
 Cannot cast `Child.base_initializedField` to number because string [1] is incompatible with number [2].
 [incompatible-cast]
 
-   derived_class.js:76:2
-   76| (Child.base_initializedField: number); // Error: string ~> number
+   derived_class.js:58:2
+   58| (Child.base_initializedField: number); // Error: string ~> number
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:13:34
-   13|   static base_initializedField = 'asdf';
+   derived_class.js:11:34
+   11|   static base_initializedField = 'asdf';
                                         ^^^^^^ [1]
-   derived_class.js:76:31
-   76| (Child.base_initializedField: number); // Error: string ~> number
+   derived_class.js:58:31
+   58| (Child.base_initializedField: number); // Error: string ~> number
                                      ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:79:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:61:2
 
 Cannot cast `o.child_initializedField` to string because number [1] is incompatible with string [2]. [incompatible-cast]
 
-   derived_class.js:79:2
-   79| (o.child_initializedField: string); // Error: number ~> string
+   derived_class.js:61:2
+   61| (o.child_initializedField: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:25:28
-   25|   child_initializedField = 42;
+   derived_class.js:22:28
+   22|   child_initializedField = 42;
                                   ^^ [1]
-   derived_class.js:79:28
-   79| (o.child_initializedField: string); // Error: number ~> string
+   derived_class.js:61:28
+   61| (o.child_initializedField: string); // Error: number ~> string
                                   ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:81:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:63:2
 
 Cannot cast `Child.child_initializedField` to number because string [1] is incompatible with number [2].
 [incompatible-cast]
 
-   derived_class.js:81:2
-   81| (Child.child_initializedField: number); // Error: string ~> number
+   derived_class.js:63:2
+   63| (Child.child_initializedField: number); // Error: string ~> number
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:32:35
-   32|   static child_initializedField = 'asdf';
+   derived_class.js:28:35
+   28|   static child_initializedField = 'asdf';
                                          ^^^^^^ [1]
-   derived_class.js:81:32
-   81| (Child.child_initializedField: number); // Error: string ~> number
+   derived_class.js:63:32
+   63| (Child.child_initializedField: number); // Error: string ~> number
                                       ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:87:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:69:2
 
 Cannot cast `o.base_initializedFieldWithThis` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:87:2
-   87| (o.base_initializedFieldWithThis: string); // Error: number ~> string
+   derived_class.js:69:2
+   69| (o.base_initializedFieldWithThis: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:6:27
-    6|   base_initializedField = 42;
-                                 ^^ [1]
-   derived_class.js:87:35
-   87| (o.base_initializedFieldWithThis: string); // Error: number ~> string
+   derived_class.js:6:34
+    6|   base_initializedFieldWithThis: number = this.base_initializedField;
+                                        ^^^^^^ [1]
+   derived_class.js:69:35
+   69| (o.base_initializedFieldWithThis: string); // Error: number ~> string
                                          ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:89:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:71:2
 
 Cannot cast `Child.base_initializedFieldWithThis` to number because string [1] is incompatible with number [2].
 [incompatible-cast]
 
-   derived_class.js:89:2
-   89| (Child.base_initializedFieldWithThis: number); // Error: string ~> number
+   derived_class.js:71:2
+   71| (Child.base_initializedFieldWithThis: number); // Error: string ~> number
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:13:34
-   13|   static base_initializedField = 'asdf';
-                                        ^^^^^^ [1]
-   derived_class.js:89:39
-   89| (Child.base_initializedFieldWithThis: number); // Error: string ~> number
+   derived_class.js:12:41
+   12|   static base_initializedFieldWithThis: string = this.base_initializedField;
+                                               ^^^^^^ [1]
+   derived_class.js:71:39
+   71| (Child.base_initializedFieldWithThis: number); // Error: string ~> number
                                              ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:92:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:74:2
 
 Cannot cast `o.child_initializedFieldWithThis` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:92:2
-   92| (o.child_initializedFieldWithThis: string); // Error: number ~> string
+   derived_class.js:74:2
+   74| (o.child_initializedFieldWithThis: string); // Error: number ~> string
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:25:28
-   25|   child_initializedField = 42;
-                                  ^^ [1]
-   derived_class.js:92:36
-   92| (o.child_initializedFieldWithThis: string); // Error: number ~> string
+   derived_class.js:23:35
+   23|   child_initializedFieldWithThis: number = this.child_initializedField;
+                                         ^^^^^^ [1]
+   derived_class.js:74:36
+   74| (o.child_initializedFieldWithThis: string); // Error: number ~> string
                                           ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- derived_class.js:94:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:76:2
 
 Cannot cast `Child.child_initializedFieldWithThis` to number because string [1] is incompatible with number [2].
 [incompatible-cast]
 
-   derived_class.js:94:2
-   94| (Child.child_initializedFieldWithThis: number); // Error: string ~> number
+   derived_class.js:76:2
+   76| (Child.child_initializedFieldWithThis: number); // Error: string ~> number
         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:32:35
-   32|   static child_initializedField = 'asdf';
-                                         ^^^^^^ [1]
-   derived_class.js:94:40
-   94| (Child.child_initializedFieldWithThis: number); // Error: string ~> number
+   derived_class.js:29:42
+   29|   static child_initializedFieldWithThis: string = this.child_initializedField;
+                                                ^^^^^^ [1]
+   derived_class.js:76:40
+   76| (Child.child_initializedFieldWithThis: number); // Error: string ~> number
                                               ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:102:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:84:2
 
 Cannot cast `o.base_annotatedInitializedFieldValid` to number because null or undefined [1] is incompatible with
 number [2]. [incompatible-cast]
 
-   derived_class.js:102:2
-   102| (o.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   derived_class.js:84:2
+   84| (o.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:8:40
-     8|   base_annotatedInitializedFieldValid: ?number = 42;
-                                               ^^^^^^^ [1]
-   derived_class.js:102:41
-   102| (o.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-                                                ^^^^^^ [2]
+   derived_class.js:7:40
+    7|   base_annotatedInitializedFieldValid: ?number = 42;
+                                              ^^^^^^^ [1]
+   derived_class.js:84:41
+   84| (o.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+                                               ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:104:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:86:2
 
 Cannot cast `Child.base_annotatedInitializedFieldValid` to number because null or undefined [1] is incompatible with
 number [2]. [incompatible-cast]
 
-   derived_class.js:104:2
-   104| (Child.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   derived_class.js:86:2
+   86| (Child.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:15:47
-    15|   static base_annotatedInitializedFieldValid: ?number = 42;
-                                                      ^^^^^^^ [1]
-   derived_class.js:104:45
-   104| (Child.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-                                                    ^^^^^^ [2]
+   derived_class.js:13:47
+   13|   static base_annotatedInitializedFieldValid: ?number = 42;
+                                                     ^^^^^^^ [1]
+   derived_class.js:86:45
+   86| (Child.base_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+                                                   ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:107:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:89:2
 
 Cannot cast `o.child_annotatedInitializedFieldValid` to number because null or undefined [1] is incompatible with
 number [2]. [incompatible-cast]
 
-   derived_class.js:107:2
-   107| (o.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   derived_class.js:89:2
+   89| (o.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:27:41
-    27|   child_annotatedInitializedFieldValid: ?number = 42;
-                                                ^^^^^^^ [1]
-   derived_class.js:107:42
-   107| (o.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-                                                 ^^^^^^ [2]
+   derived_class.js:24:41
+   24|   child_annotatedInitializedFieldValid: ?number = 42;
+                                               ^^^^^^^ [1]
+   derived_class.js:89:42
+   89| (o.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+                                                ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:109:2
+Error -------------------------------------------------------------------------------------------- derived_class.js:91:2
 
 Cannot cast `Child.child_annotatedInitializedFieldValid` to number because null or undefined [1] is incompatible with
 number [2]. [incompatible-cast]
 
-   derived_class.js:109:2
-   109| (Child.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   derived_class.js:91:2
+   91| (Child.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:34:48
-    34|   static child_annotatedInitializedFieldValid: ?number = 42;
-                                                       ^^^^^^^ [1]
-   derived_class.js:109:46
-   109| (Child.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
-                                                     ^^^^^^ [2]
+   derived_class.js:30:48
+   30|   static child_annotatedInitializedFieldValid: ?number = 42;
+                                                      ^^^^^^^ [1]
+   derived_class.js:91:46
+   91| (Child.child_annotatedInitializedFieldValid: number); // Error: ?number ~> number
+                                                    ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:118:2
+Error ------------------------------------------------------------------------------------------- derived_class.js:100:2
 
 Cannot cast `o.base_annotatedInitializedFieldInvalid` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:118:2
-   118| (o.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:100:2
+   100| (o.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:9:42
-     9|   base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:8:42
+     8|   base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                  ^^^^^^ [1]
-   derived_class.js:118:43
-   118| (o.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:100:43
+   100| (o.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
                                                   ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:120:2
+Error ------------------------------------------------------------------------------------------- derived_class.js:102:2
 
 Cannot cast `Child.base_annotatedInitializedFieldInvalid` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:120:2
-   120| (Child.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:102:2
+   102| (Child.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:16:49
-    16|   static base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:14:49
+    14|   static base_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                         ^^^^^^ [1]
-   derived_class.js:120:47
-   120| (Child.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:102:47
+   102| (Child.base_annotatedInitializedFieldInvalid: string); // Error: number ~> string
                                                       ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:123:2
+Error ------------------------------------------------------------------------------------------- derived_class.js:105:2
 
 Cannot cast `o.child_annotatedInitializedFieldInvalid` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:123:2
-   123| (o.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:105:2
+   105| (o.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:28:43
-    28|   child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:25:43
+    25|   child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                   ^^^^^^ [1]
-   derived_class.js:123:44
-   123| (o.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:105:44
+   105| (o.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
                                                    ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:125:2
+Error ------------------------------------------------------------------------------------------- derived_class.js:107:2
 
 Cannot cast `Child.child_annotatedInitializedFieldInvalid` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:125:2
-   125| (Child.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:107:2
+   107| (Child.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:35:50
-    35|   static child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
+   derived_class.js:31:50
+    31|   static child_annotatedInitializedFieldInvalid: number = 'asdf'; // Error: string ~> number
                                                          ^^^^^^ [1]
-   derived_class.js:125:48
-   125| (Child.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
+   derived_class.js:107:48
+   107| (Child.child_annotatedInitializedFieldInvalid: string); // Error: number ~> string
                                                        ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:132:2
+Error ------------------------------------------------------------------------------------------- derived_class.js:114:2
 
 Cannot cast `o.inherited_initializer` to string because number [1] is incompatible with string [2]. [incompatible-cast]
 
-   derived_class.js:132:2
-   132| (o.inherited_initializer: string); // Error: number ~> string
+   derived_class.js:114:2
+   114| (o.inherited_initializer: string); // Error: number ~> string
          ^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:18:27
-    18|   inherited_initializer = 42;
-                                  ^^ [1]
-   derived_class.js:132:27
-   132| (o.inherited_initializer: string); // Error: number ~> string
+   derived_class.js:33:26
+    33|   inherited_initializer: number;
+                                 ^^^^^^ [1]
+   derived_class.js:114:27
+   114| (o.inherited_initializer: string); // Error: number ~> string
                                   ^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------- derived_class.js:134:2
+Error ------------------------------------------------------------------------------------------- derived_class.js:116:2
 
 Cannot cast `Child.inherited_initializer` to string because number [1] is incompatible with string [2].
 [incompatible-cast]
 
-   derived_class.js:134:2
-   134| (Child.inherited_initializer: string); // Error: number ~> string
+   derived_class.js:116:2
+   116| (Child.inherited_initializer: string); // Error: number ~> string
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   derived_class.js:19:34
-    19|   static inherited_initializer = 42;
-                                         ^^ [1]
-   derived_class.js:134:31
-   134| (Child.inherited_initializer: string); // Error: number ~> string
+   derived_class.js:34:33
+    34|   static inherited_initializer: number;
+                                        ^^^^^^ [1]
+   derived_class.js:116:31
+   116| (Child.inherited_initializer: string); // Error: number ~> string
                                       ^^^^^^ [2]
 
 
@@ -742,9 +966,9 @@ Cannot cast `(new Foo()).outer` to string because number [1] is incompatible wit
         ^^^^^^^^^^^^^^^
 
 References:
-   scoping.js:3:15
-    3| var someVar = 42;
-                     ^^ [1]
+   scoping.js:6:10
+    6|   outer: number = someVar;
+                ^^^^^^ [1]
    scoping.js:24:19
    24| (new Foo().outer: string); // Error: number ~> string
                          ^^^^^^ [2]
@@ -759,9 +983,9 @@ Cannot cast `Foo.outer` to string because number [1] is incompatible with string
         ^^^^^^^^^
 
 References:
-   scoping.js:3:15
-    3| var someVar = 42;
-                     ^^ [1]
+   scoping.js:10:17
+   10|   static outer: number = someVar;
+                       ^^^^^^ [1]
    scoping.js:26:13
    26| (Foo.outer: string); // Error: number ~> string
                    ^^^^^^ [2]
@@ -810,9 +1034,9 @@ Cannot cast `(new Foo()).selfTypedInit` to number because `Foo` [1] is incompati
         ^^^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   scoping.js:8:19
-    8|   selfTypedInit = new Foo();
-                         ^^^^^^^^^ [1]
+   scoping.js:8:18
+    8|   selfTypedInit: Foo = new Foo();
+                        ^^^ [1]
    scoping.js:38:27
    38| (new Foo().selfTypedInit: number); // Error: Foo ~> number
                                  ^^^^^^ [2]
@@ -827,13 +1051,13 @@ Cannot cast `Foo.selfTypedInit` to number because `Foo` [1] is incompatible with
         ^^^^^^^^^^^^^^^^^
 
 References:
-   scoping.js:12:26
-   12|   static selfTypedInit = new Foo();
-                                ^^^^^^^^^ [1]
+   scoping.js:12:25
+   12|   static selfTypedInit: Foo = new Foo();
+                               ^^^ [1]
    scoping.js:40:21
    40| (Foo.selfTypedInit: number); // Error: Foo ~> number
                            ^^^^^^ [2]
 
 
 
-Found 50 errors
+Found 78 errors

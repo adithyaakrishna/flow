@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -31,7 +31,7 @@ let depgraph_subcommand =
           |> connect_flags
           |> strip_root_flag
           |> flag "--out" (required string) ~doc:"Location to print the output file"
-          |> flag "--types" no_arg ~doc:"Only consider type dependencies"
+          |> flag "--types" truthy ~doc:"Only consider type dependencies"
           |> root_flag
         );
     }

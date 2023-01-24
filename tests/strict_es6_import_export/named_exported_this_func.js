@@ -20,8 +20,8 @@ const internal3 = () => { this; };
 // Do not error if this is within a class
 export function thisWithinClass() {
   class C {
-    a = this.b;
-    b;
+    a: void = this.b;
+    b: void;
     classMethod() { this; }
   }
 }
@@ -38,3 +38,6 @@ export function thisWithinNestedAsyncFunction(): () => void {
     this;
   }
 }
+
+// Do not error if the function has a this param
+export function hasThisParam(this: string) { this; }

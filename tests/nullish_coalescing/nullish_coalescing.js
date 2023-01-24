@@ -1,4 +1,4 @@
-function foo(a: ?string, b: ?number, c : bool) {
+function foo(a: ?string, b: ?number, c : boolean) {
   (undefined ?? "hello" : string);
   (a ?? "hello" : string);
   (a ?? "hello" : empty); // Error
@@ -31,5 +31,13 @@ function refinement(x: mixed): mixed {
 }
 
 function g(x: any): string {
+  return x ?? 1;
+}
+
+function h(x: {}): {} {
+  return x ?? 1;
+}
+
+function i(x: {||}): {||} {
   return x ?? 1;
 }

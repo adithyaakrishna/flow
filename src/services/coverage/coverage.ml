@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,7 +16,6 @@
  * Some constructors that we, perhaps controversially, consider concrete are:
  *  - AnyWithLowerBoundT
  *  - AnyWithUpperBoundT
- *  - BoundT
  *  - KeysT
  *
  * In addition to being considered concrete the above constructors are also
@@ -142,7 +141,7 @@ class visitor =
     val mutable tvar_cache : tvar_status IMap.t = IMap.empty
 
     method private tvar cx id =
-      let (root_id, (lazy constraints)) = Context.find_constraints cx id in
+      let (root_id, constraints) = Context.find_constraints cx id in
       if id != root_id then
         self#tvar cx root_id
       else
@@ -178,7 +177,7 @@ class visitor =
       | OpenPredT { base_t = t; m_pos = _; m_neg = _; reason = _ }
       | ShapeT (_, t)
       | GenericT { bound = t; _ }
-      | ThisClassT (_, t, _)
+      | ThisClassT (_, t, _, _)
       | ThisTypeAppT (_, t, _, _) ->
         self#type_ cx t
       | UnionT (_, rep) ->
@@ -188,7 +187,6 @@ class visitor =
         let (t0, (t1, ts)) = InterRep.members_nel rep in
         self#types_nel cx OpAnd (t0, t1 :: ts)
       (* Concrete covered constructors *)
-      | BoundT _
       | CustomFunT _
       | FunProtoT _
       | FunProtoApplyT _
@@ -204,6 +202,7 @@ class visitor =
       | OptionalT _ ->
         (Kind.Checked, Taint.Untainted)
       | DefT (_, t, ArrT _)
+      | DefT (_, t, BigIntT _)
       | DefT (_, t, BoolT _)
       | DefT (_, t, CharSetT _)
       | DefT (_, t, ClassT _)
@@ -218,6 +217,7 @@ class visitor =
       | DefT (_, t, ReactAbstractComponentT _)
       | DefT (_, t, SingletonNumT _)
       | DefT (_, t, SingletonStrT _)
+      | DefT (_, t, SingletonBigIntT _)
       | DefT (_, t, SingletonBoolT _)
       | DefT (_, t, StrT _)
       | DefT (_, t, VoidT)

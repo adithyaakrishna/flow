@@ -1,12 +1,25 @@
-/assets
+# Dependencies
 /node_modules
-_site
-.sass-cache
-.jekyll-cache
-.jekyll-metadata
-.DS_Store
-.asset-cache
+vendor
 
-# Flow build artifacts are copied here:
-/static/master
-/_data/flow_dot_js_versions.csv
+# Production
+/build
+
+# Generated files
+.docusaurus
+.cache-loader
+src/js/flow
+
+# Misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ESLint
+.eslintcache

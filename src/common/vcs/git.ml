@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -28,6 +28,16 @@ let merge_base ?cwd a b =
     in
     Lwt.return result
   | Error _ as err -> Lwt.return err
+
+let merge_base_and_timestamp ?cwd a b =
+  match%lwt merge_base ?cwd a b with
+  | Error _ as err -> Lwt.return err
+  | Ok hash ->
+    (match%lwt git ?cwd ["log"; "--format=%ct"; "-n1"; hash] with
+    | Ok stdout ->
+      (try Lwt.return_ok (hash, Scanf.sscanf stdout "%d" Fun.id) with
+      | _ -> Lwt.return (Error (Errored (Printf.sprintf "Failed to convert timestamp %S" stdout))))
+    | Error _ as err -> Lwt.return err)
 
 let files_changed_since ?cwd hash =
   match%lwt git ?cwd ["diff"; "-z"; "--name-only"; hash] with

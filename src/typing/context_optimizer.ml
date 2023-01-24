@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -61,7 +61,7 @@ let merge_trust_var constr =
 
 class context_optimizer ~no_lowers =
   object (self)
-    inherit [Polarity.t] Type_mapper.t_with_uses as super
+    inherit [Polarity.t] Type_mapper.t as super
 
     val mutable reduced_graph : Type.Constraint.node IMap.t = IMap.empty
 
@@ -84,14 +84,10 @@ class context_optimizer ~no_lowers =
           id
         else
           let t = Flow_js_utils.merge_tvar ~no_lowers cx r id in
-          let node =
-            Root { rank = 0; constraints = Lazy.from_val (FullyResolved (unknown_use, lazy t)) }
-          in
+          let node = Root { rank = 0; constraints = FullyResolved (unknown_use, lazy t) } in
           reduced_graph <- IMap.add id node reduced_graph;
           let t = self#type_ cx pole t in
-          let node =
-            Root { rank = 0; constraints = Lazy.from_val (FullyResolved (unknown_use, lazy t)) }
-          in
+          let node = Root { rank = 0; constraints = FullyResolved (unknown_use, lazy t) } in
           reduced_graph <- IMap.add id node reduced_graph;
           id
       ) else (
@@ -202,12 +198,6 @@ class context_optimizer ~no_lowers =
           OptionalIndexedAccessNonMaybeType { index = OptionalIndexedAccessTypeIndex index_type' }
       | OptionalIndexedAccessNonMaybeType { index = OptionalIndexedAccessStrLitIndex _ } -> t
       | OptionalIndexedAccessResultType _ -> t
-      | Bind t' ->
-        let t'' = self#type_ cx map_cx t' in
-        if t'' == t' then
-          t
-        else
-          Bind t''
       | ReadOnlyType -> t
       | PartialType -> t
       | SpreadType (options, tlist, acc) ->
@@ -244,7 +234,8 @@ class context_optimizer ~no_lowers =
           ReactConfigType default_props'
       | ReactElementPropsType
       | ReactElementConfigType
-      | ReactElementRefType ->
+      | ReactElementRefType
+      | IdxUnwrapType ->
         t
 
     method! type_ cx pole t =
@@ -266,25 +257,6 @@ class context_optimizer ~no_lowers =
             ~find_props:(Context.find_props cx);
         super#type_ cx pole t
       | _ -> super#type_ cx pole t
-
-    method! use_type cx pole use =
-      match use with
-      | UseT (u, t) ->
-        let t' = self#type_ cx Polarity.Neutral t in
-        if t' == t then
-          use
-        else
-          UseT (u, t')
-      | _ -> super#use_type cx pole use
-
-    method! choice_use_tool =
-      (* Any choice kit constraints should be fully
-       * discharged by this point. This preserves a key invariant, that type
-       * graphs are local to a single merge job. In other words, we will not see
-       * a FullyResolveType constraint that corresponds to a tvar from another
-       * context. This makes it possible to clear the type graph before storing
-       * in the heap. *)
-      Utils_js.assert_false "choice kit uses should not appear in signatures"
 
     method get_reduced_graph = reduced_graph
 

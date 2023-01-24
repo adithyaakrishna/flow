@@ -1,14 +1,11 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 open Reason
-
-(* exceptions *)
-exception Not_expect_bound of string
 
 (* propagates sources to sinks following a subtype relation *)
 val flow : Context.t -> Type.t * Type.use_t -> unit
@@ -28,6 +25,8 @@ val flow_p :
   Type.property * Type.property ->
   unit
 
+val flow_use_op : Context.t -> Type.use_op -> Type.use_t -> Type.use_t
+
 val reposition :
   Context.t ->
   ?trace:Type.trace ->
@@ -44,12 +43,21 @@ val reposition_reason :
 val filter_optional : Context.t -> ?trace:Type.trace -> reason -> Type.t -> Type.ident
 
 module Cache : sig
-  val stats_poly_instantiation : Context.t -> Hashtbl.statistics
-
   val summarize_flow_constraint : Context.t -> (string * int) list
 end
 
 val get_builtin_typeapp : Context.t -> ?trace:Type.trace -> reason -> name -> Type.t list -> Type.t
+
+val mk_typeapp_instance_annot :
+  Context.t ->
+  ?trace:Type.trace ->
+  use_op:Type.use_op ->
+  reason_op:Reason.reason ->
+  reason_tapp:Reason.reason ->
+  ?cache:Reason.reason list ->
+  Type.t ->
+  Type.t list ->
+  Type.t
 
 val mk_typeapp_instance :
   Context.t ->
@@ -72,15 +80,24 @@ val resolve_spread_list :
 
 (* polymorphism *)
 
-val subst : Context.t -> ?use_op:Type.use_op -> ?force:bool -> Type.t SMap.t -> Type.t -> Type.t
+val subst :
+  Context.t -> ?use_op:Type.use_op -> ?force:bool -> Type.t Subst_name.Map.t -> Type.t -> Type.t
 
 val check_polarity :
-  Context.t -> ?trace:Type.trace -> Type.typeparam SMap.t -> Polarity.t -> Type.t -> unit
+  Context.t -> ?trace:Type.trace -> Type.typeparam Subst_name.Map.t -> Polarity.t -> Type.t -> unit
 
 (* selectors *)
 
 val eval_selector :
-  Context.t -> ?trace:Type.trace -> reason -> Type.t -> Type.selector -> Type.tvar -> int -> unit
+  Context.t ->
+  ?trace:Type.trace ->
+  annot:bool ->
+  reason ->
+  Type.t ->
+  Type.selector ->
+  Type.tvar ->
+  int ->
+  unit
 
 val visit_eval_id : Context.t -> Type.Eval.id -> (Type.t -> unit) -> unit
 
@@ -111,6 +128,13 @@ val add_output : Context.t -> ?trace:Type.trace -> Error_message.t -> unit
 
 val get_builtin : Context.t -> ?trace:Type.trace -> name -> reason -> Type.t
 
+val get_builtin_result :
+  Context.t ->
+  ?trace:Type.trace ->
+  name ->
+  reason ->
+  (Type.t, Type.t * Env_api.cacheable_env_error Nel.t) result
+
 val get_builtin_tvar : Context.t -> ?trace:Type.trace -> name -> reason -> Type.ident
 
 val get_builtin_type : Context.t -> ?trace:Type.trace -> reason -> ?use_desc:bool -> name -> Type.t
@@ -130,3 +154,5 @@ val widen_obj_type :
   Context.t -> ?trace:Type.trace -> use_op:Type.use_op -> Reason.reason -> Type.t -> Type.t
 
 val resolve_id : Context.t -> int -> Type.t -> unit
+
+module FlowJs : Flow_common.S

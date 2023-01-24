@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -199,18 +199,17 @@ let serialize ?(imports_react = false) ~exact_by_default loc ty =
 let remove_ambiguous_types ~ambiguity_strategy ~exact_by_default ty loc =
   let open Autofix_options in
   match ambiguity_strategy with
-  | Fail ->
-    begin
-      try fail_on_ambiguity ty with
-      | FoundAmbiguousType ->
-        raise
-        @@ expected
-        @@ MulipleTypesPossibleAtPoint
-             {
-               specialized = specialize_temporary_types ty |> serialize ~exact_by_default loc;
-               generalized = generalize_temporary_types ty |> serialize ~exact_by_default loc;
-             }
-    end
+  | Fail -> begin
+    try fail_on_ambiguity ty with
+    | FoundAmbiguousType ->
+      raise
+      @@ expected
+      @@ MulipleTypesPossibleAtPoint
+           {
+             specialized = specialize_temporary_types ty |> serialize ~exact_by_default loc;
+             generalized = generalize_temporary_types ty |> serialize ~exact_by_default loc;
+           }
+  end
   | Generalize -> generalize_temporary_types ty
   | Specialize -> specialize_temporary_types ty
   | Fixme -> fixme_ambiguous_types ty
@@ -352,8 +351,8 @@ class mapper ~strict ~synth_type target =
       p'
   end
 
-let type_lookup_at_location typed_ast loc =
-  match Typed_ast_utils.find_exact_match_annotation typed_ast (ALoc.of_loc loc) with
+let type_lookup_at_location cx typed_ast loc =
+  match Typed_ast_utils.find_exact_match_annotation cx typed_ast (ALoc.of_loc loc) with
   | Some p -> p
   | None -> raise @@ unexpected @@ UnknownTypeAtPoint loc
 
@@ -469,7 +468,7 @@ let add_imports remote_converter stmts =
   let new_imports = remote_converter#to_import_stmts () in
   add_statement_after_directive_and_type_imports stmts new_imports
 
-let insert_type
+let insert_type_scheme
     ~full_cx
     ~file_sig
     ~typed_ast
@@ -478,7 +477,8 @@ let insert_type
     ~ambiguity_strategy
     ?remote_converter
     ast
-    target =
+    target
+    loc_to_type_scheme =
   let file_sig = File_sig.abstractify_locs file_sig in
   let file =
     match target.Loc.source with
@@ -501,12 +501,62 @@ let insert_type
       ~ambiguity_strategy
       ~remote_converter
       location
-      (type_lookup_at_location typed_ast location)
+      (loc_to_type_scheme location)
   in
   let mapper = new mapper ~strict ~synth_type target in
   let (loc, ast') = mapper#program ast in
   let statements = maybe_add_imports ast'.Flow_ast.Program.statements in
   (loc, { ast' with Flow_ast.Program.statements })
+
+let insert_type
+    ~full_cx
+    ~file_sig
+    ~typed_ast
+    ~omit_targ_defaults
+    ~strict
+    ~ambiguity_strategy
+    ?remote_converter
+    ast
+    target =
+  insert_type_scheme
+    ~full_cx
+    ~file_sig
+    ~typed_ast
+    ~omit_targ_defaults
+    ~strict
+    ~ambiguity_strategy
+    ?remote_converter
+    ast
+    target
+    (fun location -> type_lookup_at_location full_cx typed_ast location
+  )
+
+let insert_type_t
+    ~full_cx
+    ~file_sig
+    ~typed_ast
+    ~omit_targ_defaults
+    ~strict
+    ~ambiguity_strategy
+    ?remote_converter
+    ast
+    target
+    type_t =
+  let loc_to_scheme location =
+    let scheme = type_lookup_at_location full_cx typed_ast location in
+    { scheme with Type.TypeScheme.type_ = type_t }
+  in
+  insert_type_scheme
+    ~full_cx
+    ~file_sig
+    ~typed_ast
+    ~omit_targ_defaults
+    ~strict
+    ~ambiguity_strategy
+    ?remote_converter
+    ast
+    target
+    loc_to_scheme
 
 let mk_diff ast new_ast = Flow_ast_differ.(program Standard ast new_ast)
 

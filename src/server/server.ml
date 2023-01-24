@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -43,6 +43,13 @@ let extract_flowlibs_or_exit options =
       Exit.(exit ~msg Could_not_extract_flowlibs))
   | None -> ()
 
+let string_of_saved_state_fetcher options =
+  match Options.saved_state_fetcher options with
+  | Options.Dummy_fetcher -> "none"
+  | Options.Local_fetcher -> "local"
+  | Options.Scm_fetcher -> "scm"
+  | Options.Fb_fetcher -> "fb"
+
 let init ~profiling ?focus_targets genv =
   (* write binary path and version to server log *)
   Hh_logger.info "executable=%s" (Sys_utils.executable_path ());
@@ -60,7 +67,7 @@ let init ~profiling ?focus_targets genv =
 
   extract_flowlibs_or_exit options;
 
-  let%lwt (libs_ok, env, last_estimates) = Types_js.init ~profiling ~workers options in
+  let%lwt (libs_ok, env) = Types_js.init ~profiling ~workers options in
   (* If any libs errored, skip typechecking and just show lib errors. Note
    * that `init` above has done all parsing, not just lib parsing, resolved
    * and committed modules, etc.
@@ -80,7 +87,7 @@ let init ~profiling ?focus_targets genv =
   (* Return an env that initializes invariants required and maintained by
      recheck, namely that `files` contains files that parsed successfully, and
      `errors` contains the current set of errors. *)
-  Lwt.return (env, last_estimates, first_internal_error)
+  Lwt.return (env, first_internal_error)
 
 (* A thread that samples memory stats every second and then logs an idle heartbeat event even
  * `idle_period_in_seconds` seconds. *)
@@ -149,8 +156,8 @@ let rec serve ~genv ~env =
   (* Kick off a thread to wait for a message from the monitor. *)
   let wait_thread =
     ServerMonitorListenerState.wait_for_anything
-      ~process_updates:(fun ?skip_incompatible ->
-        Rechecker.process_updates ?skip_incompatible ~options env)
+      ~process_updates:(fun ~skip_incompatible ->
+        Rechecker.process_updates ~skip_incompatible ~options env)
       ~get_forced:(fun () -> env.ServerEnv.checked_files)
   in
 
@@ -246,39 +253,16 @@ let run ~monitor_channels ~init_id ~shared_mem_config options =
       Hh_logger.info "Initializing Server (This might take some time)";
 
       let should_print_summary = Options.should_profile options in
-      let%lwt (profiling, (env, last_estimates, first_internal_error)) =
+      let%lwt (profiling, (env, first_internal_error)) =
         Profiling_js.with_profiling_lwt program_init ~label:"Init" ~should_print_summary
       in
-      let event =
-        ServerStatus.(
-          Finishing_up
-            { duration = Profiling_js.get_profiling_duration profiling; info = InitSummary }
-        )
-      in
-      MonitorRPC.status_update ~event;
+      MonitorRPC.send_telemetry
+        (LspProt.Init_summary { duration = Profiling_js.get_profiling_duration profiling });
+      MonitorRPC.status_update ~event:ServerStatus.Finishing_up;
 
-      begin
-        match last_estimates with
-        | None -> FlowEventLogger.init_done ?first_internal_error profiling
-        | Some
-            {
-              Recheck_stats.estimated_time_to_recheck;
-              estimated_time_to_restart;
-              estimated_time_to_init;
-              estimated_time_per_file;
-              estimated_files_to_recheck;
-              estimated_files_to_init;
-            } ->
-          FlowEventLogger.init_done
-            ~estimated_time_to_recheck
-            ~estimated_time_to_restart
-            ~estimated_time_to_init
-            ~estimated_time_per_file
-            ~estimated_files_to_recheck
-            ~estimated_files_to_init
-            ?first_internal_error
-            profiling
-      end;
+      let saved_state_fetcher = string_of_saved_state_fetcher options in
+
+      FlowEventLogger.init_done ?first_internal_error ~saved_state_fetcher profiling;
 
       Hh_logger.info "Server is READY";
 
@@ -327,11 +311,8 @@ let check_once ~init_id ~shared_mem_config ~format_errors ?focus_targets options
   PidLog.disable ();
   MonitorRPC.disable ();
 
+  FlowEventLogger.set_eden (Some (Eden.is_eden (Options.root options)));
   LoggingUtils.set_server_options ~server_options:options;
-
-  let should_log_server_profiles = Options.should_profile options && not Sys.win32 in
-  (* This must happen before we create the workers in create_program_init *)
-  if should_log_server_profiles then Flow_server_profile.init ();
 
   let initial_lwt_thread () =
     let (_, program_init) =
@@ -340,15 +321,7 @@ let check_once ~init_id ~shared_mem_config ~format_errors ?focus_targets options
     let should_print_summary = Options.should_profile options in
     let%lwt (profiling, (print_errors, errors, warnings, first_internal_error)) =
       Profiling_js.with_profiling_lwt ~label:"Init" ~should_print_summary (fun profiling ->
-          ( if should_log_server_profiles then
-            let rec sample_processor_info () =
-              Flow_server_profile.processor_sample ();
-              let%lwt () = Lwt_unix.sleep 1.0 in
-              sample_processor_info ()
-            in
-            Lwt.async sample_processor_info
-          );
-          let%lwt (env, _, first_internal_error) = program_init profiling in
+          let%lwt (env, first_internal_error) = program_init profiling in
           let reader = State_reader.create () in
           let (errors, warnings, suppressed_errors) =
             ErrorCollator.get ~profiling ~reader ~options env
@@ -364,15 +337,13 @@ let check_once ~init_id ~shared_mem_config ~format_errors ?focus_targets options
     in
     print_errors profiling;
 
-    let event =
-      ServerStatus.(
-        Finishing_up
-          { duration = Profiling_js.get_profiling_duration profiling; info = InitSummary }
-      )
-    in
-    MonitorRPC.status_update ~event;
+    MonitorRPC.send_telemetry
+      (LspProt.Init_summary { duration = Profiling_js.get_profiling_duration profiling });
+    MonitorRPC.status_update ~event:ServerStatus.Finishing_up;
 
-    FlowEventLogger.init_done ?first_internal_error profiling;
+    let saved_state_fetcher = string_of_saved_state_fetcher options in
+
+    FlowEventLogger.init_done ?first_internal_error ~saved_state_fetcher profiling;
 
     Lwt.return (errors, warnings)
   in

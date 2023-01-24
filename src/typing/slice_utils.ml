@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -34,7 +34,7 @@ let mk_object_type
       (* Wrap the final type in an `ExactT` if we have an exact flag *)
       Base.Option.value_map
         ~f:(fun exact_reason ->
-          if Obj_type.is_legacy_exact_DO_NOT_USE flags.obj_kind then
+          if Obj_type.is_exact flags.obj_kind then
             let exact_reason =
               if invalidate_aliases then
                 update_desc_reason invalidate_rtype_alias exact_reason
@@ -49,7 +49,7 @@ let mk_object_type
   in
   Generic.make_spread_id generics
   |> Base.Option.value_map ~default:t ~f:(fun id ->
-         GenericT { bound = t; reason; id; name = Generic.to_string id }
+         GenericT { bound = t; reason; id; name = Generic.subst_name_of_id id }
      )
 
 let is_widened_reason_desc r =
@@ -109,7 +109,7 @@ let read_prop r flags x p =
       let t = DefT (reason, bogus_trust (), MixedT Mixed_everything) in
       t
   in
-  (t, Obj_type.is_legacy_exact_DO_NOT_USE flags.obj_kind, is_method)
+  (t, Obj_type.is_exact flags.obj_kind, is_method)
 
 let read_dict r { value; dict_polarity; _ } =
   if Polarity.compat (dict_polarity, Polarity.Positive) then
@@ -249,8 +249,8 @@ let spread2
       _inexact_reason2,
       { Object.reason = r2; props = props2; flags = flags2; generics = generics2; interface = _ }
     ) =
-  let exact1 = Obj_type.is_legacy_exact_DO_NOT_USE flags1.obj_kind in
-  let exact2 = Obj_type.is_legacy_exact_DO_NOT_USE flags2.obj_kind in
+  let exact1 = Obj_type.is_exact flags1.obj_kind in
+  let exact2 = Obj_type.is_exact flags2.obj_kind in
   let dict1 = Obj_type.get_dict_opt flags1.obj_kind in
   let dict2 = Obj_type.get_dict_opt flags2.obj_kind in
   let dict =
@@ -392,10 +392,7 @@ let spread2
       match dict with
       | Some d -> Indexed d
       | None ->
-        if
-          Obj_type.is_exact_or_sealed reason flags1.obj_kind
-          && Obj_type.is_exact_or_sealed reason flags2.obj_kind
-        then
+        if Obj_type.is_exact flags1.obj_kind && Obj_type.is_exact flags2.obj_kind then
           Exact
         else
           Inexact
@@ -461,13 +458,12 @@ let spread_mk_object cx reason target { Object.reason = _; props; flags; generic
       (* Type spread result is exact if annotated to be exact *)
       | Annot { make_exact } -> (make_exact, Sealed)
       (* Value spread result is exact if all inputs are exact *)
-      | Value { make_seal } -> (Obj_type.is_legacy_exact_DO_NOT_USE flags.obj_kind, make_seal)
+      | Value { make_seal } -> (Obj_type.is_exact flags.obj_kind, make_seal)
     in
     let dict = Obj_type.get_dict_opt flags.obj_kind in
     let obj_kind =
       match (exact, sealed, dict) with
       | (_, _, Some d) -> Indexed d
-      | (true, Object.Spread.UnsealedInFile x, _) -> UnsealedInFile x
       | (true, _, _) -> Exact
       | _ -> Inexact
     in
@@ -621,7 +617,6 @@ let object_rest
   let rest
       cx
       ~use_op
-      reason
       merge_mode
       { Object.reason = r1; props = props1; flags = flags1; generics = generics1; interface = _ }
       { Object.reason = r2; props = props2; flags = flags2; generics = generics2; interface = _ } =
@@ -634,7 +629,7 @@ let object_rest
             ( merge_mode,
               get_prop r1 p1 dict1,
               get_prop r2 p2 dict2,
-              Obj_type.is_legacy_exact_DO_NOT_USE flags2.obj_kind
+              Obj_type.is_exact flags2.obj_kind
             )
           with
           (* If the object we are using to subtract has an optional property, non-own
@@ -681,7 +676,7 @@ let object_rest
             Some p
           (* If neither object has the prop then we don't add a prop to our
            * result here. *)
-          | ((Sound | IgnoreExactAndOwn | ReactConfigMerge _), None, None, _) -> None
+          | ((Sound | IgnoreExactAndOwn | Omit | ReactConfigMerge _), None, None, _) -> None
           (* If our first object has a prop and our second object does not have that
            * prop then we will copy over that prop. If the first object's prop is
            * non-own then sometimes we may not copy it over so we mark it
@@ -694,7 +689,7 @@ let object_rest
                 Field (None, t, Polarity.Neutral)
             in
             Some p
-          | (ReactConfigMerge _, Some (t, _, m1), None, _) ->
+          | ((Omit | ReactConfigMerge _), Some (t, _, m1), None, _) ->
             let p =
               if m1 then
                 Method (None, t)
@@ -718,6 +713,9 @@ let object_rest
                 Field (None, optional t, Polarity.Neutral)
             in
             Some p
+          (* Omit works like TypeScript's Omit<Obj, 'a' | 'b'> utility type:
+             it will just drop all the fields that appeared in the second type argument. *)
+          | (Omit, Some _, Some _, _) -> None
           (* React config merging is special. We are trying to solve for C
            * in the equation (where ... represents spread instead of rest):
            *
@@ -768,6 +766,9 @@ let object_rest
                 Field (None, optional t1, Polarity.Positive)
             in
             Some p
+          (* Omit works like TypeScript's Omit<Obj, 'a' | 'b'> utility type.
+             If a field doesn't appear in the first argument, it will never appear in the result. *)
+          | (Omit, None, _, _) -> None
           (* Consider this case:
            *
            *     {...{p}, ...C} = {}
@@ -775,7 +776,7 @@ let object_rest
            * For C there will be no prop. However, if the props object is exact
            * then we need to throw an error. *)
           | (ReactConfigMerge _, None, Some (_, _, _), _) ->
-            ( if Obj_type.is_legacy_exact_DO_NOT_USE flags1.obj_kind then
+            ( if Obj_type.is_exact flags1.obj_kind then
               let use_op =
                 Frame (PropertyCompatibility { prop = Some k; lower = r2; upper = r1 }, unknown_use)
               in
@@ -818,7 +819,6 @@ let object_rest
       match (flags1.obj_kind, dict) with
       | (Exact, _) -> Exact
       | (Indexed _, Some d) -> Indexed d
-      | (UnsealedInFile _, _) when Obj_type.sealed_in_op reason flags1.obj_kind -> Exact
       | _ -> Inexact
     in
     let flags = { frozen = false; obj_kind } in
@@ -844,7 +844,7 @@ let object_rest
     let tool = Object.Rest (options, state) in
     recurse cx use_op reason resolve_tool tool t
   | Done base ->
-    let xs = Nel.map_concat (fun slice -> Nel.map (rest cx ~use_op reason options slice) x) base in
+    let xs = Nel.map_concat (fun slice -> Nel.map (rest cx ~use_op options slice) x) base in
     let t =
       match xs with
       | (x, []) -> x
@@ -1007,7 +1007,7 @@ let intersect2
       props2
   in
   let dict =
-    Base.Option.merge dict1 dict2 (fun d1 d2 ->
+    Base.Option.merge dict1 dict2 ~f:(fun d1 d2 ->
         {
           dict_name = None;
           key = intersection d1.key d2.key;
@@ -1022,8 +1022,7 @@ let intersect2
       ~otherwise:
         ( if
           (* TODO(jmbrown): Audit this condition. Should this be a conjunction? *)
-          Obj_type.is_legacy_exact_DO_NOT_USE flags1.obj_kind
-          || Obj_type.is_legacy_exact_DO_NOT_USE flags2.obj_kind
+          Obj_type.is_exact flags1.obj_kind || Obj_type.is_exact flags2.obj_kind
         then
           Exact
         else
@@ -1179,7 +1178,7 @@ let resolve
    * `const {x, ...y} = 3;` tries to get `x` from Number.
    * They don't make sense with $ReadOnly's semantics, since $ReadOnly doesn't model
    * copying/spreading an object. *)
-  | DefT (_, _, (StrT _ | NumT _ | BoolT _))
+  | DefT (_, _, BoolT _)
     when match tool with
          | ObjectWiden _
          | Spread _ ->
@@ -1245,6 +1244,18 @@ let resolve
           }
     in
     resolved ~next ~recurse cx use_op reason resolve_tool tool x
+  | DefT (r, trust, ArrT (TupleAT { elem_t; elements })) when tool = ReadOnly ->
+    let elements =
+      Base.List.map elements ~f:(fun (TupleElement { t; name; polarity = _ }) ->
+          TupleElement { t; name; polarity = Polarity.Positive }
+      )
+    in
+    let def_reason =
+      match desc_of_reason ~unwrap:false reason with
+      | RReadOnlyType -> r
+      | _ -> reason
+    in
+    return cx use_op (DefT (def_reason, trust, ArrT (TupleAT { elem_t; elements })))
   (* If we see an empty then propagate empty to tout. *)
   | DefT (r, trust, EmptyT) -> return cx use_op (EmptyT.make r trust)
   (* Propagate any. *)

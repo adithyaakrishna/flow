@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -41,12 +41,21 @@ class ['loc] lexical_hoister ~flowmin_compatibility ~enable_enums =
     method private add_function_binding entry =
       this#update_acc Bindings.(add (entry, Bindings.Function))
 
+    method private add_declared_function_binding ~predicate entry =
+      this#update_acc Bindings.(add (entry, Bindings.DeclaredFunction { predicate }))
+
+    method private add_declared_class_binding entry =
+      this#update_acc Bindings.(add (entry, Bindings.DeclaredClass))
+
     (* Ignore all statements except variable declarations, class declarations, and
        import declarations. The ignored statements cannot contain lexical
        bindings in the current scope. *)
     method! statement (stmt : ('loc, 'loc) Ast.Statement.t) =
       let open Ast.Statement in
       match stmt with
+      | (_, DeclareModule _) ->
+        (* Hoister should never add inner module declarations to bindings. *)
+        stmt
       | (_, VariableDeclaration _)
       | (_, ClassDeclaration _)
       | (_, DeclareClass _)
@@ -152,18 +161,19 @@ class ['loc] lexical_hoister ~flowmin_compatibility ~enable_enums =
 
     method! declare_class loc (decl : ('loc, 'loc) Ast.Statement.DeclareClass.t) =
       let open Ast.Statement.DeclareClass in
-      this#add_let_binding ~kind:Bindings.Class decl.id;
+      this#add_declared_class_binding decl.id;
       super#declare_class loc decl
 
     method! declare_function loc (decl : ('loc, 'loc) Ast.Statement.DeclareFunction.t) =
+      (* The first binding found wins, so we make sure add a declared function binding when
+       * we come across it before attempting to transform it into a regular function *)
       let open Ast.Statement.DeclareFunction in
+      this#add_declared_function_binding ~predicate:(Option.is_some decl.predicate) decl.id;
       match Declare_function_utils.declare_function_to_function_declaration_simple loc decl with
       | Some stmt ->
         let _ = this#statement (loc, stmt) in
         decl
-      | None ->
-        this#add_function_binding decl.id;
-        super#declare_function loc decl
+      | None -> super#declare_function loc decl
 
     method! enum_declaration _loc (enum : ('loc, 'loc) Ast.Statement.EnumDeclaration.t) =
       let open Ast.Statement.EnumDeclaration in
@@ -180,12 +190,16 @@ class ['loc] hoister ~flowmin_compatibility ~enable_enums ~with_types =
 
     method private add_var_binding entry = this#update_acc Bindings.(add (entry, Bindings.Var))
 
-    method private add_type_binding entry = this#update_acc Bindings.(add (entry, Bindings.Type))
+    method private add_type_binding ~imported entry =
+      this#update_acc Bindings.(add (entry, Bindings.Type { imported }))
 
     method! private add_const_binding ?kind entry =
       if lexical then super#add_const_binding ?kind entry
 
     method! private add_let_binding ?kind entry = if lexical then super#add_let_binding ?kind entry
+
+    method! private add_function_binding entry =
+      if lexical || flowmin_compatibility then super#add_function_binding entry
 
     method! flowmin_compatibility_statement = this#base_statement
 
@@ -222,17 +236,17 @@ class ['loc] hoister ~flowmin_compatibility ~enable_enums ~with_types =
 
     method! type_alias loc (alias : ('loc, 'loc) Ast.Statement.TypeAlias.t) =
       let open Ast.Statement.TypeAlias in
-      if with_types then this#add_type_binding alias.id;
+      if with_types then this#add_type_binding ~imported:false alias.id;
       super#type_alias loc alias
 
     method! opaque_type loc (alias : ('loc, 'loc) Ast.Statement.OpaqueType.t) =
       let open Ast.Statement.OpaqueType in
-      if with_types then this#add_type_binding alias.id;
+      if with_types then this#add_type_binding ~imported:false alias.id;
       super#opaque_type loc alias
 
     method! interface loc (interface : ('loc, 'loc) Ast.Statement.Interface.t) =
       let open Ast.Statement.Interface in
-      if with_types then this#add_type_binding interface.id;
+      if with_types then this#add_type_binding ~imported:false interface.id;
       super#interface loc interface
 
     method! import_declaration loc decl =
@@ -257,7 +271,7 @@ class ['loc] hoister ~flowmin_compatibility ~enable_enums ~with_types =
         | (_, ImportTypeof)
         | (Some ImportType, _)
         | (Some ImportTypeof, _) ->
-          (with_types, this#add_type_binding)
+          (with_types, this#add_type_binding ~imported:true)
       in
       (match specifier with
       | { local = Some binding; remote = _; kind }
@@ -274,7 +288,7 @@ class ['loc] hoister ~flowmin_compatibility ~enable_enums ~with_types =
         | ImportType
         | ImportTypeof
           when with_types ->
-          this#add_type_binding id
+          this#add_type_binding ~imported:true id
         | _ -> ()
       end;
       id
@@ -287,7 +301,7 @@ class ['loc] hoister ~flowmin_compatibility ~enable_enums ~with_types =
         | ImportType
         | ImportTypeof
           when with_types ->
-          this#add_type_binding id
+          this#add_type_binding ~imported:true id
         | _ -> ()
       end;
       id

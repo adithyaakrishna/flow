@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -17,23 +17,30 @@ type result =
       locs: Parsing_heaps.locs_tbl;
       type_sig: Parsing_heaps.type_sig;
       tolerable_errors: File_sig.With_Loc.tolerable_error list;
-      parse_errors: parse_error list;
       exports: Exports.t;
+      imports: Imports.t;
+      cas_digest: Cas_digest.t option;
     }
-  | Parse_fail of parse_failure
+  | Parse_recovered of {
+      ast: (Loc.t, Loc.t) Flow_ast.Program.t;
+      file_sig: File_sig.With_Loc.t;
+      tolerable_errors: File_sig.With_Loc.tolerable_error list;
+      parse_errors: parse_error Nel.t;
+    }
+  | Parse_exn of Exception.t
   | Parse_skip of parse_skip_reason
 
 and parse_skip_reason =
   | Skip_resource_file
   | Skip_non_flow_file
-  | Skip_package_json of (parse_error list * package_json_error option)
+  | Skip_package_json of (Package_json.t, parse_error) Result.t
 
 and parse_error = Loc.t * Parse_error.t
 
 and parse_failure =
+  | Uncaught_exception of Exception.t
   | Docblock_errors of docblock_error list
   | Parse_error of parse_error
-  | File_sig_error of File_sig.With_Loc.error
 
 and docblock_error = Loc.t * docblock_error_kind
 
@@ -43,36 +50,39 @@ and docblock_error_kind =
   | MultipleProvidesModuleAttributes
   | MultipleJSXAttributes
   | InvalidJSXAttribute of string option
-
-and package_json_error = Loc.t * string
+  | MultipleJSXRuntimeAttributes
+  | InvalidJSXRuntimeAttribute
 
 (* results of parse job, returned by parse and reparse *)
 type results = {
   (* successfully parsed files *)
-  parse_ok: FilenameSet.t;
-  (* list of intentionally skipped files *)
-  parse_skips: (File_key.t * Docblock.t) list;
+  parsed: FilenameSet.t;
+  (* list of skipped files *)
+  unparsed: FilenameSet.t;
   (* list of files skipped due to an out of date hash *)
-  parse_hash_mismatch_skips: FilenameSet.t;
+  changed: FilenameSet.t;
   (* list of failed files *)
-  parse_fails: (File_key.t * Docblock.t * parse_failure) list;
+  failed: File_key.t list * parse_failure list;
   (* set of unchanged files *)
-  parse_unchanged: FilenameSet.t;
+  unchanged: FilenameSet.t;
   (* set of files that were not found on disk *)
-  parse_not_found: FilenameSet.t;
+  not_found: FilenameSet.t;
   (* package.json files parsed *)
-  parse_package_json: File_key.t list * package_json_error list;
+  package_json: File_key.t list * parse_error option list;
+  (* set of modules that need to be committed *)
+  dirty_modules: Modulename.Set.t;
 }
 
 let empty_result =
   {
-    parse_ok = FilenameSet.empty;
-    parse_skips = [];
-    parse_hash_mismatch_skips = FilenameSet.empty;
-    parse_fails = [];
-    parse_unchanged = FilenameSet.empty;
-    parse_not_found = FilenameSet.empty;
-    parse_package_json = ([], []);
+    parsed = FilenameSet.empty;
+    unparsed = FilenameSet.empty;
+    changed = FilenameSet.empty;
+    failed = ([], []);
+    unchanged = FilenameSet.empty;
+    not_found = FilenameSet.empty;
+    package_json = ([], []);
+    dirty_modules = Modulename.Set.empty;
   }
 
 (**************************** internal *********************************)
@@ -84,13 +94,11 @@ type types_mode =
   | TypesForbiddenByDefault
 
 type parse_options = {
-  parse_fail: bool;
   parse_types_mode: types_mode;
   parse_use_strict: bool;
   parse_prevent_munge: bool;
   parse_module_ref_prefix: string option;
   parse_facebook_fbt: string option;
-  parse_type_asserts: bool;
   parse_suppress_types: SSet.t;
   parse_max_literal_len: int;
   parse_exact_by_default: bool;
@@ -100,93 +108,36 @@ type parse_options = {
   parse_relay_integration_module_prefix: string option;
   parse_relay_integration_module_prefix_includes: Str.regexp list;
   parse_node_main_fields: string list;
+  parse_distributed: bool;
 }
 
-let parse_source_file ~fail ~types ~use_strict content file =
+let parse_source_file ~types ~use_strict content file =
   let parse_options =
     Some
-      Parser_env.
-        {
-          (*
-           * Always parse ES proposal syntax. The user-facing config option to
-           * ignore/warn/enable them is handled during inference so that a clean error
-           * can be surfaced (rather than a more cryptic parse error).
-           *)
-          enums = true;
-          esproposal_class_instance_fields = true;
-          esproposal_class_static_fields = true;
-          esproposal_decorators = true;
-          esproposal_export_star_as = true;
-          esproposal_optional_chaining = true;
-          esproposal_nullish_coalescing = true;
-          types;
-          use_strict;
-        }
-      
+      {
+        (*
+         * Always parse ES proposal syntax. The user-facing config option to
+         * ignore/warn/enable them is handled during inference so that a clean error
+         * can be surfaced (rather than a more cryptic parse error).
+         *)
+        Parser_env.enums = true;
+        esproposal_decorators = true;
+        types;
+        use_strict;
+      }
   in
 
-  let (ast, parse_errors) = Parser_flow.program_file ~fail ~parse_options content (Some file) in
-  if fail then assert (parse_errors = []);
-  (ast, parse_errors)
+  Parser_flow.program_file ~fail:false ~parse_options content (Some file)
 
-let parse_json_file ~fail content file =
+let parse_package_json_file ~node_main_fields content file =
   let parse_options =
     Some
-      Parser_env.
-        {
-          enums = false;
-          esproposal_class_instance_fields = false;
-          esproposal_class_static_fields = false;
-          esproposal_decorators = false;
-          esproposal_export_star_as = false;
-          esproposal_optional_chaining = false;
-          esproposal_nullish_coalescing = false;
-          types = true;
-          use_strict = false;
-        }
-      
+      { Parser_env.enums = false; esproposal_decorators = false; types = true; use_strict = false }
   in
 
-  (* parse the file as JSON, then munge the AST to convert from an object
-     into a `module.exports = {...}` statement *)
-  let (expr, parse_errors) = Parser_flow.json_file ~fail ~parse_options content (Some file) in
-  if fail then assert (parse_errors = []);
-  let open Ast in
-  let loc_none = Loc.none in
-  let module_exports =
-    ( loc_none,
-      let open Expression in
-      Member
-        {
-          Member._object =
-            (loc_none, Identifier (Flow_ast_utils.ident_of_source (loc_none, "module")));
-          property = Member.PropertyIdentifier (Flow_ast_utils.ident_of_source (loc_none, "exports"));
-          comments = None;
-        }
-    )
-  in
-  let loc = fst expr in
-  let statement =
-    ( loc,
-      Statement.Expression
-        {
-          Statement.Expression.expression =
-            ( loc,
-              Expression.Assignment
-                {
-                  Expression.Assignment.operator = None;
-                  left = (loc_none, Pattern.Expression module_exports);
-                  right = expr;
-                  comments = None;
-                }
-            );
-          directive = None;
-          comments = None;
-        }
-    )
-  in
-  let all_comments = ([] : Loc.t Comment.t list) in
-  ((loc, { Program.statements = [statement]; comments = None; all_comments }), parse_errors)
+  match Parser_flow.package_json_file ~parse_options content (Some file) with
+  | exception Parse_error.Error (err, _) -> Error err
+  | ((_loc, obj), _parse_errors) -> Ok (Package_json.parse ~node_main_fields obj)
 
 (* Avoid lexing unbounded in perverse cases *)
 let docblock_max_tokens = 10
@@ -256,6 +207,9 @@ let extract_docblock =
       | (_, "@preventMunge") :: xs ->
         (* dupes are ok since they can only be truthy *)
         parse_attributes (errors, { info with preventMunge = true }) xs
+      | (_, lti_pragma) :: xs when lti_pragma = "@lti_@" ^ "nocommit" ->
+        (* dupes are ok since they can only be truthy *)
+        parse_attributes (errors, { info with lti = true }) xs
       | [(jsx_loc, "@jsx")] -> ((jsx_loc, InvalidJSXAttribute None) :: errors, info)
       | (jsx_loc, "@jsx") :: (expr_loc, expr) :: xs ->
         let acc =
@@ -274,13 +228,30 @@ let extract_docblock =
               in
               (errors, { info with jsx = Some (expr, jsx_expr) })
             with
-            | Parse_error.Error [] -> ((expr_loc, InvalidJSXAttribute None) :: errors, info)
-            | Parse_error.Error ((_, e) :: _) ->
-              let first_error = Some (Parse_error.PP.error e) in
-              ((expr_loc, InvalidJSXAttribute first_error) :: errors, info)
+            | Parse_error.Error ((_, e), _) ->
+              let e = Some (Parse_error.PP.error e) in
+              ((expr_loc, InvalidJSXAttribute e) :: errors, info)
         in
         parse_attributes acc xs
-      | (_, "@typeAssert") :: xs -> parse_attributes (errors, { info with typeAssert = true }) xs
+      | (loc, "@jsxRuntime") :: (_, "classic") :: xs ->
+        let acc =
+          if info.jsxRuntime <> None then
+            ((loc, MultipleJSXRuntimeAttributes) :: errors, info)
+          else
+            (errors, { info with jsxRuntime = Some JsxRuntimePragmaClassic })
+        in
+        parse_attributes acc xs
+      | (loc, "@jsxRuntime") :: (_, "automatic") :: xs ->
+        let acc =
+          if info.jsxRuntime <> None then
+            ((loc, MultipleJSXRuntimeAttributes) :: errors, info)
+          else
+            (errors, { info with jsxRuntime = Some JsxRuntimePragmaAutomatic })
+        in
+        parse_attributes acc xs
+      | (loc, "@jsxRuntime") :: _ :: xs ->
+        let acc = ((loc, InvalidJSXRuntimeAttribute) :: errors, info) in
+        parse_attributes acc xs
       | _ :: xs -> parse_attributes (errors, info) xs
       | [] -> (errors, info)
     in
@@ -403,13 +374,11 @@ let types_checked types_mode info =
 
 let do_parse ~parse_options ~info content file =
   let {
-    parse_fail = fail;
     parse_types_mode = types_mode;
     parse_use_strict = use_strict;
     parse_prevent_munge = prevent_munge;
     parse_module_ref_prefix = module_ref_prefix;
     parse_facebook_fbt = facebook_fbt;
-    parse_type_asserts = type_asserts;
     parse_suppress_types = suppress_types;
     parse_max_literal_len = max_literal_len;
     parse_exact_by_default = exact_by_default;
@@ -419,6 +388,7 @@ let do_parse ~parse_options ~info content file =
     parse_relay_integration_module_prefix = relay_integration_module_prefix;
     parse_relay_integration_module_prefix_includes = relay_integration_module_prefix_includes;
     parse_node_main_fields = node_main_fields;
+    parse_distributed = distributed;
   } =
     parse_options
   in
@@ -426,18 +396,8 @@ let do_parse ~parse_options ~info content file =
     match file with
     | File_key.JsonFile str ->
       if Filename.basename str = "package.json" then
-        let (ast, parse_errors) = parse_json_file ~fail content file in
-        let package = Package_json.parse ~node_main_fields ast in
-        let package_error_opt =
-          match package with
-          | Ok pkg ->
-            Package_heaps.Package_heap_mutator.add_package_json (File_key.to_string file) pkg;
-            None
-          | Error (loc, str) ->
-            Package_heaps.Package_heap_mutator.add_error (File_key.to_string file);
-            Some (loc, str)
-        in
-        Parse_skip (Skip_package_json (parse_errors, package_error_opt))
+        let result = parse_package_json_file ~node_main_fields content file in
+        Parse_skip (Skip_package_json result)
       else
         Parse_skip Skip_resource_file
     | File_key.ResourceFile _ -> Parse_skip Skip_resource_file
@@ -447,8 +407,7 @@ let do_parse ~parse_options ~info content file =
       if not types_checked then
         Parse_skip Skip_non_flow_file
       else
-        (* NOTE: if ~fail:true, we'll never get parse errors here *)
-        let (ast, parse_errors) = parse_source_file ~fail ~types:true ~use_strict content file in
+        let (ast, parse_errors) = parse_source_file ~types:true ~use_strict content file in
         let prevent_munge = Docblock.preventMunge info || prevent_munge in
         (* NOTE: This is a temporary hack that makes the signature verifier ignore any static
            property named `propTypes` in any class. It should be killed with fire or replaced with
@@ -476,13 +435,16 @@ let do_parse ~parse_options ~info content file =
             relay_integration_module_prefix;
           }
         in
-        (match File_sig.With_Loc.program ~ast ~opts:file_sig_opts with
-        | Error e -> Parse_fail (File_sig_error e)
-        | Ok (file_sig, tolerable_errors) ->
+        let (file_sig, tolerable_errors) = File_sig.With_Loc.program ~ast ~opts:file_sig_opts in
+        (*If you want efficiency, can compute globals along with file_sig in the above function since scope is computed when computing file_sig*)
+        let (_, (_, _, globals)) = Ssa_builder.program_with_scope ~enable_enums ast in
+        if not (Base.List.is_empty parse_errors) then
+          Parse_recovered
+            { ast; file_sig; tolerable_errors; parse_errors = Nel.of_list_exn parse_errors }
+        else
           let sig_opts =
             {
-              Type_sig_parse.type_asserts;
-              suppress_types;
+              Type_sig_parse.suppress_types;
               munge = not prevent_munge;
               ignore_static_propTypes;
               facebook_keyMirror;
@@ -500,6 +462,8 @@ let do_parse ~parse_options ~info content file =
             Type_sig_utils.parse_and_pack_module ~strict sig_opts (Some file) ast
           in
           let exports = Exports.of_module type_sig in
+          let imports = Imports.of_file_sig file_sig in
+          let imports = Imports.add_globals globals imports in
           let tolerable_errors =
             List.fold_left
               (fun acc (_, err) ->
@@ -511,26 +475,56 @@ let do_parse ~parse_options ~info content file =
               tolerable_errors
               sig_errors
           in
-          Parse_ok { ast; file_sig; locs; type_sig; tolerable_errors; parse_errors; exports })
+          (* add digest by distributed flag *)
+          let cas_digest =
+            if distributed then
+              Remote_execution.upload_blob type_sig
+            else
+              None
+          in
+          Parse_ok { ast; file_sig; locs; type_sig; tolerable_errors; exports; imports; cas_digest }
   with
-  | Parse_error.Error (first_parse_error :: _) -> Parse_fail (Parse_error first_parse_error)
   | e ->
     let e = Exception.wrap e in
-    let s = Exception.get_ctor_string e in
-    let loc = Loc.{ none with source = Some file } in
-    let err = (loc, Parse_error.Assertion s) in
-    Parse_fail (Parse_error err)
+    ( if FlowEventLogger.should_log () then
+      let e_str =
+        Printf.sprintf
+          "%s\nBacktrace: %s"
+          (Exception.get_ctor_string e)
+          (Exception.get_full_backtrace_string max_int e)
+      in
+      FlowEventLogger.parsing_exception e_str
+    );
+    Parse_exn e
 
 let hash_content content =
   let state = Xx.init 0L in
   Xx.update state content;
   Xx.digest state
 
-let does_content_match_file_hash ~reader file content =
-  let content_hash = hash_content content in
-  match Parsing_heaps.Reader.get_file_hash ~reader file with
+let content_hash_matches_file_hash ~reader file content_hash =
+  match Parsing_heaps.Mutator_reader.get_file_hash ~reader file with
   | None -> false
   | Some hash -> hash = content_hash
+
+let content_hash_matches_old_file_hash ~reader file content_hash =
+  match Parsing_heaps.Mutator_reader.get_old_file_hash ~reader file with
+  | None -> false
+  | Some hash -> hash = content_hash
+
+let does_content_match_file_hash ~reader file content =
+  let content_hash = hash_content content in
+  match Parsing_heaps.Reader_dispatcher.get_file_hash ~reader file with
+  | None -> false
+  | Some hash -> hash = content_hash
+
+let fold_failed acc worker_mutator file_key file_opt hash module_name error =
+  let dirty_modules =
+    worker_mutator.Parsing_heaps.add_unparsed file_key file_opt hash module_name
+  in
+  let failed = (file_key :: fst acc.failed, error :: snd acc.failed) in
+  let dirty_modules = Modulename.Set.union dirty_modules acc.dirty_modules in
+  { acc with failed; dirty_modules }
 
 (* parse file, store AST to shared heap on success.
  * Add success/error info to passed accumulator. *)
@@ -538,114 +532,161 @@ let reducer
     ~worker_mutator
     ~reader
     ~parse_options
-    ~skip_hash_mismatch
+    ~skip_changed
+    ~skip_unchanged
     ~max_header_tokens
     ~noflow
-    ~parse_unchanged
-    parse_results
-    file : results =
-  (* It turns out that sometimes files appear and disappear very quickly. Just
-   * because someone told us that this file exists and needs to be parsed, it
-   * doesn't mean it actually still exists. If anything goes wrong reading this
-   * file, let's skip it. We don't need to notify our caller, since they'll
-   * probably get the delete event anyway *)
-  let content =
-    let filename_string = File_key.to_string file in
-    try Some (cat filename_string) with
-    | _ -> None
-  in
-  match content with
-  | Some content ->
-    let new_hash = hash_content content in
-    (* If skip_hash_mismatch is true, then we're currently ensuring some files are parsed. That
-     * means we don't currently have the file's AST but we might have the file's hash in the
-     * non-oldified heap. What we want to avoid is parsing files which differ from the hash *)
-    if
-      skip_hash_mismatch && Some new_hash <> Parsing_heaps.Mutator_reader.get_file_hash ~reader file
-    then
-      let parse_hash_mismatch_skips =
-        FilenameSet.add file parse_results.parse_hash_mismatch_skips
+    exported_module
+    acc
+    file_key : results =
+  let file_opt = Parsing_heaps.get_file_addr file_key in
+  match Option.bind file_opt (Parsing_heaps.Mutator_reader.get_parse ~reader) with
+  | Some _ when SharedMem.is_init_transaction () ->
+    (* If we can find an existing entry during the initial transaction, we must
+     * have been asked to parse the same file twice. This can happen if we init
+     * from scratch and walking the file system finds the same file twice.
+     *
+     * Since we must have already parsed the file during this transaction, we
+     * can skip this entirely. *)
+    acc
+  | _ ->
+    let filename_string = File_key.to_string file_key in
+    (match cat filename_string with
+    | exception _ ->
+      (* The file watcher does not distinguish between modified or deleted files,
+       * we distinguish by parsing. Either the wather notified us because the file
+       * was deleted, or because the file was modified and then the file was
+       * deleted before we got to this point.
+       *
+       * In either case, we update the file entity so that the latest data is
+       * empty, indicating no file. We also record these files so their shared
+       * hash table keys can be removed when the transaction commits.
+       *
+       * When `skip_changed` is true, we are ensuring that some files are parsed. We
+       * only want to return the set of files which have unexpectedly changed, but we
+       * do not want to actually modify the heap to reflect those changes. *)
+      let dirty_modules =
+        if skip_changed then
+          Modulename.Set.empty
+        else
+          worker_mutator.Parsing_heaps.clear_not_found file_key
       in
-      { parse_results with parse_hash_mismatch_skips }
-    else
-      let unchanged =
-        match Parsing_heaps.Mutator_reader.get_old_file_hash ~reader file with
-        | Some old_hash when old_hash = new_hash ->
-          (* If this optimization is turned off then still parse the file, even though it's
-           * unchanged *)
-          not parse_unchanged
-        | _ ->
-          (* The file has changed. Let's record the new hash *)
-          worker_mutator.Parsing_heaps.add_hash file new_hash;
-          false
-      in
-      if unchanged then
-        let parse_unchanged = FilenameSet.add file parse_results.parse_unchanged in
-        { parse_results with parse_unchanged }
+      let not_found = FilenameSet.add file_key acc.not_found in
+      let dirty_modules = Modulename.Set.union dirty_modules acc.dirty_modules in
+      { acc with not_found; dirty_modules }
+    | content ->
+      let hash = hash_content content in
+      (* If skip_changed is true, then we're currently ensuring some files are parsed. That
+       * means we don't currently have the file's AST but we might have the file's hash in the
+       * non-oldified heap. What we want to avoid is parsing files which differ from the hash *)
+      if skip_changed && not (content_hash_matches_file_hash ~reader file_key hash) then
+        { acc with changed = FilenameSet.add file_key acc.changed }
+      else if skip_unchanged && content_hash_matches_old_file_hash ~reader file_key hash then
+        { acc with unchanged = FilenameSet.add file_key acc.unchanged }
       else (
-        match parse_docblock ~max_tokens:max_header_tokens file content with
+        match parse_docblock ~max_tokens:max_header_tokens file_key content with
         | ([], info) ->
           let info =
-            if noflow file then
+            if noflow file_key then
               { info with Docblock.flow = Some Docblock.OptOut }
             else
               info
           in
           begin
-            match do_parse ~parse_options ~info content file with
+            match do_parse ~parse_options ~info content file_key with
             | Parse_ok
-                { ast; file_sig; exports; locs; type_sig; tolerable_errors; parse_errors = _ } ->
+                { ast; file_sig; exports; imports; locs; type_sig; cas_digest; tolerable_errors } ->
               (* if parse_options.fail == true, then parse errors will hit Parse_fail below. otherwise,
                  ignore any parse errors we get here. *)
               let file_sig = (file_sig, tolerable_errors) in
-              worker_mutator.Parsing_heaps.add_file file ~exports info ast file_sig locs type_sig;
-              let parse_ok = FilenameSet.add file parse_results.parse_ok in
-              { parse_results with parse_ok }
-            | Parse_fail converted ->
-              let fail = (file, info, converted) in
-              let parse_fails = fail :: parse_results.parse_fails in
-              { parse_results with parse_fails }
-            | Parse_skip (Skip_package_json (_parse_errors, package_json_error)) ->
-              (* if parse_options.fail == true, then parse errors will hit Parse_fail below. otherwise,
-                 ignore any parse errors we get here. *)
-              let parse_skips = (file, info) :: parse_results.parse_skips in
-              let (package_json, package_json_errors) = parse_results.parse_package_json in
-              let package_json_errors =
-                match package_json_error with
-                | Some e -> e :: package_json_errors
-                | None -> package_json_errors
+              let module_name = exported_module file_key (`Module info) in
+              let dirty_modules =
+                worker_mutator.Parsing_heaps.add_parsed
+                  file_key
+                  file_opt
+                  ~exports
+                  ~imports
+                  hash
+                  module_name
+                  info
+                  ast
+                  file_sig
+                  locs
+                  type_sig
+                  cas_digest
               in
-              let parse_package_json = (file :: package_json, package_json_errors) in
-              { parse_results with parse_skips; parse_package_json }
+              let parsed = FilenameSet.add file_key acc.parsed in
+              let dirty_modules = Modulename.Set.union dirty_modules acc.dirty_modules in
+              { acc with parsed; dirty_modules }
+            | Parse_recovered { parse_errors = (error, _); _ } ->
+              let module_name = exported_module file_key (`Module info) in
+              let failure = Parse_error error in
+              fold_failed acc worker_mutator file_key file_opt hash module_name failure
+            | Parse_exn exn ->
+              let module_name = exported_module file_key (`Module info) in
+              let failure = Uncaught_exception exn in
+              fold_failed acc worker_mutator file_key file_opt hash module_name failure
+            | Parse_skip (Skip_package_json result) ->
+              let (error, module_name, package_info) =
+                match result with
+                | Ok pkg ->
+                  let module_name = exported_module file_key (`Package pkg) in
+                  (None, module_name, Ok pkg)
+                | Error err -> (Some err, None, Error ())
+              in
+              let dirty_modules =
+                worker_mutator.Parsing_heaps.add_package
+                  file_key
+                  file_opt
+                  hash
+                  module_name
+                  package_info
+              in
+              let package_json =
+                (file_key :: fst acc.package_json, error :: snd acc.package_json)
+              in
+              let dirty_modules = Modulename.Set.union dirty_modules acc.dirty_modules in
+              { acc with package_json; dirty_modules }
             | Parse_skip Skip_non_flow_file
             | Parse_skip Skip_resource_file ->
-              let parse_skips = (file, info) :: parse_results.parse_skips in
-              { parse_results with parse_skips }
+              let module_name = exported_module file_key (`Module info) in
+              let dirty_modules =
+                worker_mutator.Parsing_heaps.add_unparsed file_key file_opt hash module_name
+              in
+              let unparsed = FilenameSet.add file_key acc.unparsed in
+              let dirty_modules = Modulename.Set.union dirty_modules acc.dirty_modules in
+              { acc with unparsed; dirty_modules }
           end
         | (docblock_errors, info) ->
-          let fail = (file, info, Docblock_errors docblock_errors) in
-          let parse_fails = fail :: parse_results.parse_fails in
-          { parse_results with parse_fails }
-      )
-  | None ->
-    let parse_not_found = FilenameSet.add file parse_results.parse_not_found in
-    { parse_results with parse_not_found }
+          let module_name = exported_module file_key (`Module info) in
+          let dirty_modules =
+            worker_mutator.Parsing_heaps.add_unparsed file_key file_opt hash module_name
+          in
+          let error = Docblock_errors docblock_errors in
+          let failed = (file_key :: fst acc.failed, error :: snd acc.failed) in
+          let dirty_modules = Modulename.Set.union dirty_modules acc.dirty_modules in
+          { acc with failed; dirty_modules }
+      ))
 
 (* merge is just memberwise union/concat of results *)
-let merge r1 r2 =
+let merge a b =
   {
-    parse_ok = FilenameSet.union r1.parse_ok r2.parse_ok;
-    parse_skips = r1.parse_skips @ r2.parse_skips;
-    parse_hash_mismatch_skips =
-      FilenameSet.union r1.parse_hash_mismatch_skips r2.parse_hash_mismatch_skips;
-    parse_fails = r1.parse_fails @ r2.parse_fails;
-    parse_unchanged = FilenameSet.union r1.parse_unchanged r2.parse_unchanged;
-    parse_not_found = FilenameSet.union r1.parse_not_found r2.parse_not_found;
-    parse_package_json =
-      (let (s1, e1) = r1.parse_package_json in
-       let (s2, e2) = r2.parse_package_json in
-       (List.rev_append s1 s2, List.rev_append e1 e2)
+    parsed = FilenameSet.union a.parsed b.parsed;
+    unparsed = FilenameSet.union a.unparsed b.unparsed;
+    changed = FilenameSet.union a.changed b.changed;
+    failed =
+      (let (a1, a2) = a.failed in
+       let (b1, b2) = b.failed in
+       (List.rev_append a1 b1, List.rev_append a2 b2)
       );
+    unchanged = FilenameSet.union a.unchanged b.unchanged;
+    not_found = FilenameSet.union a.not_found b.not_found;
+    package_json =
+      (let (a1, a2) = a.package_json in
+       let (b1, b2) = b.package_json in
+       (List.rev_append a1 b1, List.rev_append a2 b2)
+      );
+    dirty_modules = Modulename.Set.union a.dirty_modules b.dirty_modules;
   }
 
 let opt_or_alternate opt alternate =
@@ -677,7 +718,7 @@ let get_defaults ~types_mode ~use_strict options =
 
 let progress_fn ~total ~start ~length:_ =
   let finished = start in
-  MonitorRPC.status_update ServerStatus.(Parsing_progress { total = Some total; finished })
+  MonitorRPC.status_update ~event:ServerStatus.(Parsing_progress { total = Some total; finished })
 
 let next_of_filename_set ?(with_progress = false) workers filenames =
   if with_progress then
@@ -689,11 +730,12 @@ let parse
     ~worker_mutator
     ~reader
     ~parse_options
-    ~skip_hash_mismatch
+    ~skip_changed
+    ~skip_unchanged
     ~profile
     ~max_header_tokens
     ~noflow
-    ~parse_unchanged
+    exported_module
     workers
     next : results Lwt.t =
   let t = Unix.gettimeofday () in
@@ -702,31 +744,35 @@ let parse
       ~worker_mutator
       ~reader
       ~parse_options
-      ~skip_hash_mismatch
+      ~skip_changed
+      ~skip_unchanged
       ~max_header_tokens
       ~noflow
-      ~parse_unchanged
+      exported_module
   in
   let%lwt results =
     MultiWorkerLwt.call workers ~job:(List.fold_left reducer) ~neutral:empty_result ~merge ~next
   in
   if profile then
     let t2 = Unix.gettimeofday () in
-    let ok_count = FilenameSet.cardinal results.parse_ok in
-    let skip_count = List.length results.parse_skips in
-    let not_found_count = FilenameSet.cardinal results.parse_not_found in
-    let mismatch_count = FilenameSet.cardinal results.parse_hash_mismatch_skips in
-    let fail_count = List.length results.parse_fails in
-    let unchanged_count = FilenameSet.cardinal results.parse_unchanged in
+    let num_parsed = FilenameSet.cardinal results.parsed in
+    let num_unparsed = FilenameSet.cardinal results.unparsed in
+    let num_changed = FilenameSet.cardinal results.changed in
+    let num_failed = List.length (fst results.failed) in
+    let num_unchanged = FilenameSet.cardinal results.unchanged in
+    let num_not_found = FilenameSet.cardinal results.not_found in
+    let total =
+      num_parsed + num_unparsed + num_changed + num_failed + num_unchanged + num_not_found
+    in
     Hh_logger.info
       "parsed %d files (%d ok, %d skipped, %d not found, %d bad hashes, %d failed, %d unchanged) in %f"
-      (ok_count + skip_count + mismatch_count + fail_count)
-      ok_count
-      skip_count
-      not_found_count
-      mismatch_count
-      fail_count
-      unchanged_count
+      total
+      num_parsed
+      num_unparsed
+      num_not_found
+      num_changed
+      num_failed
+      num_unchanged
       (t2 -. t)
   else
     ();
@@ -739,11 +785,10 @@ let reparse
     ~profile
     ~max_header_tokens
     ~noflow
-    ~parse_unchanged
+    exported_module
     ~with_progress
     ~workers
     ~modified:files =
-  (* save old parsing info for files *)
   let (master_mutator, worker_mutator) = Parsing_heaps.Reparse_mutator.create transaction files in
   let next = next_of_filename_set ?with_progress workers files in
   let%lwt results =
@@ -751,30 +796,20 @@ let reparse
       ~worker_mutator
       ~reader
       ~parse_options
-      ~skip_hash_mismatch:false
+      ~skip_changed:false
+      ~skip_unchanged:true
       ~profile
       ~max_header_tokens
       ~noflow
-      ~parse_unchanged
+      exported_module
       workers
       next
   in
-  let modified = results.parse_ok in
-  let modified =
-    List.fold_left (fun acc (fail, _, _) -> FilenameSet.add fail acc) modified results.parse_fails
-  in
-  let modified =
-    List.fold_left (fun acc (skip, _) -> FilenameSet.add skip acc) modified results.parse_skips
-  in
-  let modified = FilenameSet.union modified results.parse_hash_mismatch_skips in
-  let not_found = FilenameSet.union modified results.parse_not_found in
-  let unchanged = FilenameSet.diff (FilenameSet.diff files modified) not_found in
-  (* restore old parsing info for unchanged files *)
-  Parsing_heaps.Reparse_mutator.revive_files master_mutator unchanged;
-  Lwt.return (modified, results)
+  Parsing_heaps.Reparse_mutator.record_unchanged master_mutator results.unchanged;
+  Parsing_heaps.Reparse_mutator.record_not_found master_mutator results.not_found;
+  Lwt.return results
 
-let make_parse_options_internal
-    ?(fail = true) ?(types_mode = TypesAllowed) ?use_strict ~docblock options =
+let make_parse_options_internal ?(types_mode = TypesAllowed) ?use_strict ~docblock options =
   let use_strict =
     match use_strict with
     | Some use_strict -> use_strict
@@ -789,13 +824,11 @@ let make_parse_options_internal
     | None -> default
   in
   {
-    parse_fail = fail;
     parse_types_mode = types_mode;
     parse_use_strict = use_strict;
     parse_prevent_munge = prevent_munge;
     parse_module_ref_prefix = module_ref_prefix;
     parse_facebook_fbt = facebook_fbt;
-    parse_type_asserts = Options.type_asserts options;
     parse_suppress_types = Options.suppress_types options;
     parse_max_literal_len = Options.max_literal_length options;
     parse_exact_by_default = Options.exact_by_default options;
@@ -806,30 +839,30 @@ let make_parse_options_internal
     parse_relay_integration_module_prefix_includes =
       Options.relay_integration_module_prefix_includes options;
     parse_node_main_fields = Options.node_main_fields options;
+    parse_distributed = Options.distributed options;
   }
 
-let make_parse_options ?fail ?types_mode ?use_strict docblock options =
-  make_parse_options_internal ?fail ?types_mode ?use_strict ~docblock:(Some docblock) options
+let make_parse_options ?types_mode ?use_strict docblock options =
+  make_parse_options_internal ?types_mode ?use_strict ~docblock:(Some docblock) options
 
 let parse_with_defaults ?types_mode ?use_strict ~reader options workers next =
   let (types_mode, use_strict, profile, max_header_tokens, noflow) =
     get_defaults ~types_mode ~use_strict options
   in
-  let parse_options =
-    make_parse_options_internal ~fail:true ~use_strict ~types_mode ~docblock:None options
-  in
-  let parse_unchanged = true in
+  let parse_options = make_parse_options_internal ~use_strict ~types_mode ~docblock:None options in
+  let exported_module = Module_js.exported_module ~options in
   (* This isn't a recheck, so there shouldn't be any unchanged *)
   let worker_mutator = Parsing_heaps.Parse_mutator.create () in
   parse
     ~worker_mutator
     ~reader
     ~parse_options
-    ~skip_hash_mismatch:false
+    ~skip_changed:false
+    ~skip_unchanged:false
     ~profile
     ~max_header_tokens
     ~noflow
-    ~parse_unchanged
+    exported_module
     workers
     next
 
@@ -838,9 +871,8 @@ let reparse_with_defaults
   let (types_mode, use_strict, profile, max_header_tokens, noflow) =
     get_defaults ~types_mode ~use_strict options
   in
-  let parse_unchanged = false in
-  (* We're rechecking, so let's skip files which haven't changed *)
   let parse_options = make_parse_options_internal ~types_mode ~use_strict ~docblock:None options in
+  let exported_module = Module_js.exported_module ~options in
   reparse
     ~transaction
     ~reader
@@ -848,7 +880,7 @@ let reparse_with_defaults
     ~profile
     ~max_header_tokens
     ~noflow
-    ~parse_unchanged
+    exported_module
     ~with_progress
     ~workers
     ~modified
@@ -860,14 +892,12 @@ let ensure_parsed ~reader options workers files =
   let (types_mode, use_strict, profile, max_header_tokens, noflow) =
     get_defaults ~types_mode:None ~use_strict:None options
   in
-  (* We want to parse unchanged files, since this is our first time parsing them *)
-  let parse_unchanged = true in
   (* We're not replacing any info, so there's nothing to roll back. That means we can just use the
    * simple Parse_mutator rather than the rollback-able Reparse_mutator *)
   let worker_mutator = Parsing_heaps.Parse_mutator.create () in
   let progress_fn ~total ~start ~length:_ =
     MonitorRPC.status_update
-      ServerStatus.(Parsing_progress { total = Some total; finished = start })
+      ~event:ServerStatus.(Parsing_progress { total = Some total; finished = start })
   in
   let%lwt files_missing_asts =
     MultiWorkerLwt.call
@@ -886,25 +916,28 @@ let ensure_parsed ~reader options workers files =
   in
   let next = MultiWorkerLwt.next ~progress_fn workers (FilenameSet.elements files_missing_asts) in
   let parse_options = make_parse_options_internal ~types_mode ~use_strict ~docblock:None options in
+  let exported_module = Module_js.exported_module ~options in
   let%lwt {
-        parse_ok = _;
-        parse_skips = _;
-        parse_hash_mismatch_skips;
-        parse_fails = _;
-        parse_unchanged = _;
-        parse_not_found;
-        parse_package_json = _;
+        parsed = _;
+        unparsed = _;
+        changed;
+        failed = _;
+        unchanged = _;
+        not_found;
+        package_json = _;
+        dirty_modules = _;
       } =
     parse
       ~worker_mutator
       ~reader
       ~parse_options
-      ~skip_hash_mismatch:true
+      ~skip_changed:true
+      ~skip_unchanged:false
       ~profile
       ~max_header_tokens
       ~noflow
-      ~parse_unchanged
+      exported_module
       workers
       next
   in
-  Lwt.return (FilenameSet.union parse_not_found parse_hash_mismatch_skips)
+  Lwt.return (FilenameSet.union changed not_found)

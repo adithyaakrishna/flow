@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -292,7 +292,7 @@ module Friendly = struct
   (* Adds some message to the beginning of a group message. *)
   let append_group_message message { group_message; group_message_list; group_message_post } =
     {
-      group_message = message @ text " " :: uncapitalize group_message;
+      group_message = message @ (text " " :: uncapitalize group_message);
       group_message_list;
       group_message_post;
     }
@@ -303,11 +303,11 @@ module Friendly = struct
   let message_group_of_error =
     let message_of_frames frames acc_frames =
       let frames = Base.List.concat (List.rev (frames :: acc_frames)) in
-      Base.List.concat (Base.List.intersperse (List.rev frames) [text " of "])
+      Base.List.concat (Base.List.intersperse (List.rev frames) ~sep:[text " of "])
     in
     let message_of_explanations ~sep explanations acc_explanations =
       let explanations = Base.List.concat (List.rev (explanations :: acc_explanations)) in
-      Base.List.concat (Base.List.intersperse (List.rev explanations) [text "."; text sep])
+      Base.List.concat (Base.List.intersperse (List.rev explanations) ~sep:[text "."; text sep])
     in
     let rec flatten_speculation_branches
         ~show_all_branches ~hidden_branches ~high_score acc_frames acc_explanations acc = function
@@ -387,7 +387,7 @@ module Friendly = struct
          * the root. *)
         let message =
           match error.root with
-          | Some { root_message; _ } when show_root -> root_message @ text " " :: message
+          | Some { root_message; _ } when show_root -> root_message @ (text " " :: message)
           | _ -> message
         in
         let message =
@@ -417,7 +417,7 @@ module Friendly = struct
           if frames = [] then
             message
           else
-            message @ text " in " :: frames
+            message @ (text " in " :: frames)
         in
         let explanations =
           Base.Option.value_map
@@ -429,13 +429,13 @@ module Friendly = struct
           if explanations = [] then
             message
           else
-            message @ text ". " :: explanations
+            message @ (text ". " :: explanations)
         in
         (* Add the root to our error message when we are configured to show
          * the root. *)
         let message =
           match error.root with
-          | Some { root_message; _ } when show_root -> root_message @ text " " :: message
+          | Some { root_message; _ } when show_root -> root_message @ (text " " :: message)
           | _ -> message
         in
         (* Finish our error message with a period. But only if frames
@@ -525,7 +525,7 @@ module Friendly = struct
                   if message = [] then
                     root_message
                   else
-                    root_message @ text " " :: message
+                    root_message @ (text " " :: message)
                 | _ -> message
               in
               (* Finish our error message with a colon. *)
@@ -577,7 +577,7 @@ module Friendly = struct
               let group_message_post =
                 let explanations =
                   if List.length explanations > 0 then
-                    text "\n\n" :: explanations @ [text "."]
+                    (text "\n\n" :: explanations) @ [text "."]
                   else
                     explanations
                 in
@@ -591,7 +591,7 @@ module Friendly = struct
             else
               ( group_message_list,
                 if List.length explanations > 0 then
-                  Some (text "\n" :: explanations @ [text "."])
+                  Some ((text "\n" :: explanations) @ [text "."])
                 else
                   None
               )
@@ -684,7 +684,7 @@ module Friendly = struct
     in
     fun message_group ->
       let acc = loop [] message_group in
-      Base.List.concat (Base.List.intersperse (List.rev acc) [text " "])
+      Base.List.concat (Base.List.intersperse (List.rev acc) ~sep:[text " "])
 
   (* Converts our friendly error to a classic error message. *)
   let to_classic error =
@@ -712,11 +712,10 @@ module Friendly = struct
       extra =
         ( if not (IMap.is_empty references) then
           InfoLeaf [(Loc.none, ["References:"])]
-          ::
-          (references
-          |> IMap.bindings
-          |> Base.List.map ~f:(fun (id, loc) -> InfoLeaf [(loc, ["[" ^ string_of_int id ^ "]"])])
-          )
+          :: (references
+             |> IMap.bindings
+             |> Base.List.map ~f:(fun (id, loc) -> InfoLeaf [(loc, ["[" ^ string_of_int id ^ "]"])])
+             )
         else
           []
         );
@@ -748,7 +747,7 @@ let mk_error
       trace,
       {
         loc;
-        root = Base.Option.map root (fun (root_loc, root_message) -> { root_loc; root_message });
+        root = Base.Option.map root ~f:(fun (root_loc, root_message) -> { root_loc; root_message });
         message = Normal { message; frames; explanations; code = error_code };
       }
     )
@@ -787,7 +786,7 @@ let mk_speculation_error
       trace,
       {
         loc;
-        root = Base.Option.map root (fun (root_loc, root_message) -> { root_loc; root_message });
+        root = Base.Option.map root ~f:(fun (root_loc, root_message) -> { root_loc; root_message });
         message = Speculation { frames; explanations; branches; code = error_code };
       }
     )
@@ -806,7 +805,7 @@ type stdin_file = (Path.t * string) option
 let append_trace_reasons message_list trace_reasons =
   match trace_reasons with
   | [] -> message_list
-  | _ -> message_list @ BlameM (Loc.none, "Trace:") :: trace_reasons
+  | _ -> message_list @ (BlameM (Loc.none, "Trace:") :: trace_reasons)
 
 let default_style text = (Tty.Normal Tty.Default, text)
 
@@ -848,7 +847,7 @@ let relative_lib_path ~strip_root filename =
   match strip_root with
   | Some root ->
     let root_str = Printf.sprintf "%s%s" (Path.to_string root) sep in
-    if String_utils.string_starts_with filename root_str then
+    if String.starts_with ~prefix:root_str filename then
       relative_path ~strip_root filename
     else
       Printf.sprintf "<BUILTINS>%s%s" sep (Filename.basename filename)
@@ -936,7 +935,6 @@ let file_of_source source =
   | Some (File_key.JsonFile filename)
   | Some (File_key.ResourceFile filename) ->
     Some filename
-  | Some File_key.Builtins -> None
   | None -> None
 
 let loc_of_printable_error ((_, _, { Friendly.loc; _ }) : 'loc printable_error) = loc
@@ -1202,6 +1200,7 @@ module Cli_output = struct
        convenient to keep the flags about errors co-located *)
     max_warnings: int option;
     one_line: bool;
+    list_files: bool;
     show_all_errors: bool;
     show_all_branches: bool;
     unicode: bool;
@@ -1256,9 +1255,7 @@ module Cli_output = struct
           | (None, Some (File_key.JsonFile filename))
           | (None, Some (File_key.ResourceFile filename)) ->
             (filename, false)
-          | (None, Some File_key.Builtins)
-          | (None, None) ->
-            failwith "Should only have lib and source files at this point"
+          | (None, None) -> failwith "Should only have lib and source files at this point"
         in
         [comment_style s] @ see_another_file ~is_lib original_filename @ [default_style "\n"]
       | (Some code_lines, Some filename) ->
@@ -1298,7 +1295,7 @@ module Cli_output = struct
                 1
             in
             let underline = String.make underline_size '^' in
-            line_number_style line_number_text :: highlighted_line
+            (line_number_style line_number_text :: highlighted_line)
             @ [comment_style (Printf.sprintf "\n%s%s %s" padding underline s)]
             @ see_another_file ~is_lib filename
             @ [default_style "\n"]
@@ -1414,9 +1411,7 @@ module Cli_output = struct
           | Some (JsonFile filename)
           | Some (ResourceFile filename) ->
             relative_path ~strip_root filename ^ pos
-          | Some Builtins
-          | None ->
-            ""
+          | None -> ""
         )
       )
     in
@@ -2072,9 +2067,7 @@ module Cli_output = struct
       | Some (JsonFile filename)
       | Some (ResourceFile filename) ->
         relative_path ~strip_root filename
-      | Some Builtins
-      | None ->
-        "(builtins)"
+      | None -> "(builtins)"
     )
 
   exception Oh_no_file_contents_have_changed
@@ -2247,7 +2240,9 @@ module Cli_output = struct
                      let width = width + 2 + String.length string_id in
                      let acc =
                        dim_style "["
-                       :: (Tty.Normal (get_tty_color id colors), string_id) :: dim_style "]" :: acc
+                       :: (Tty.Normal (get_tty_color id colors), string_id)
+                       :: dim_style "]"
+                       :: acc
                      in
                      (width, acc))
                    (1, [default_style " "])
@@ -2408,12 +2403,11 @@ module Cli_output = struct
                 (List.fold_left
                    (fun acc code_frame ->
                      code_frame
-                     ::
-                     [
-                       default_style (String.make (gutter_width + max_line_number_length) ' ');
-                       dim_style ":";
-                       default_style "\n";
-                     ]
+                     :: [
+                          default_style (String.make (gutter_width + max_line_number_length) ' ');
+                          dim_style ":";
+                          default_style "\n";
+                        ]
                      :: acc)
                    [code_frame]
                    code_frames
@@ -2488,7 +2482,7 @@ module Cli_output = struct
         let filename = file_of_source loc.source in
         let lines = read_lines_in_file loc filename stdin_file in
         let lines =
-          Base.Option.map lines (fun line_list ->
+          Base.Option.map lines ~f:(fun line_list ->
               (* Print every line by appending the line number and appropriate
                * gutter width. *)
               let (_, lines) =
@@ -2581,18 +2575,29 @@ module Cli_output = struct
         if not with_filename then
           lines
         else
-          Base.Option.map lines (fun lines ->
-              let space = String.make 3 ' ' in
-              let filename = print_file_key ~strip_root loc.source in
-              let filename =
-                filename
-                ^ ":"
-                ^ string_of_int loc.start.line
-                ^ ":"
-                ^ string_of_int (loc.start.column + 1)
-              in
-              space ^ filename ^ "\n" ^ lines
-          )
+          let space = String.make 3 ' ' in
+          let filename = print_file_key ~strip_root loc.source in
+          match lines with
+          | None ->
+            (* if the file has no lines -- couldn't read it, empty file, or loc
+               is pointing at the whole file (line 0, col 0) -- then point at
+               the filename itself. *)
+            let underline = String.make (String.length filename) '^' in
+            let id =
+              match id with
+              | Some id when id > 0 -> " [" ^ string_of_int id ^ "]"
+              | _ -> ""
+            in
+            Some (space ^ filename ^ "\n" ^ space ^ underline ^ id ^ "\n")
+          | Some lines ->
+            let filename =
+              filename
+              ^ ":"
+              ^ string_of_int loc.start.line
+              ^ ":"
+              ^ string_of_int (loc.start.column + 1)
+            in
+            Some (space ^ filename ^ "\n" ^ lines)
       in
       (* Print the locations for all of our references. *)
       let references =
@@ -2928,9 +2933,25 @@ module Cli_output = struct
       Base.Option.iter lazy_msg ~f:(Printf.fprintf out_channel "\n%s\n");
       ()
 
+  let list_files ~out_channel ~strip_root ~errors ~warnings =
+    let fold_files error acc =
+      match Loc.source (loc_of_printable_error error) with
+      | None -> acc
+      | Some file -> SSet.add (print_file_key ~strip_root (Some file)) acc
+    in
+    let files =
+      SSet.empty
+      |> ConcreteLocPrintableErrorSet.fold fold_files errors
+      |> ConcreteLocPrintableErrorSet.fold fold_files warnings
+    in
+    SSet.iter (Printf.fprintf out_channel "%s\n%!") files
+
   let print_errors
       ~out_channel ~flags ?(stdin_file = None) ~strip_root ~errors ~warnings ~lazy_msg () =
-    format_errors ~out_channel ~flags ~stdin_file ~strip_root ~errors ~warnings ~lazy_msg ()
+    if flags.list_files then
+      list_files ~out_channel ~strip_root ~errors ~warnings
+    else
+      format_errors ~out_channel ~flags ~stdin_file ~strip_root ~errors ~warnings ~lazy_msg ()
 end
 
 (* JSON output *)
@@ -2954,8 +2975,7 @@ module Json_output = struct
         | CommentM _ -> "Comment"
       in
       ("descr", JSON_String desc)
-      ::
-      ("type", JSON_String type_)
+      :: ("type", JSON_String type_)
       ::
       (match loc with
       | None -> deprecated_json_props_of_loc ~strip_root Loc.none
@@ -3055,12 +3075,12 @@ module Json_output = struct
       in
       JSON_Object
         (("message", json_of_infos ~json_of_message infos)
-         ::
-         (match kids with
-         | None -> []
-         | Some kids ->
-           let kids = Base.List.map ~f:(json_of_info_tree ~json_of_message) kids in
-           [("children", JSON_Array kids)])
+        ::
+        (match kids with
+        | None -> []
+        | Some kids ->
+          let kids = Base.List.map ~f:(json_of_info_tree ~json_of_message) kids in
+          [("children", JSON_Array kids)])
         )
     )
 
@@ -3403,9 +3423,7 @@ module Vim_emacs_output = struct
   let string_of_loc ~strip_root loc =
     Loc.(
       match loc.source with
-      | None
-      | Some File_key.Builtins ->
-        ""
+      | None -> ""
       | Some file ->
         let file = Reason.string_of_source ~strip_root file in
         let line = loc.start.line in
@@ -3442,8 +3460,7 @@ module Vim_emacs_output = struct
         Buffer.add_string buf (to_pp_string ~strip_root prefix message1);
         List.iter
           begin
-            fun message ->
-            Buffer.add_string buf (to_pp_string ~strip_root "" message)
+            (fun message -> Buffer.add_string buf (to_pp_string ~strip_root "" message))
           end
           rest_of_error);
       Buffer.contents buf
@@ -3465,8 +3482,8 @@ module Vim_emacs_output = struct
       List.iter
         begin
           fun s ->
-          output_string oc s;
-          output_string oc "\n"
+            output_string oc s;
+            output_string oc "\n"
         end
         sl;
       flush oc

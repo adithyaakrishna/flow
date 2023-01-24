@@ -1,3 +1,723 @@
+### 0.198.1
+
+* Fix a regression in 0.198.0 that can lead to a crash
+
+### 0.198.0
+
+Likely to cause new Flow errors:
+* Implicit coercion of booleans to numbers is consistently disallowed. Previously, booleans could be implicitly coerced to numbers in addition expressions. Prefer explicitly converting booleans to numbers.
+* Binary arithmetic errors are now reported on the expression rather than the operands, and use error code `unsafe-arithmetic`.
+* `keyof`, `undefined`, `never`, `unknown`, and `readonly` are now reserved types. If you have a user-defined types of these names, rename them to something else.
+
+New Features:
+* TypeScript syntax helpers. To help people familiar with TypeScript syntax ramp up on similar Flow syntax:
+  * Parse and error on `keyof` type operator, recommending `$Keys<...>` instead.
+  * Parse and error on `undefined` type, recommending `void` instead.
+  * Parse and error on `never` type, recommending `empty` instead.
+  * Parse and error on `unknown` type, recommending `mixed` instead.
+  * Parse and error on `readonly` applied to tuple and array type syntax.
+  * Parse and error on usage of `in`/`out`/`in out` variance annotations.
+  * Parse and error on `as`, `as const`, and `satisfies` cast expressions.
+* Add a codemod to fix underconstrained-implicit-instantiation errors only detectable under LTI. You can run `flow codemod annotate-implicit-instantiations --include-lti --ignore-suppressed --write .`
+
+Notable bug fixes:
+* Fix a bug in LTI mode where some errors were hidden in implicit instantiation calls (e.g. [Try Flow](https://flow.org/try/#0CYUwxgNghgTiAEIAeAHA9jALvAZgVwDsxMBLNA+PAZxAGUQJxMMAeWgGnltoD4AKAFDx4NRsQwAueHyqYomEFNoBKeAF4eXDgOVLaAbgECw5WfBTrKNemOYwZches2z5IAHQpl++AHpf8ACSFAAyACqB8AAGrgpR8CRUCQQ4IDBwwPBQSVEAtiRIIMDxUASZVGjwmAAWiVlgYCBUSVTVaHgQmQBGCKWI6RhAA))
+* Fix unsound behavior of sentinel refinement with unions of numeric types as tags (e.g. [Try Flow](https://flow.org/try/#0CYUwxgNghgTiAEA3W8AeAuAUPeAfeA3gC4CeADiOvAIwB0ADHjbdQDTxlUB2ArgLYAjEDAC+2JsXKV4AJnad4AZyIwAllwDmIgNyZMqgGbwAFKlqkK8ALw3m9ewEpC407QXK1mh9vgB6X0oAFgD2PBDA8MIwwTDwvILC8AB+AHxKKuoamGJAA))
+* No annotation is required in LTI for callback parameters when the callee is a refined object member (e.g. [Try Flow](https://flow.org/try/#0CYUwxgNghgTiAEA3W8AeAueBveBbA-JgBRgBGxAdphQK66kgwCU8AvAHxID2AlsCx2594AXwDcAKFQA6XPABk8tLKI02nHCKZigA))
+
+IDE:
+* When typing in an object literal, entire method signatures from the object type will be suggested.
+* Method signature autocomplete items are now visually distinguished from other kinds of autocomplete items.
+* Fix manually triggering autocomplete on the last empty line of a file giving no results.
+* Members from `Object.prototype` are no longer included in autocomplete results.
+
+Parser:
+* Fix parsing of `for await (async of ...)` (regressed in 0.197.0)
+* Fix parsing of `for (let in x)` in non-strict mode
+* Fix parsing of class fields named `static`
+* Fix missing parse errors on keywords containing escape sequences (regressed in 0.180.0)
+* Fix missing parse error when using `await` as a parameter in an async arrow function
+* Fix missing parse error for `export { ReservedWord as ... }`
+* Fix incorrect parse error on `export * as ReservedWord from ...`, which is now allowed
+* Treat `&&` and `||` as tokens when parsing types to improve error messages
+* Parse the argument of the `typeof` type argument as a value, not a type, as it is a value
+
+Library Definitions:
+* Add `Element.getAttributeNames(): Array<string>`
+
+### 0.197.0
+
+Local Type Inference:
+
+  We are releasing a new inference mode called [local type inference](https://medium.com/flow-type/introducing-local-type-inference-for-flow-6af65b7830aa). You can enable this new mode in your codebase by adding `inference_mode=lti` to the `[options]` section in the flowconfig. We will describe more details on this inference mode in an upcoming blog post.
+
+Likely to cause new Flow errors:
+* Unannotated class properties initialized with null will now errors.
+* We now require all generic functions to be fully annotated.
+* `bool` is a deprecated alias for `boolean`. Added a `deprecated-type-bool` lint and `flow fix --error-codes deprecated-type` codemod to help migrate to `boolean`. This lint is also included in the `deprecated-type` lint; if `deprecated-type` is enabled, you can opt out with `deprecated-type-bool=off`
+
+New Features:
+* Tuple improvements:
+  * `$ReadOnly` utility makes tuples read-only. E.g. `$ReadOnly<[string, number]>` is the same as `[+a: string, +b: number]`.
+  * Tuple elements can now have their variance annotated, when the element is labeled. E.g. `type T = [+foo: number, +bar: string]` creates a read-only tuple.
+  * You can now label tuple elements (like TypeScript allows). The labels have no type-checking effect, they just help with self documentation (like indexer labels). When a function argument rest element is a tuple type, the labels work like parameter names in signature help.
+  * We now parse tuple spread elements, but type checking of this feature is still unsupported.
+  * These new features are now supported in Flow, but we have not upgraded related tools yet. For example, Prettier won't be able to format your code that uses variance annotations on tuples.
+* Allow `mixed` or `any` as an annotation to a `catch` parameter (but not anything else)
+* When typing in a class body, method signatures from super classes and interfaces will be suggested to make overriding/implementing these methods easier.
+
+Notable bug fixes:
+* Improve the parser's error recovery when in the middle of adding type parameters.
+* Trigger autocomplete in JSX tags, JSX attribute values, and private class fields.
+* Improves performance of bigints in big union checks
+
+Misc:
+* Inferred recursive types are shown as `any` (instead of `V$n`) in hover types.
+
+Parser:
+* `symbol` is now a reserved type
+* `for (async of [])` is now a parse error
+
+Library Definitions:
+* Updated `AbortController` and `AbortSignal` signatures
+* Actually expose `ReactSetStateFunction` type introduced in the last release.
+
+### 0.196.3
+
+* Fix a bug that could cause IDE commands to fail while a recheck is ongoing
+
+### 0.196.2
+
+🎁 This is ~~(hopefully)~~ our ~~last~~second to last release of the year. Happy holidays! 🎁
+
+* Improve performance when unions flow to intersections
+* Fix a crash when using the experimental `saved_state.allow_reinit` option
+
+### 0.196.1
+
+* Fix some missing autocomplete results (regression in 0.196.0)
+
+### 0.196.0
+
+Likely to cause new Flow errors:
+* Instead of `mixed`, type the result of `Object.values` and `Object.entries` on a dictionary to be the dictionary values, and `Object.entries` keys to behave like `Object.keys`. Closes #2174, #2221, #4771, #4997, #5838.
+* Ban array inputs to `Object.values` and `Object.entries`.
+* Function's `name` and `length` property are now not writable.
+* Fix `Object.keys`, `$Values`, and `$Keys` on interfaces with indexers.
+* Delete `$Subtype` and `$SuperType` utilities.
+* Delete `deprecated-utility` Flow lint.
+
+New Features:
+* An annotation is no longer required when exporting + expressions (e.g., `export default (3 + 3 : number)` can now just be `export default 3 + 3;`).
+
+Notable bug fixes:
+* Fix unary and binary arithmetic operations on bigints being exported/imported across modules as `any` or `number`.
+* Fix autocomplete of string literals in bracket syntax, after a quote has already been typed.
+* Improve sorting of results when autocompleting types.
+* Boolean CLI flags must now be `1` or `true` to be truthy. Before, anything other than `0` and `false` was considered truthy.
+
+Misc:
+* Autocomplete results are now sorted case-insensitively.
+* Autocomplete results are now sorted using a fuzzy score, in the same manner as VSCode.
+
+Library Definitions:
+* Add `ReactSetStateFunction` type alias in react. This is the type of `setVal` in `const [val, setVal] = React.useState(...)`.
+
+### 0.195.2
+
+Misc:
+*  Adds an `--experimental.run-post-inference-implicit-instantiation true/false` CLI flag
+to override the respective experimental flowconfig option.
+
+### 0.195.1
+
+Misc:
+* Improved performance for the experimental post-inference implicit instantiation checks.
+
+
+
+### 0.195.0
+
+* Add a quick fix for the `unused-promise-in-async-scope` lint which will insert `void`.
+* Add `symbol` and `bigint` to `$NotNullOrVoid`
+* Add `findLast` to `Array` definition
+
+### 0.194.0
+
+Likely to cause new Flow errors:
+* Casting an enum to `empty` will now properly error, e.g. `(E.A: empty)`.
+
+New Features:
+* Added a quick fix for the `unused-promise-in-async-scope` lint which will insert `await`.
+* Added support for a number of additional bigint features. These include allowing comparison (`<`, `>`, `<=`, `>=`), update (`++`, `--`) and arithmetic operators (`+`, `-`, `~`, `*`) to be used with bigints.
+* Added `sketchy-null-bigint` lint to match the behavior of the other `sketchy-null-*` lints for bigints.
+* Added Flow Enums support for `declare enum` and `declare export enum`. Keep in mind that users need to have enabled Flow Enums if you wish to create library definitions that use them.
+
+Parser:
+* Switch to dune to build and install the `flow_parser` OPAM package. Some modules in `src/parser/` like `Comment_utils` are newly available.
+* Decrease the size of `flow_parser.js` by roughly 25%, to 768kb.
+* Fix a bug where `declare opaque type` was parsed as an `OpaqueType` when interned comments are disabled.
+
+### 0.193.0
+
+New Features:
+* Add support for bigint. This includes the bigint type itself, subtyping with literals, libdefs, typeof, and sentinel refinement. For now, literal types are limited to 64 bit ints. Later changes may lift this restriction as well as implement support for operators.
+
+Notable bug fixes:
+* Fix a few bugs related to the Haste package resolver. The Haste resolver falls back to the Node resolver when resolving packages. It now obeys the `module.system.node.root_relative_dirname` setting when doing so. Also, scoped package names are now supported in the Haste module resolver.
+* Allow private readonly properties to be written to in constructors, just like regular readonly properties.
+
+Misc:
+* Update team members in CONTRIBUTING.md.
+* When using `module.system=haste`, importing packages in `node_modules` folders now obeys Node's resolution algorithm, rather than being able to be required from anywhere in the project.
+
+Library Definitions:
+* Add a default generic value for getOwnPropertyDescriptor.
+
+### 0.192.0
+
+Notable changes:
+* The `exact_empty_objects` flag and the `annotate_empty_object` codemod are now deleted, See https://medium.com/flow-type/improved-handling-of-the-empty-object-in-flow-ead91887e40c for more details.
+* We have announced in a [previous blog post](https://medium.com/flow-type/introducing-local-type-inference-for-flow-6af65b7830aa) that we are working on a new inference mode in Flow. Now the inference mode is mostly working, but there might still be some bugs remaining. You can try it out by adding `inference_mode=experimental.lti` to your flowconfig.
+
+Likely to cause new Flow errors:
+* Unknown computed properties assignments are now completely banned. Previously, they were still allowed if the object is inexact.
+* `cannot-resolve-name` errors now are emitted for every use of an undefined variable, not just the first.
+
+New Features:
+* Added an experimental flow lint for unused promises in async scope. You can enable it by adding `unused-promise-in-async-scope` in the lint section of your flowconfig.
+
+Misc:
+* `annotate-use-state` and `annotate-use-callback` codemod commands have been merged into `annotate-react-hooks`4
+* Added an experimental "scm" saved state fetcher, which selects a saved state based on your currently source control revision.
+
+Library Definitions:
+* Added support for Array.prototype.at
+* Fixed WeakSet type parameter bound to be `interface {}`
+
+### 0.191.0
+
+Likely to cause new Flow errors:
+* The `exact_empty_objects` option is now enabled by default. Details about this change and how to update your codebase are covered [on our blog](https://medium.com/flow-type/improved-handling-of-the-empty-object-in-flow-ead91887e40c).
+* The `typeof X` type annotation now respects the initialization state of `X`: if `X` hasn't been declared it will be an error to get its type.
+
+Notable changes:
+* The `enforce_local_inference_annotations` config option was removed. To migrate your codebase, run the following codemod to add the required annotations: `flow codemod annotate-lti`. More details on the changes are explained in the [Requiring More Annotations to Functions and Classes in Flow blog post](https://medium.com/flow-type/requiring-more-annotations-to-functions-and-classes-in-flow-e8aa9b1d76bd).
+* Literals can be suggested by autocomplete in more cases
+* Fixed autocompleting specifiers in an import statement
+
+### 0.190.1
+
+* Fix a bug on Windows where the server would exit unexpectedly after `hg update`
+* Performance improvements
+
+### 0.190.0
+
+Note:
+Due to large number of likely new Flow errors that will be introduced in the next release, we decided to create an extra release to ease the upgrade process.
+We announced in the recent [blog post](https://medium.com/flow-type/requiring-more-annotations-to-functions-and-classes-in-flow-e8aa9b1d76bd) that we would remove the `enforce_local_inference_annotations` option in flowconfigs, as it became the default in v0.189.0. This change will be delayed to v0.191.0 instead.
+
+Likely to cause new Flow errors:
+* Flow will now error on indexed write to exact objects without indexed type.
+* Flow now requires that the target of `extends` clauses in class definitions are either variables, casts, or member expressions, rather than allowing arbitrary expressions.
+* We fixed a bug in which type arguments were not passed to the type parameters of static callable methods.
+* We unblocked constraints involving `any` and type applications like `Promise<T>`, which may cause new downstream errors to be discovered.
+
+Notable bug fixes:
+* Fix a bug that can cause the Flow server to unnecessarily restart when Watchman restarts
+
+### 0.189.0
+
+Likely to cause new Flow errors:
+* `enforce_local_inference_annotations` is now on by default. To migrate your codebase run the following codemod to add the required annotations: `flow codemod annotate-lti`. More details on the changes are explained in the [Requiring More Annotations to Functions and Classes in Flow blog post](https://medium.com/flow-type/requiring-more-annotations-to-functions-and-classes-in-flow-e8aa9b1d76bd).
+
+New Features:
+* Class members can be suggested by autocomplete even if `this` is not typed explicitly.
+
+Notable bug fixes:
+* We will now consistently emit `object-this-reference` errors. Previously these errors were missing when the object is an argument of `Object.freeze()`, `Object.defineProperties()` or `Object.create()`.
+* Fix crash when walking directories that can't be accessed.
+* Fixed a potential crash when two type identifiers are declared in the same block.
+
+Library Definitions:
+* Improve `fs.readFile` type definition when the `encoding` config option is supplied.
+
+### 0.188.2
+
+Bug fixes:
+* Fix crash during incremental recheck
+
+Performance:
+* Improve performance of auto-imports index update for large codebases
+
+### 0.188.1
+
+Bug fixes:
+* Fix a crash when querying hg
+
+Misc:
+* We renamed the codemod command `flow codemod annotate-lti` to `flow codemod annotate-functions-and-classes` to clarify that this is not the only codemod necessary for enabling LTI eventually.
+
+### 0.188.0
+
+Likely to cause new Flow errors:
+* Previously we supported a weird JS runtime rule for constructor returns when you call `new SomeClass`:
+- If the returned value is primitive, then it's ignored and the instance will be returned instead.
+- If the returned value is object like, then the return object will be the eval result of `new SomeClass`.
+This is confusing, and we dropped support for this feature in this release. Now we enforce that all class constructors must return void.
+* Fixed a bug preventing refinements from being invalidated in inline `&&` expressions: examples like `typeof x === 'number' && reassignXToString() && (x: number)` were passing even if `reassignXToString()` assigned a a string value to `x`.
+
+New Features:
+* `flow codemod annotate-lti` is now provided to help prepare your codebase to enable the `enforce_local_inference_annotations=true` flag. In order to eventually enable local type inference, we will require additional annotations in places we can't contextually type your code. You can enable the annotation enforcement now with `enforce_local_inference_annotations=true` in flowconfig. This flag enables the behaviors of all the following experimental flags, which will be deleted in the next release:
+```
+experimental.enforce_local_inference_annotations=true
+experimental.enforce_this_annotations=true
+experimental.enforce_class_annotations=true
+```
+To migrate your codebase, you can run the following codemod to prepare your codebase for the new requirement: `flow codemod annotate-lti`. Check out an upcoming blog post for more details.
+
+Misc:
+* Remove the `file_watcher.watchman.survive_restarts` flowconfig option, which was deprecated in 0.158.0. We will always try to survive Watchman restarts.
+* Remove the `experimental.refactor` flowconfig option. It has been `true` by default since v0.158.0.
+
+Library Definitions:
+* Updates the typing of 'fs.promises.readdir()' to reflect the possibility of passing 'withFileTypes: true' and receiving an array of Dirent objects
+
+### 0.187.1
+
+* Fix a crash introduced in 0.187.0 when the file walker fails to open a directory
+
+### 0.187.0
+
+Likely to cause new Flow errors:
+* JSX expressions in a file with jsx pragma of member expressions (e.g. `@jsx Foo.bar`) will no longer be incorrectly considered as unreachable. This might uncover previously hidden errors.
+* Functions statics (i.e. assigning properties to functions) are safer, but also a bit more restricted. Function statics should be assigned in the same statement list as the function (i.e. not conditionally).
+
+New Features:
+* When autocompleting in the middle of a word, autocomplete now inserts the suggestion, instead of replacing the entire word. For example, if you are completing in `foo|Baz` (cursor at `|`) and choose `fooBar`, you'll now get `fooBarBaz` instead of `fooBar`. In VS Code, you can press shift-enter to replace instead of insert.
+
+Bug fixes:
+* Fix Go to Definition on certain kinds of import statements
+* Improve location of error references pointing at imported namespaces (D38978756 mroch)
+* Fix some missing references in CLI errors (D38977164 mroch)
+* Improve location of error messages referring to `declare module` exports (D38977152 mroch)
+* Change `flow get-def --json` to write `{"error": message}` to stdout on error, instead of writing non-JSON to stderr
+* Fix a garbage collector bug that rarely could lead to crashes
+
+Library Definitions:
+* Allow access of arbitrary properties from `import.meta`. They are typed as `mixed`
+* Add support for MediaSourceHandle
+
+### 0.186.0
+
+Notable breaking changes:
+* Support for `inference_mode=classic` has been removed. The default is now `inference_mode=constrain_writes`. Please refer to the [blog post](https://medium.com/flow-type/new-flow-language-rule-constrained-writes-4c70e375d190) for migration paths. Additionally we have removed all codemod commands that depend on the classic inference mode. This includes the `annotate-declarations`, `rename-redefinitions` and `annotate-escaped-generics` codemods.
+
+Likely to cause new Flow errors:
+* Exported functions can only have properties assigned in the same scope as the function.
+* Improve behavior of index property access with union types ([try-Flow](https://flow.org/try/#0C4TwDgpgBAslC8UDeAoKUCGAuKA7ArgLYBGEATgDRpTE4DOwZAlrgOZUC+A3CgCYQBjADYYy0AG6io4nDADaAcgwKoAHygLiCgLo9xCKAGYuUAPSmodABYB7fEN64FwKOTI2ymXCEIeIKfUQAIiCTc0tbe0dnVzJ3TwxvXzEgA) example). May cause new errors in interaction with computed properties.
+* Referencing `this` in object getters and setters are now banned. Referencing `this` in object methods are already banned, and this change makes Flow's behavior more consistent.
+
+Notable bug fixes:
+* Fixed a regression in destructuring checking with computed properties ([issue](https://github.com/facebook/flow/issues/8921)).
+
+Library Definitions:
+* Added `PerformanceServerTiming` definition and the `serverTiming` attribute to `PerformanceResourceTiming`.
+
+### 0.185.2
+
+New Features:
+* Flow now supports the `@jsxRuntime` pragma in the top docblock of each JS module. Allowed values are `classic` and `automatic`.
+
+### 0.185.1
+
+Misc:
+* Improve the experimental mode to rank autoimport suggestions by how often they're imported (`autoimports_ranked_by_usage=true`)
+
+### 0.185.0
+
+Likely to cause new Flow errors:
+* Unbound names in jsx-pragma when the jsx-pragma is not a simple identifier will now consistently point to the jsx pragma.
+* Errors previously hidden by method-unbinding will reappear.
+* Fix a bug that makes assignments in loop guards like `x = some expression containing x` have a type that's effectively `any`. If you turned on `inference_mode=constrain_writes` since the last release, there will be new errors.
+* Remove `esproposal_export_star_as` as an option and make this the default as it made it into the JS standard in 2018.
+* Additional `value-as-type` errors might be emitted, as a result of existing importing errors.
+* Object rest on instances no longer results in an unsealed object (that can have properties added after the fact)
+
+New Features:
+* `inference_mode=constrain_writes` will be the default. `inference_mode=classic`, which is the current default, will be removed in the next release. Please refer to the [blog post](https://medium.com/flow-type/new-flow-language-rule-constrained-writes-4c70e375d190) for migration paths.
+
+Misc:
+* Fix flow-remove-types/jest transformer to be compatible with Jest 28. (Thanks @carloscuesta)
+* Add codemod to remove annotations in destructuring - which we banned in 0.176
+
+Library Definitions:
+* Add missing `.x` and `.y` properties to DOMRect. (Thanks @pmer)
+
+### 0.184.0
+
+Upcoming Breaking Changes:
+
+* New Inference Mode:
+
+  We are releasing a new inference mode that marks significant progress on our way to local type inference. You can enable this new mode in your codebase by adding `inference_mode=constrain_writes` to the `[options]` section in the flowconfig.
+
+  We will make `inference_mode` default to `constrain_writes` in v0.185, and remove the `classic` option in v0.186. To migrate your codebase, you can run the following codemods to prepare your codebase for the new inference mode:
+
+  ```
+  flow codemod rename-redefinitions
+  flow codemod annotate-declarations
+  ```
+
+  We will describe more details on this inference mode in an upcoming blog post.
+
+* Additional Annotation Requirements:
+
+  In order to eventually enable local type inference, we will require additional annotations in places we can't contextually type your code. You can enable the annotation enforcement now with the following flags in flowconfig:
+
+  ```
+  experimental.enforce_local_inference_annotations=true
+  experimental.enforce_this_annotations=true
+  experimental.enforce_class_annotations=true
+  ```
+
+  To migrate your codebase, you can run the following codemod to prepare your codebase for the new requirement: `flow codemod annotate-lti-experimental`
+
+Likely to cause new Flow errors:
+
+* `Object.create` now results in a sealed object. Arbitrary properties can no longer be read/written from/to it. You can use the `__proto__` property in object annotations to create an annotation if you need to.
+
+Notable bug fixes:
+* Fix spurious object subtyping errors when an object literal is passed into rest arguments with tuple type
+  ```
+  function emit(...args: [{+bar: string}]): void {}
+  emit({ bar: "" }); // no longer emits incompatible-variance
+  ```
+* Fix a bug on Windows that could lead to a crash if files are changed faster than they can be rechecked
+
+`flow-upgrade`:
+* Add a codemod to collapse multiline object initialization into one object literal - useful for enabling the `exact_empty_objects` flowconfig option
+
+Library Definitions:
+* Add DOMTokenList index signature
+
+### 0.183.1
+
+* Fix a regression in 0.183.0 on Windows where inconsistent handling of slashes within paths led to mismatches like "duplicate provider" errors
+
+### 0.183.0
+
+Likely to cause new Flow errors:
+* We now emit new errors in places where an object literal has literal types, but doesn't have an annotation. You can usually fix these errors by adding annotations to object literals.
+
+New Features:
+* Allow export of empty object without annotation when `exact_empty_objects` is enabled.
+* Improve annotate `useState` codemod to support `null`/`undefined`/empty-array arguments.
+
+Notable bug fixes:
+* Allow flowconfigs with blank lines before the first config section.
+* Fix location of error message about legacy octal number types.
+* Fix inconsistent blank lines around auto-imports.
+* Fix bug where Watchman events might be ignored on Windows.
+
+Parser:
+* Fix parser exception on negative binary and octal number types that contain whitespace after the minus sign.
+
+Library Definitions:
+* Improved `fs.readdir` and `fs.readdirSync` to allow better overload resolution.
+* Add `String.prototype.replaceAll()` (Thanks @dav-s).
+
+### 0.182.0
+
+Likely to cause new Flow errors:
+* `var` re-declarations are now banned. You should use `let` or `const` instead.
+* Flow will now emit escaped-generic errors when the return type of a generic predicate function contains type parameters defined by the function.
+
+Notable bug fixes:
+* Improve ordering of autoimport suggestions, so that globals are suggested above named imports.
+
+Misc:
+* Errors related to class expressions might have new locations.
+
+
+### 0.181.2
+
+* Fix the rendering of classes in autocomplete results
+* Fix the ordering of class methods in autocomplete results
+* Improve ability to recover from Watchman restarting (the fix in 0.181.0 was incomplete)
+* Fix a bug where warnings would be incorrectly reported when using saved state, and could cause a crash.
+* Add `--saved-state-verify` flag to check that a saved state matches what is expected to be on disk.
+
+### 0.181.1
+
+Notable bug fixes:
+* The JS build for try-flow is now fixed. It's recently broken since the 0.181.0 release.
+
+### 0.181.0
+
+Notable bug fixes:
+* Fix unsound spreading of empty array literals ([example](https://flow.org/try/#0G4QwTgBCELwQ2gXQNwCgQDoAOBXAzgBYAUAjAJRqiQBGAXBAIJhggCeAPHgC5gCWAdgHMAfLAQYJIFBAD0MiIQD2OADYATCAFNmisEA))
+* Fix a race condition that could cause individual requests from the IDE to hang indefinitely
+* Improve ability to recover from Watchman restarting
+
+Parser:
+* Fix parsing of invalid UTF-8 to raise the correct "Malformed unicode" parse error
+* Fix line numbers when regex character classes contain an (invalid) newline, which could've led to a crash
+
+Library Definitions:
+* Add AudioContext constructor options
+* Update Node's `v8` module
+
+### 0.180.1
+
+Notable bug fixes:
+Reverted changes that cause Flow to generate a corrupted saved-state when libdef changes.
+
+### 0.180.0
+
+Likely to cause new Flow errors:
+* Generator functions without return type annotations now default the type of the `next` parameter to `void`. If a non-void `next` type is desired for a function, it will have to be annotated.
+* When `experimental.enforce_local_inference_annotations` is enabled, Flow now requires annotations on functions returned from async or generator functions.
+* Return statements that return objects no longer widen the object type to match the return annotation, if present. This may lead to additional errors, which can be addressed by adding annotations onto variables that are returned.
+
+New Features:
+* Optimize initialization from saved state.
+* When `experimental.enforce_local_inference_annotations` is enabled, Flow now has a code action to auto-annotate parameters of functions that have `missing-local-annot` errors.
+
+Notable bug fixes:
+* Fix broken IDE services when the file contains certain invalid type annotations, `import type * ...`, `export async ...` statements or nameless named exports.
+* Fix some potential deadlocks on Windows.
+
+Misc:
+* Add `--no-enums` flag to `flow ast`.
+
+Parser:
+* Fix a runtime exception when parsing regexes via the JS version of the parser.
+* Fix crash when the input is a lone quote.
+* Fix missing syntax errors when functions with non-simple params contain `"use strict"`
+
+Library Definitions:
+* Add type signature for `Navigator.canShare()`.
+
+### 0.179.0
+
+Likely to cause new Flow errors:
+* Improve the type checking of function parameters that use destructuring, have an annotation, and also have a default value.
+
+Notable bug fixes:
+* Fix IDE services in the presence of certain types of parse errors.
+* Fix crash when encountering an unexpected `\/`. This could have broken IDE integrations while typing.
+* Fix crash with invalid for-await loops.
+
+Parser:
+*  Add parser support for ES2022 `d` RegExp flag (see [RegExp Match Indices]((https://github.com/tc39/proposal-regexp-match-indices))).
+
+Library Definitions:
+* Add void to the React$Node type.
+
+### 0.178.1
+
+Notable Bug Fixes:
+* [fix] Fix a crash during incremental recheck when an empty string import (`e.g. import ''`) is added.
+* [fix] Fix a stackoverflow caused by extremely large objects
+* [fix] Fix an incremental update issue where Flow would sometimes resolve requires to stale Haste modules which have no provider files
+
+### 0.178.0
+
+Likely to cause new Flow errors:
+* Improve type incompatibility error messages on default function parameters
+* Invalidate refinements on calls of `require`, since requiring a module can have side effects
+
+New Features:
+* Add types for React 18 hooks: `useId`, `useInsertionEffect` and `useSyncExternalStore`
+
+Notable bug fixes:
+* `x instanceof A` when `x` is typed as `any` refines it to `A` instead of `empty`
+* Fix an issue with `[include]` entries containing both globs and relative paths on Windows
+* Fix crash when declaring a destructured binding in a library definition
+* Fix missing autocomplete results for JSX component properties when the component's type is recursive
+* Fix analysis of unreachable += expressions
+* Fix incremental typechecking bug when adding files in Haste mode
+
+Parser:
+* Fix parser exception when parsing `export interface ...` or `export enum ...`
+
+### 0.177.0
+
+Likely to cause new Flow errors:
+* Fix a bug where refinements should be invalidated when going through multiple control flow branches (thanks @gnprice)
+* Make catch parameters explicitely `any` typed
+* Ban object spreads of numbers and strings
+* Fix a bug that makes Flow consider some function names to have the empty type
+* Numbers, booleans, and enums are no longer subtypes of the empty interface `interface {}`
+* Previously incorrectly missing errors might appear in expressions of the form `name === 'literal'` and `name.prop === 'literal'` complaining that `literal` is incompatible with the type of `name` or `name.prop`.
+* Update input type of Object.{values,entries} to be `interface {}` rather than `$NotNullOrVoid`; `number` and `boolean` inputs will now error
+
+New Features:
+* Add codemod to add explicit type arguments to `useState` when it is called with an empty object. Use with `flow codemod annotate-use-state`
+* Continue type checking files with indeterminate module types.
+
+Notable bug fixes:
+* Do not add further errors when we already errored on the illegal reassignment.
+* Flow now checks whether `literal` is a subtype of `expr` in `expr === literal`, regardless of whether `expr === literal` can be applied as a refinement
+* Fix a crash when deleting a file or saving a file with parse errors in certain circumstances
+* Fix a rare crash when files are deleted during rechecks
+* Fix a parser bug that allowed missing commas between object properties (regression in 0.175.0)
+
+Parser:
+* Improve error recovery when in the middle of adding a property to an object type literal
+
+Library Definitions:
+* Add NotificationEvent to service workers API
+
+### 0.176.3
+
+Notable bug fixes:
+* The Haste module resolver now chooses Haste modules before node_modules, to match what Metro does. That is, if you use `module.system=haste` and have both a `@providesModule foo` file (or use "haste paths" to derive the module name from its filename) and a `node_modules/foo` folder, `require('foo')` will now resolve to the Haste module, even when `node_modules/foo` is in that file's parent directories. This is also a significant perf improvement because resolving a Haste module is much cheaper than searching for node_modules.
+* Fix several bugs responsible for crashes
+* Fix bugs responsible for some LSP "server is stopped" errors
+
+### 0.176.2
+
+Revert changes that are causing bugs in non-lazy mode.
+
+### 0.176.1
+
+Fix crash when comparing abstract and concrete locations when simplifying normalized types.
+
+### 0.176.0
+
+Likely to cause new Flow errors:
+* Banned usage of `new` on functions. Move usages of this pattern to use ES6 classes instead. If the pattern exists in third-party code that cannot be changed directly, you can use a [declaration file](https://flow.org/en/docs/declarations/) to type the legacy pattern with a `declare class`.
+* Error on type annotations nested inside of destructuring - these were always invalid, we just ignored them before
+
+Notable changes:
+* Removed special support for `React.createClass` from Flow. It is now just typed as `any`. Migrate any components using it to class components or function components.
+* Added the `module.missing_module_generators` option, which can be used (multiple times) to specify `'regex' -> 'command'` pairs. When a module is missing, if its name matches one of the regexes, we will add a suggestion in the error message to run `command` to generate it (and resolve the error).
+* Fixed bugs responsible for some LSP "server is stopped" errors
+* Fixed a bug that could cause the server to become unresponsive on Windows
+
+### 0.175.1
+
+Bug fixes:
+* Fix an incremental bug which would sometimes cause Flow to choose the wrong provider for a haste module, most commonly when one of those providers is a .js.flow file.
+* Fix ability of `flow stop` to kill stuck servers
+* Fix rare crashes when processes exit unexpectedly
+
+### 0.175.0
+
+Notable changes:
+* Improve error messages when using a type as a value
+* Improve error messages in `for` loops
+* Correctly determine the scope of default expressions in function params
+* Add `FLOW_CONFIG_NAME` env as alternative to passing `--flowconfig-name`
+* Add `file_watcher.mergebase_with.{git,hg}` configs to support projects accessible via multiple VCSs (e.g. git mirrors of hg repositories)
+
+IDE integration:
+* Surface deprecated autocompletion results so they appear with a strikethrough in VS Code
+* Fix a bug where changing libdefs, package.json files or the .flowconfig multiple times will cause the IDE to report "server is stopped".
+* Fix a bug where the IDE is unable to start the server if it is downgraded
+* Improve suggestions when autocompleting keys in an object literal
+* Fix an exception when autocompleting a result that would add to an import to an existing `require()`
+
+flow-remove-types:
+* Fix handling of `this` param with trailing commas
+
+### 0.174.1
+
+Fix crash when Flow receives duplicate file deletion notifications introduced in v0.174.
+
+### 0.174.0
+
+Likely to cause new Flow errors:
+* Flow now detects sketchy null errors that arise via optional chaining, and which involve opaque types, type aliases, or generics.
+* Fixed an issue that caused us to previously miss some errors when the type involved was an intersection.
+
+New Features:
+* Access from a union of exact objects, on a property that is on one but not all of the objects, now results in the type of that property or `void`, instead of an error.
+* Add type checking support for logical assignment operators.
+
+Notable bug fixes:
+* Fix a crash when using the default file watcher (dfind) on Windows if an [include] directory doesn't exist.
+* Do not attempt to unify the type of a `declare` function that comes after a function declaration of the same name ([try-Flow](https://flow.org/try/#0GYVwdgxgLglg9mABACwBQEoBciDOUBOMYA5ogN6L4CmUI+SARA4gL4BQAJlRADYCG1RKEiwEKDNgBGcODwDcQA)).
+* Improve wording of class-extends errors ([try-Flow](https://flow.org/try/#0FAEwpgxgNghgTmABAN3og9gIwFYC5EDeAvgNzDQwDOliAIomAB4AuYAdiDVtoUUA)).
+* Don't report `this-in-exported-function` for functions with a `this` parameter.
+
+Misc:
+* Added `--list-files` flag to `status` and `check` commands. This will dump a list of files that contain errors instead of the error messages.
+* The default file watcher (dfind) now logs to a `.dfind_log` file alongside the `.log` and `.monitor_log` files.
+* Changed the way Flow computes coverage for type parameters with uncovered upper bounds. Previously, a type parameter was always considered covered when it appeared in a function signature, class declaration, or type alias, even if the type parameter's upper bound was `any`. With this change, such type parameters are now considered to be uncovered. This results in Flow now computing a lower coverage percentage on modules where this pattern is present or that import types from other modules that use this pattern.
+
+### 0.173.0
+
+Likely to cause new Flow errors:
+* Modified the behavior of `instanceof` checks and other refinements to more consistently detect when impossible or invalid refinements are made. This will result in new errors in such cases.
+
+New Features:
+* Improved error messages by providing a suggested property when properties are missing in a conditional context.
+
+Notable bug fixes:
+* Fix "matching property" checks with generic inputs ([try-Flow](https://flow.org/try/#0GYVwdgxgLglg9mABMAjAHgCoC5EHIDOuiAPngA64B8AFALa04DeiUAnmQKY4aIC+AlIkYAoRIhjBEdWgDo2nRAF5leQvwDciAPRbEIfBwAmLOIg4Anc3HPDew4fI6IAsh3z4AhgHMnioS3YuVVwAGkQANxwwEFoAIws+En9HHFwKMIAPHHwocxgwLz51e1BIWARkACY0ZxxXd28OGloAfWsYLzrBETEIBBzEejqlQba8r2KxCSl6OUClFQJcDW1dfSMTM0trWyA)). Thanks @gnprice for bringing up this issue and exploring potential causes!
+* Fixed a bug where the use of certain utility types in polymorphic functions caused errors to not be reported (e.g. [try-Flow](https://flow.org/try/#0FAMwrgdgxgLglgewgAkgJQKYEMAmB5CAGwE8AeAFQD4AKADwC5kASTXAkiygSkfOQG9kAJwwwwQlLQDcyAL7AoSAM4xkIBAkYts+ImX7rNyFULgQA5rMrIAvAMOMARACMsQx7KkLlq1zhLkxAAOGDiM-K4AXowmZpa2qBCsuiTUhlwyAPSZyOQAFnBKxnkIYIQ4yBhCQghCwEA))
+* Fix a bug where the [method-unbinding] error was reported twice
+
+Misc:
+* OCaml version 4.12.1 is required to build Flow
+* React default exports are now inexact, as technically this can include unknown properties (experimental features)
+
+Parser:
+*  Fixed a bug where type parameter instantiations that start with `<` (e.g., `f<<T>()=>S>()`) would be incorrectly parsed as the left shift operator.
+
+Library Definitions:
+* Add bindings for NodeJS [`util.types`](https://nodejs.org/docs/latest-v10.x/api/util.html#util_util_types)
+
+### 0.172.0
+
+Bug Fixes:
+* Exact objects are treated as truthy in logical expressions
+* Add support for operations on `$Values<>` types in an export position (e.g. [Try Flow](https://flow.org/try/#0CYUwxgNghgTiAEA3W8D2AjAVgLngb3gDNcByQkgGngHNTqT4BfAbgChRJYFkZ4BrXABIAalAgBXEAGcAPABcAngAcQqQmiwA+NiAAeS1DDnxFK+ABV4AXhPLV6vgDoIIAHbU5AC2ZA))
+* Respect the order of `module.file_ext` when resolving imports. Before, they were tried alphabetically.
+
+Misc:
+* Change `signature-verification-failure` from a lint to a normal error. It is no longer valid in the `[lints]` section of `.flowconfig`.
+* Improve performance of IDE commands when Flow is busy typechecking
+
+### 0.171.0
+
+Likely to cause new Flow errors:
+* Disallow duplicate member names in classes.
+* Error if an interface is imported as a value.
+* The `experimental.new_merge` option becomes `true` by default. This is an internal change in the way file signatures are computed, but may cause new `[invalid-exported-annotation]` errors when a file exports types that include certain kinds of complex operations, such as projections over complex utility types like `$ObjMap`. These errors can be fixed by replacing these complex types with simpler ones. In certain cases, the newly added `$KeyMirror` and `$ObjMapConst` types (that are exempt of this restriction) can be used instead.
+
+Notable bug fixes:
+* Fix Watchman file watcher on Windows when an include path doesn't exist.
+* Fix a parse error when a newline appears after a class method definition's name.
+
+Parser:
+* Add support for parsing logical assignment operators (thanks @strub).
+* Fix compliance with estree: `export * as x from 'y'` is now an `ExportAllDeclaration` with an `exported` key.
+* Permanently enable parsing of nullish coalescing, and remove the `esproposal_nullish_coalescing` option.
+* Permanently enable parsing of optional chaining, and remove the `esproposal_optional_chaining` option.
+* Permanently enable parsing of class static fields, and remove the `esproposal_class_static_fields` option.
+* Permanently enable parsing of class instance fields, and remove the `esproposal_class_instance_fields` option.
+
+Library Definitions:
+* Make some `options` parameters in node's `fsPromises` optional.
+
+### 0.170.0
+
+Another light release due to the new year. Changes are mainly internal --
+refactoring or progress towards future features.
+
+Notable breaking changes:
+* Disallow duplicate member names in classes
+
+### 0.169.0
+
+This release is light on changes due to the holidays. Happy New Year!
+
+* Improve performance
+
 ### 0.168.0
 
 Notable bug fixes:

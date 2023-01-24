@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -386,7 +386,7 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
             | Op (ObjectSpread { op }) -> `Root (op, None, [text "Cannot spread "; desc op])
             | Op (ObjectChain { op }) ->
               `Root (op, None, [text "Incorrect arguments passed to "; desc op])
-            | Op (Addition { op; left; right }) ->
+            | Op (Arith { op; left; right }) ->
               `Root (op, None, [text "Cannot add "; desc left; text " and "; desc right])
             | Op (AssignVar { var; init }) ->
               `Root
@@ -401,7 +401,7 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
               `Root (op, None, [text "Cannot initialize "; desc op; text " with "; desc body])
             | Op (Cast { lower; upper }) ->
               `Root (lower, None, [text "Cannot cast "; desc lower; text " to "; desc upper])
-            | Op (ClassExtendsCheck { extends; def; _ }) ->
+            | Op (ClassExtendsCheck { extends; def }) ->
               `Root (def, None, [text "Cannot extend "; ref extends; text " with "; desc def])
             | Op (ClassMethodDefinition { name; def }) ->
               `Root (def, None, [text "Cannot define "; ref def; text " on "; desc name])
@@ -511,22 +511,37 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
                 ]
               in
               `Root (op, None, message)
-            | Frame (ConstrainedAssignment { name; declaration; providers }, use_op) ->
+            | Frame (ConstrainedAssignment { name; declaration; providers; array }, use_op) ->
+              let noun =
+                if array then
+                  "element"
+                else
+                  "assignment"
+              in
               let assignments =
                 match providers with
-                | [] -> (* should not happen *) [text "one of its initial assignments"]
-                | [r] when Loc.equal (poly_loc_of_reason r) declaration ->
-                  [text "its "; ref (mk_reason (RCustom "initializer") declaration)]
-                | [r] ->
-                  [text "its "; ref (update_desc_reason (fun _ -> RCustom "initial assignment") r)]
+                | [] -> (* should not happen *) [text (spf "one of its initial %ss" noun)]
+                | [r] when Loc.equal r declaration ->
+                  [
+                    text "its ";
+                    ref
+                      (mk_reason
+                         (RCustom
+                            ( if array then
+                              "initial element"
+                            else
+                              "initializer"
+                            )
+                         )
+                         declaration
+                      );
+                  ]
+                | [r] -> [text "its "; ref (mk_reason (RCustom ("initial " ^ noun)) r)]
                 | providers ->
-                  text "one of its initial assignments"
-                  ::
-                  (Base.List.map
-                     ~f:(fun r -> ref (update_desc_reason (fun _ -> RCustom "") r))
-                     providers
-                  |> Base.List.intersperse ~sep:(text ",")
-                  )
+                  text (spf "one of its initial %ss" noun)
+                  :: (Base.List.map ~f:(fun r -> ref (mk_reason (RCustom "") r)) providers
+                     |> Base.List.intersperse ~sep:(text ",")
+                     )
               in
               let message =
                 [text "All writes to "; code name; text " must be compatible with the type of "]
@@ -618,11 +633,12 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
                   ]
                 )
             | Frame (TupleElementCompatibility { n; lower; _ }, use_op) ->
-              `Frame (lower, use_op, [text "index "; text (string_of_int (n - 1))])
+              `Frame (lower, use_op, [text "index "; text (string_of_int n)])
             | Frame (TypeArgCompatibility { targ; lower; _ }, use_op) ->
               `Frame (lower, use_op, [text "type argument "; ref targ])
             | Frame (TypeParamBound { name }, use_op) ->
-              `FrameWithoutLoc (use_op, [text "type argument "; code name])
+              `FrameWithoutLoc
+                (use_op, [text "type argument "; code (Subst_name.string_of_subst_name name)])
             | Frame (FunCompatibility { lower; _ }, use_op) -> `NextWithLoc (lower, use_op)
             | Frame (FunMissingArg _, use_op)
             | Frame (ImplicitTypeParam, use_op)
@@ -703,7 +719,7 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
             (* If our current loc is inside our root_loc then use our current loc
              * since it is the smallest possible loc in our root_loc. *)
             let root_loc = loc_of_reason root_reason in
-            let root_specific_loc = Base.Option.map root_specific_reason loc_of_reason in
+            let root_specific_loc = Base.Option.map root_specific_reason ~f:loc_of_reason in
             let loc =
               if Loc.contains root_loc loc && Loc.compare root_loc loc <> 0 then
                 loc
@@ -718,7 +734,7 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
         fun (loc : Loc.t) (use_op : Loc.t virtual_use_op) ->
           let (root, loc, frames, explanations) = loop loc ([], [], []) use_op in
           let root =
-            Base.Option.map root (fun (root_loc, root_message) ->
+            Base.Option.map root ~f:(fun (root_loc, root_message) ->
                 (root_loc, root_message @ [text " because"])
             )
           in
@@ -769,7 +785,7 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
       let make_error loc message =
         let message =
           match additional_message with
-          | Some additional_message -> message @ text ". " :: additional_message
+          | Some additional_message -> message @ (text ". " :: additional_message)
           | None -> message
         in
         mk_use_op_error loc use_op message
@@ -867,47 +883,46 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
               [ref upper]
             )
         (* Default incompatibility. *)
-        | _ ->
-          begin
-            match (desc_of_reason lower, desc_of_reason upper) with
-            | (RLongStringLit n, RStringLit _) ->
-              make_error
-                (loc_of_reason lower)
-                [
-                  ref lower;
-                  text " is incompatible with ";
-                  ref upper;
-                  text " because strings longer than ";
-                  code (string_of_int n);
-                  text " characters are not treated as literals";
-                ]
-            | (RUnknownParameter n, _) ->
-              let message =
-                [
-                  ref lower;
-                  text " is incompatible with ";
-                  ref upper;
-                  text " (consider adding a type annotation to ";
-                  ref (update_desc_reason (fun _ -> RIdentifier (OrdinaryName n)) lower);
-                  text ")";
-                ]
-              in
-              make_error (loc_of_reason lower) message
-            | (_, RUnknownParameter n) ->
-              let message =
-                [
-                  ref lower;
-                  text " is incompatible with ";
-                  ref upper;
-                  text " (consider adding a type annotation to ";
-                  ref (update_desc_reason (fun _ -> RIdentifier (OrdinaryName n)) upper);
-                  text ")";
-                ]
-              in
-              make_error (loc_of_reason lower) message
-            | _ ->
-              make_error (loc_of_reason lower) [ref lower; text " is incompatible with "; ref upper]
-          end)
+        | _ -> begin
+          match (desc_of_reason lower, desc_of_reason upper) with
+          | (RLongStringLit n, RStringLit _) ->
+            make_error
+              (loc_of_reason lower)
+              [
+                ref lower;
+                text " is incompatible with ";
+                ref upper;
+                text " because strings longer than ";
+                code (string_of_int n);
+                text " characters are not treated as literals";
+              ]
+          | (RUnknownParameter n, _) ->
+            let message =
+              [
+                ref lower;
+                text " is incompatible with ";
+                ref upper;
+                text " (consider adding a type annotation to ";
+                ref (update_desc_reason (fun _ -> RIdentifier (OrdinaryName n)) lower);
+                text ")";
+              ]
+            in
+            make_error (loc_of_reason lower) message
+          | (_, RUnknownParameter n) ->
+            let message =
+              [
+                ref lower;
+                text " is incompatible with ";
+                ref upper;
+                text " (consider adding a type annotation to ";
+                ref (update_desc_reason (fun _ -> RIdentifier (OrdinaryName n)) upper);
+                text ")";
+              ]
+            in
+            make_error (loc_of_reason lower) message
+          | _ ->
+            make_error (loc_of_reason lower) [ref lower; text " is incompatible with "; ref upper]
+        end)
     in
     let mk_trust_incompatible_error lower upper use_op =
       match (desc_of_reason lower, desc_of_reason upper) with
@@ -1031,15 +1046,12 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
           use_loc
           use_op
           [text "the parameter types of an "; ref lower; text " are unknown"]
-      | IncompatibleCallT
-      | IncompatibleConstructorT ->
-        nope "is not a function"
+      | IncompatibleCallT -> nope "is not a function"
       | IncompatibleObjAssignFromTSpread
       | IncompatibleArrRestT ->
         nope "is not an array"
       | IncompatibleObjAssignFromT
       | IncompatibleObjRestT
-      | IncompatibleObjSealT
       | IncompatibleGetKeysT
       | IncompatibleGetValuesT ->
         nope "is not an object"
@@ -1053,7 +1065,7 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
       | IncompatibleTypeAppVarianceCheckT ->
         nope "is not a polymorphic type"
       | IncompatibleSuperT -> nope "is not inheritable"
-      | IncompatibleUnaryMinusT -> nope "is not a number"
+      | IncompatibleUnaryArithT -> nope "is not a number"
       | IncompatibleGetPropT (prop_loc, prop)
       | IncompatibleSetPropT (prop_loc, prop)
       | IncompatibleMatchPropT (prop_loc, prop)
@@ -1092,30 +1104,20 @@ let rec make_error_printable ?(speculation = false) (error : Loc.t t) : Loc.t Er
           use_op
         | _ -> use_op
       in
-      let expected =
-        match lpole with
-        | Polarity.Positive -> "read-only"
-        | Polarity.Negative -> "write-only"
-        | Polarity.Neutral ->
-          (match upole with
-          | Polarity.Negative -> "readable"
-          | Polarity.Positive -> "writable"
-          | Polarity.Neutral -> failwith "unreachable")
-      in
-      let actual =
-        match upole with
-        | Polarity.Positive -> "read-only"
-        | Polarity.Negative -> "write-only"
-        | Polarity.Neutral ->
-          (match lpole with
-          | Polarity.Negative -> "readable"
-          | Polarity.Positive -> "writable"
-          | Polarity.Neutral -> failwith "unreachable")
-      in
+      let expected = polarity_explanation (lpole, upole) in
+      let actual = polarity_explanation (upole, lpole) in
       let message =
         mk_prop_message prop
-        @ [text (" is " ^ expected ^ " in "); ref lower; text " but "]
-        @ [text (actual ^ " in "); ref upper]
+        @ [
+            text " is ";
+            text expected;
+            text " in ";
+            ref lower;
+            text " but ";
+            text actual;
+            text " in ";
+            ref upper;
+          ]
       in
       mk_use_op_error (loc_of_reason lower) use_op message
     in

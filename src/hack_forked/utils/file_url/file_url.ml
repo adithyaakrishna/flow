@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -42,7 +42,7 @@ let decode s =
     if String.length hex <> 2 then failwith ("incorrect %-escape in " ^ s);
     let code = int_of_string ("0x" ^ hex) in
     if code < 32 || code > 127 then failwith ("only 7bit ascii allowed in " ^ s);
-    String.make 1 (Char.chr code)
+    Base.String.of_char (Char.chr code)
   in
   let s = Str.global_substitute percent_re subst s in
   if Sys.win32 then
@@ -127,7 +127,7 @@ let create path =
       let drive_letter = Str.matched_group 1 path |> String.lowercase_ascii in
       let rest = Str.matched_group 2 path in
       Printf.sprintf "%s:%s" drive_letter rest
-    else if String_utils.string_starts_with path "/" then
+    else if String.starts_with ~prefix:"/" path then
       String_utils.lstrip path "/"
     else
       failwith ("Not an absolute filepath - " ^ path)

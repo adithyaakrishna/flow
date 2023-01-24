@@ -1,19 +1,19 @@
 // @flow
 
-import React from 'react';
+import * as React from 'react';
 
 /**
  * Basic render: Class component tests
  */
 class A extends React.Component<{}, void> {
-  render = () => {};
+  render = (): React.Node => {};
 }
 class B extends React.Component<{}, void> {
-  render = () => null;
+  render = (): React.Node => null;
 }
 
 <A />;
-// Error: `render` should return a `React$Node` which can't be undefined
+// OK
 
 <B />;
 // OK
@@ -44,7 +44,7 @@ type UnfixedPropsType = {|foo?: string|};
  * PropsType inference: Class component test
  */
 class F extends React.Component<UnfixedPropsType, void> {
-  render = () => this.props.foo;
+  render = (): React.Node => this.props.foo;
 }
 // Error: props.foo could be undefined
 

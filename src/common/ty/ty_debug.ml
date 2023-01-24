@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -64,11 +64,14 @@ let rec dump_opt (f : 'a -> string) (o : 'a option) =
 and dump_any_kind = function
   | Annotated _ -> "Annotated"
   | AnyError kind -> spf "AnyError (%s)" (dump_any_error_kind kind)
+  | Recursive -> "Recursive"
   | Unsound kind -> spf "Unsound (%s)" (dump_any_unsoundness_kind kind)
   | Untyped -> "Untyped"
+  | Placeholder -> "Placeholder"
 
 and dump_any_error_kind = function
   | Some UnresolvedName -> "UnresolvedName"
+  | Some MissingAnnotation -> "MissingAnnotation"
   | None -> "<None>"
 
 and dump_any_unsoundness_kind = function
@@ -85,6 +88,7 @@ and dump_any_unsoundness_kind = function
   | Unchecked -> "Unchecked"
   | Unimplemented -> "Unimplemented"
   | UnresolvedType -> "UnresolvedType"
+  | NonBindingParameter -> "NonBindingParameter"
 
 and dump_list : 'a. ('a -> string) -> ?sep:string -> 'a list -> string =
  (fun f ?(sep = ", ") ls -> Base.List.map ~f ls |> String.concat sep)
@@ -192,8 +196,6 @@ and dump_generics ~depth = function
   | Some ts -> "<" ^ dump_list (dump_t ~depth) ts ^ ">"
   | _ -> ""
 
-and dump_tvar (RVar i) = spf "T_%d" i
-
 and dump_utility ~depth u =
   let ctor = Ty.string_of_utility_ctor u in
   match Ty.types_of_utility u with
@@ -206,7 +208,6 @@ and dump_t ?(depth = 10) t =
   else
     let depth = depth - 1 in
     match t with
-    | TVar (v, ts) -> spf "TVAR(%s, params=%s)" (dump_tvar v) (dump_generics ~depth ts)
     | Bound (_, s) -> spf "Bound(%s)" s
     | Generic g -> dump_generic ~depth g
     | Any kind -> spf "Any (%s)" (dump_any_kind kind)
@@ -224,10 +225,16 @@ and dump_t ?(depth = 10) t =
     | Bool (Some x) -> spf "Bool (%b)" x
     | Bool None -> "Bool"
     | BoolLit b -> spf "\"%b\"" b
+    | BigInt (Some x) -> spf "BigInt (%s)" x
+    | BigInt None -> "BigInt"
+    | BigIntLit s -> spf "\"%s\"" s
     | Fun f -> dump_fun_t ~depth f
     | Obj o -> dump_obj ~depth o
     | Arr a -> dump_arr ~depth a
-    | Tup ts -> spf "Tup (%s)" (dump_list (dump_t ~depth) ~sep:"," ts)
+    | Tup ts ->
+      spf
+        "Tup (%s)"
+        (dump_list (fun (TupleElement { t; name = _; polarity = _ }) -> dump_t ~depth t) ~sep:"," ts)
     | Union (_, t1, t2, ts) ->
       spf "Union (%s)" (dump_list (dump_t ~depth) ~sep:", " (Base.List.take (t1 :: t2 :: ts) 10))
     | Inter (t1, t2, ts) -> spf "Inter (%s)" (dump_list (dump_t ~depth) ~sep:", " (t1 :: t2 :: ts))
@@ -249,7 +256,6 @@ and dump_t ?(depth = 10) t =
         (dump_t ~depth _object)
         (dump_t ~depth index)
         optional
-    | Mu (i, t) -> spf "Mu (%d, %s)" i (dump_t ~depth t)
     | CharSet s -> spf "CharSet (%s)" s
 
 and dump_class_decl ~depth (name, ps) =
@@ -287,17 +293,12 @@ and dump_elt ~depth = function
   | Type t -> spf "Type (%s)" (dump_t ~depth t)
   | Decl d -> spf "Decl (%s)" (dump_decl ~depth d)
 
-let dump_binding (v, ty) = Utils_js.spf "type %s = %s" (dump_tvar v) (dump_t ty)
-
-let dump_env_t s = Base.List.map ~f:dump_binding s |> String.concat "\n"
-
 let string_of_polarity = function
   | Negative -> "Negative"
   | Neutral -> "Neutral"
   | Positive -> "Positive"
 
 let string_of_ctor_t = function
-  | TVar (RVar _, _) -> "RecVar"
   | Bound _ -> "Bound"
   | Generic _ -> "Generic"
   | Any (Annotated _) -> "Explicit Any"
@@ -310,9 +311,11 @@ let string_of_ctor_t = function
   | Num _ -> "Num"
   | Str _ -> "Str"
   | Bool _ -> "Bool"
+  | BigInt _ -> "BigInt"
   | NumLit _ -> "NumLit"
   | StrLit _ -> "StrLit"
   | BoolLit _ -> "BoolLit"
+  | BigIntLit _ -> "BigIntLit"
   | Fun _ -> "Fun"
   | Obj _ -> "Obj"
   | Arr _ -> "Arr"
@@ -323,7 +326,6 @@ let string_of_ctor_t = function
   | TypeOf _ -> "Typeof"
   | Utility _ -> "Utility"
   | IndexedAccess _ -> "IndexedAccess"
-  | Mu _ -> "Mu"
   | CharSet _ -> "CharSet"
 
 let string_of_ctor_decl = function
@@ -369,7 +371,6 @@ let json_of_elt ~strip_root =
   and json_of_t_list t =
     Hh_json.(
       match t with
-      | TVar (v, ts) -> json_of_tvar v @ json_of_targs ts
       | Bound (_, name) -> [("bound", JSON_String name)]
       | Generic g -> json_of_generic g
       | Any (Annotated _) -> [("any", JSON_String "explicit")]
@@ -381,11 +382,13 @@ let json_of_elt ~strip_root =
       | Symbol
       | Num _
       | Str _
-      | Bool _ ->
+      | Bool _
+      | BigInt _ ->
         []
       | NumLit s -> [("literal", JSON_String s)]
       | StrLit s -> [("literal", JSON_String (Reason.display_string_of_name s))]
       | BoolLit b -> [("literal", JSON_Bool b)]
+      | BigIntLit s -> [("literal", JSON_String s)]
       | Fun f -> json_of_fun_t f
       | Obj o -> json_of_obj_t o
       | Arr { arr_readonly; arr_literal; arr_elt_t } ->
@@ -394,7 +397,13 @@ let json_of_elt ~strip_root =
           ("literal", Base.Option.value_map arr_literal ~f:(fun t -> JSON_Bool t) ~default:JSON_Null);
           ("type", json_of_t arr_elt_t);
         ]
-      | Tup ts -> [("types", JSON_Array (Base.List.map ~f:json_of_t ts))]
+      | Tup ts ->
+        [
+          ( "types",
+            JSON_Array
+              (Base.List.map ~f:(fun (TupleElement { t; name = _; polarity = _ }) -> json_of_t t) ts)
+          );
+        ]
       | Union (_, t0, t1, ts) ->
         [("types", JSON_Array (Base.List.map ~f:json_of_t (t0 :: t1 :: ts)))]
       | Inter (t0, t1, ts) -> [("types", JSON_Array (Base.List.map ~f:json_of_t (t0 :: t1 :: ts)))]
@@ -413,10 +422,8 @@ let json_of_elt ~strip_root =
         [
           ("object", json_of_t _object); ("index", json_of_t index); ("optional", JSON_Bool optional);
         ]
-      | Mu (i, t) -> [("mu_var", int_ i); ("type", json_of_t t)]
       | CharSet s -> [("literal", JSON_String s)]
     )
-  and json_of_tvar (RVar i) = Hh_json.[("id", int_ i)]
   and json_of_generic (s, k, targs_opt) =
     json_of_targs targs_opt
     @ [
@@ -454,7 +461,7 @@ let json_of_elt ~strip_root =
     ]
   and json_of_obj_t o =
     Hh_json.(
-      let { obj_kind; obj_props; obj_literal; obj_frozen } = o in
+      let { obj_def_loc; obj_kind; obj_props; obj_literal; obj_frozen } = o in
       let obj_kind =
         match obj_kind with
         | ExactObj -> JSON_String "Exact"
@@ -462,6 +469,11 @@ let json_of_elt ~strip_root =
         | IndexedObj d -> json_of_dict d
       in
       [
+        ( "def_loc",
+          match obj_def_loc with
+          | None -> JSON_Null
+          | Some loc -> JSON_String (Reason.string_of_aloc loc)
+        );
         ("obj_kind", obj_kind);
         ("frozen", JSON_Bool obj_frozen);
         ("literal", Base.Option.value_map obj_literal ~f:(fun t -> JSON_Bool t) ~default:JSON_Null);
@@ -497,7 +509,7 @@ let json_of_elt ~strip_root =
     Hh_json.(
       JSON_Object
         (match prop with
-        | NamedProp { name; prop; from_proto; def_loc } ->
+        | NamedProp { name; prop; inherited; source; def_loc } ->
           [
             ("kind", JSON_String "NamedProp");
             ( "prop",
@@ -505,7 +517,8 @@ let json_of_elt ~strip_root =
                 [
                   ("name", JSON_String (Reason.display_string_of_name name));
                   ("prop", json_of_named_prop prop);
-                  ("from_proto", JSON_Bool from_proto);
+                  ("inherited", JSON_Bool inherited);
+                  ("source", JSON_String (string_of_prop_source source));
                   ( "def_loc",
                     match def_loc with
                     | None -> JSON_Null

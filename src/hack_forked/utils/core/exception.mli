@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -15,6 +15,8 @@ val unwrap : t -> exn
 
 val reraise : t -> 'a
 
+val raise_with_backtrace : exn -> t -> 'a
+
 val to_exn : t -> exn
 
 val to_string : t -> string
@@ -28,6 +30,8 @@ val get_current_callstack_string : int -> string
 val print_full_backtrace : out_channel -> int -> t -> unit
 
 val get_full_backtrace_string : int -> t -> string
+
+val register_printer : (exn -> string option) -> unit
 
 val record_backtrace : bool -> unit
 

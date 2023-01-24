@@ -8,8 +8,8 @@ Cannot cast `React.Component` to number because class `React.Component` [1] is i
         ^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:43:15
-   43| declare class React$Component<Props, State = void> {
+   <BUILTINS>/react.js:44:15
+   44| declare class React$Component<Props, State = void> {
                      ^^^^^^^^^^^^^^^ [1]
    commonjs-pascal.js:4:19
     4| (React.Component: number); // Error
@@ -28,14 +28,14 @@ Cannot cast object literal to `Node` because: [incompatible-cast]
         ^^ [1]
 
 References:
-   <BUILTINS>/react.js:20:5
-   20|   | React$Element<any>
-           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:21:5
-   21|   | React$Portal
-           ^^^^^^^^^^^^ [3]
+   21|   | React$Element<any>
+           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:22:5
-   22|   | Iterable<?React$Node>;
+   22|   | React$Portal
+           ^^^^^^^^^^^^ [3]
+   <BUILTINS>/react.js:23:5
+   23|   | Iterable<?React$Node>;
            ^^^^^^^^^^^^^^^^^^^^^ [4]
 
 
@@ -48,8 +48,8 @@ Cannot get `React.Missing` because property `Missing` is missing in module `reac
                      ^^^^^^^
 
 References:
-   <BUILTINS>/react.js:469:27
-   469|   declare module.exports: $Exports<'react'>;
+   <BUILTINS>/react.js:460:27
+   460|   declare module.exports: $Exports<'react'>;
                                   ^^^^^^^^^^^^^^^^^ [1]
 
 
@@ -63,8 +63,8 @@ Cannot cast `React.Component` to number because class `React.Component` [1] is i
         ^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:43:15
-   43| declare class React$Component<Props, State = void> {
+   <BUILTINS>/react.js:44:15
+   44| declare class React$Component<Props, State = void> {
                      ^^^^^^^^^^^^^^^ [1]
    commonjs.js:4:19
     4| (React.Component: number); // Error
@@ -83,14 +83,14 @@ Cannot cast object literal to `Node` because: [incompatible-cast]
         ^^ [1]
 
 References:
-   <BUILTINS>/react.js:20:5
-   20|   | React$Element<any>
-           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:21:5
-   21|   | React$Portal
-           ^^^^^^^^^^^^ [3]
+   21|   | React$Element<any>
+           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:22:5
-   22|   | Iterable<?React$Node>;
+   22|   | React$Portal
+           ^^^^^^^^^^^^ [3]
+   <BUILTINS>/react.js:23:5
+   23|   | Iterable<?React$Node>;
            ^^^^^^^^^^^^^^^^^^^^^ [4]
 
 
@@ -118,8 +118,8 @@ Cannot cast `React.Component` to number because class `React.Component` [1] is i
         ^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:43:15
-   43| declare class React$Component<Props, State = void> {
+   <BUILTINS>/react.js:44:15
+   44| declare class React$Component<Props, State = void> {
                      ^^^^^^^^^^^^^^^ [1]
    es-default-pascal.js:4:19
     4| (React.Component: number); // Error
@@ -138,14 +138,14 @@ Cannot cast object literal to `Node` because: [incompatible-cast]
         ^^ [1]
 
 References:
-   <BUILTINS>/react.js:20:5
-   20|   | React$Element<any>
-           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:21:5
-   21|   | React$Portal
-           ^^^^^^^^^^^^ [3]
+   21|   | React$Element<any>
+           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:22:5
-   22|   | Iterable<?React$Node>;
+   22|   | React$Portal
+           ^^^^^^^^^^^^ [3]
+   <BUILTINS>/react.js:23:5
+   23|   | Iterable<?React$Node>;
            ^^^^^^^^^^^^^^^^^^^^^ [4]
 
 
@@ -158,8 +158,8 @@ Cannot get `React.Missing` because property `Missing` is missing in module `reac
                      ^^^^^^^
 
 References:
-   <BUILTINS>/react.js:469:27
-   469|   declare module.exports: $Exports<'react'>;
+   <BUILTINS>/react.js:460:27
+   460|   declare module.exports: $Exports<'react'>;
                                   ^^^^^^^^^^^^^^^^^ [1]
 
 
@@ -173,8 +173,8 @@ Cannot cast `React.Component` to number because class `React.Component` [1] is i
         ^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:43:15
-   43| declare class React$Component<Props, State = void> {
+   <BUILTINS>/react.js:44:15
+   44| declare class React$Component<Props, State = void> {
                      ^^^^^^^^^^^^^^^ [1]
    es-default.js:4:19
     4| (React.Component: number); // Error
@@ -190,40 +190,40 @@ Cannot get `React.Node` because property `Node` is missing in object type [1]. [
                                 ^^^^
 
 References:
-   <BUILTINS>/react.js:428:26
-                                 v-
-   428|   declare export default {|
-   429|     +DOM: typeof DOM,
-   430|     +PropTypes: typeof PropTypes,
-   431|     +version: typeof version,
-   432|     +checkPropTypes: typeof checkPropTypes,
-   433|     +memo: typeof memo,
-   434|     +lazy: typeof lazy,
-   435|     +createClass: typeof createClass,
-   436|     +createContext: typeof createContext,
-   437|     +createElement: typeof createElement,
-   438|     +cloneElement: typeof cloneElement,
-   439|     +createFactory: typeof createFactory,
-   440|     +createRef: typeof createRef,
-   441|     +forwardRef: typeof forwardRef,
-   442|     +isValidElement: typeof isValidElement,
+   <BUILTINS>/react.js:415:26
+                                 v
+   415|   declare export default {
+   416|     +DOM: typeof DOM,
+   417|     +PropTypes: typeof PropTypes,
+   418|     +version: typeof version,
+   419|     +checkPropTypes: typeof checkPropTypes,
+   420|     +memo: typeof memo,
+   421|     +lazy: typeof lazy,
+   422|     +createClass: typeof createClass,
+   423|     +createContext: typeof createContext,
+   424|     +createElement: typeof createElement,
+   425|     +cloneElement: typeof cloneElement,
+   426|     +createFactory: typeof createFactory,
+   427|     +createRef: typeof createRef,
+   428|     +forwardRef: typeof forwardRef,
+   429|     +isValidElement: typeof isValidElement,
       :
-   449|     +Profiler: typeof Profiler,
-   450|     +Suspense: typeof Suspense,
-   451|     +useContext: typeof useContext,
-   452|     +useState: typeof useState,
-   453|     +useReducer: typeof useReducer,
-   454|     +useRef: typeof useRef,
-   455|     +useEffect: typeof useEffect,
-   456|     +useLayoutEffect: typeof useLayoutEffect,
-   457|     +useCallback: typeof useCallback,
-   458|     +useMemo: typeof useMemo,
-   459|     +useImperativeHandle: typeof useImperativeHandle,
-   460|     +useTransition: typeof useTransition,
-   461|     +useDeferredValue: typeof useDeferredValue,
-   462|     +startTransition: typeof startTransition,
-   463|   |};
-          -^ [1]
+   440|     +useReducer: typeof useReducer,
+   441|     +useRef: typeof useRef,
+   442|     +useEffect: typeof useEffect,
+   443|     +useLayoutEffect: typeof useLayoutEffect,
+   444|     +useCallback: typeof useCallback,
+   445|     +useMemo: typeof useMemo,
+   446|     +useImperativeHandle: typeof useImperativeHandle,
+   447|     +useTransition: typeof useTransition,
+   448|     +useDeferredValue: typeof useDeferredValue,
+   449|     +startTransition: typeof startTransition,
+   450|     +useId: typeof useId,
+   451|     +useInsertionEffect: typeof useInsertionEffect,
+   452|     +useSyncExternalStore: typeof useSyncExternalStore,
+   453|     ...
+   454|   };
+          ^ [1]
 
 
 Error ----------------------------------------------------------------------------------------------- es-default.js:6:12
@@ -235,40 +235,40 @@ Cannot get `React.Node` because property `Node` is missing in object type [1]. [
                    ^^^^
 
 References:
-   <BUILTINS>/react.js:428:26
-                                 v-
-   428|   declare export default {|
-   429|     +DOM: typeof DOM,
-   430|     +PropTypes: typeof PropTypes,
-   431|     +version: typeof version,
-   432|     +checkPropTypes: typeof checkPropTypes,
-   433|     +memo: typeof memo,
-   434|     +lazy: typeof lazy,
-   435|     +createClass: typeof createClass,
-   436|     +createContext: typeof createContext,
-   437|     +createElement: typeof createElement,
-   438|     +cloneElement: typeof cloneElement,
-   439|     +createFactory: typeof createFactory,
-   440|     +createRef: typeof createRef,
-   441|     +forwardRef: typeof forwardRef,
-   442|     +isValidElement: typeof isValidElement,
+   <BUILTINS>/react.js:415:26
+                                 v
+   415|   declare export default {
+   416|     +DOM: typeof DOM,
+   417|     +PropTypes: typeof PropTypes,
+   418|     +version: typeof version,
+   419|     +checkPropTypes: typeof checkPropTypes,
+   420|     +memo: typeof memo,
+   421|     +lazy: typeof lazy,
+   422|     +createClass: typeof createClass,
+   423|     +createContext: typeof createContext,
+   424|     +createElement: typeof createElement,
+   425|     +cloneElement: typeof cloneElement,
+   426|     +createFactory: typeof createFactory,
+   427|     +createRef: typeof createRef,
+   428|     +forwardRef: typeof forwardRef,
+   429|     +isValidElement: typeof isValidElement,
       :
-   449|     +Profiler: typeof Profiler,
-   450|     +Suspense: typeof Suspense,
-   451|     +useContext: typeof useContext,
-   452|     +useState: typeof useState,
-   453|     +useReducer: typeof useReducer,
-   454|     +useRef: typeof useRef,
-   455|     +useEffect: typeof useEffect,
-   456|     +useLayoutEffect: typeof useLayoutEffect,
-   457|     +useCallback: typeof useCallback,
-   458|     +useMemo: typeof useMemo,
-   459|     +useImperativeHandle: typeof useImperativeHandle,
-   460|     +useTransition: typeof useTransition,
-   461|     +useDeferredValue: typeof useDeferredValue,
-   462|     +startTransition: typeof startTransition,
-   463|   |};
-          -^ [1]
+   440|     +useReducer: typeof useReducer,
+   441|     +useRef: typeof useRef,
+   442|     +useEffect: typeof useEffect,
+   443|     +useLayoutEffect: typeof useLayoutEffect,
+   444|     +useCallback: typeof useCallback,
+   445|     +useMemo: typeof useMemo,
+   446|     +useImperativeHandle: typeof useImperativeHandle,
+   447|     +useTransition: typeof useTransition,
+   448|     +useDeferredValue: typeof useDeferredValue,
+   449|     +startTransition: typeof startTransition,
+   450|     +useId: typeof useId,
+   451|     +useInsertionEffect: typeof useInsertionEffect,
+   452|     +useSyncExternalStore: typeof useSyncExternalStore,
+   453|     ...
+   454|   };
+          ^ [1]
 
 
 Error ----------------------------------------------------------------------------------------------- es-default.js:7:14
@@ -280,40 +280,40 @@ Cannot get `React.Missing` because property `Missing` is missing in object type 
                      ^^^^^^^
 
 References:
-   <BUILTINS>/react.js:428:26
-                                 v-
-   428|   declare export default {|
-   429|     +DOM: typeof DOM,
-   430|     +PropTypes: typeof PropTypes,
-   431|     +version: typeof version,
-   432|     +checkPropTypes: typeof checkPropTypes,
-   433|     +memo: typeof memo,
-   434|     +lazy: typeof lazy,
-   435|     +createClass: typeof createClass,
-   436|     +createContext: typeof createContext,
-   437|     +createElement: typeof createElement,
-   438|     +cloneElement: typeof cloneElement,
-   439|     +createFactory: typeof createFactory,
-   440|     +createRef: typeof createRef,
-   441|     +forwardRef: typeof forwardRef,
-   442|     +isValidElement: typeof isValidElement,
+   <BUILTINS>/react.js:415:26
+                                 v
+   415|   declare export default {
+   416|     +DOM: typeof DOM,
+   417|     +PropTypes: typeof PropTypes,
+   418|     +version: typeof version,
+   419|     +checkPropTypes: typeof checkPropTypes,
+   420|     +memo: typeof memo,
+   421|     +lazy: typeof lazy,
+   422|     +createClass: typeof createClass,
+   423|     +createContext: typeof createContext,
+   424|     +createElement: typeof createElement,
+   425|     +cloneElement: typeof cloneElement,
+   426|     +createFactory: typeof createFactory,
+   427|     +createRef: typeof createRef,
+   428|     +forwardRef: typeof forwardRef,
+   429|     +isValidElement: typeof isValidElement,
       :
-   449|     +Profiler: typeof Profiler,
-   450|     +Suspense: typeof Suspense,
-   451|     +useContext: typeof useContext,
-   452|     +useState: typeof useState,
-   453|     +useReducer: typeof useReducer,
-   454|     +useRef: typeof useRef,
-   455|     +useEffect: typeof useEffect,
-   456|     +useLayoutEffect: typeof useLayoutEffect,
-   457|     +useCallback: typeof useCallback,
-   458|     +useMemo: typeof useMemo,
-   459|     +useImperativeHandle: typeof useImperativeHandle,
-   460|     +useTransition: typeof useTransition,
-   461|     +useDeferredValue: typeof useDeferredValue,
-   462|     +startTransition: typeof startTransition,
-   463|   |};
-          -^ [1]
+   440|     +useReducer: typeof useReducer,
+   441|     +useRef: typeof useRef,
+   442|     +useEffect: typeof useEffect,
+   443|     +useLayoutEffect: typeof useLayoutEffect,
+   444|     +useCallback: typeof useCallback,
+   445|     +useMemo: typeof useMemo,
+   446|     +useImperativeHandle: typeof useImperativeHandle,
+   447|     +useTransition: typeof useTransition,
+   448|     +useDeferredValue: typeof useDeferredValue,
+   449|     +startTransition: typeof startTransition,
+   450|     +useId: typeof useId,
+   451|     +useInsertionEffect: typeof useInsertionEffect,
+   452|     +useSyncExternalStore: typeof useSyncExternalStore,
+   453|     ...
+   454|   };
+          ^ [1]
 
 
 Error --------------------------------------------------------------------------------------- es-namespace-pascal.js:4:2
@@ -326,8 +326,8 @@ Cannot cast `React.Component` to number because class `React.Component` [1] is i
         ^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:43:15
-   43| declare class React$Component<Props, State = void> {
+   <BUILTINS>/react.js:44:15
+   44| declare class React$Component<Props, State = void> {
                      ^^^^^^^^^^^^^^^ [1]
    es-namespace-pascal.js:4:19
     4| (React.Component: number); // Error
@@ -346,14 +346,14 @@ Cannot cast object literal to `Node` because: [incompatible-cast]
         ^^ [1]
 
 References:
-   <BUILTINS>/react.js:20:5
-   20|   | React$Element<any>
-           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:21:5
-   21|   | React$Portal
-           ^^^^^^^^^^^^ [3]
+   21|   | React$Element<any>
+           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:22:5
-   22|   | Iterable<?React$Node>;
+   22|   | React$Portal
+           ^^^^^^^^^^^^ [3]
+   <BUILTINS>/react.js:23:5
+   23|   | Iterable<?React$Node>;
            ^^^^^^^^^^^^^^^^^^^^^ [4]
 
 
@@ -362,13 +362,13 @@ Error --------------------------------------------------------------------------
 Cannot get `React.Missing` because property `Missing` is missing in module `React` [1]. [prop-missing]
 
    es-namespace-pascal.js:7:14
-   7| (null: React.Missing); // Error
-                   ^^^^^^^
+     7| (null: React.Missing); // Error
+                     ^^^^^^^
 
 References:
-   es-namespace-pascal.js:1:1
-   1| import * as React from 'React';
-      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ [1]
+   <BUILTINS>/react.js:459:16
+   459| declare module React {
+                       ^^^^^ [1]
 
 
 Error ---------------------------------------------------------------------------------------------- es-namespace.js:4:2
@@ -381,8 +381,8 @@ Cannot cast `React.Component` to number because class `React.Component` [1] is i
         ^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:43:15
-   43| declare class React$Component<Props, State = void> {
+   <BUILTINS>/react.js:44:15
+   44| declare class React$Component<Props, State = void> {
                      ^^^^^^^^^^^^^^^ [1]
    es-namespace.js:4:19
     4| (React.Component: number); // Error
@@ -401,14 +401,14 @@ Cannot cast object literal to `Node` because: [incompatible-cast]
         ^^ [1]
 
 References:
-   <BUILTINS>/react.js:20:5
-   20|   | React$Element<any>
-           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:21:5
-   21|   | React$Portal
-           ^^^^^^^^^^^^ [3]
+   21|   | React$Element<any>
+           ^^^^^^^^^^^^^^^^^^ [2]
    <BUILTINS>/react.js:22:5
-   22|   | Iterable<?React$Node>;
+   22|   | React$Portal
+           ^^^^^^^^^^^^ [3]
+   <BUILTINS>/react.js:23:5
+   23|   | Iterable<?React$Node>;
            ^^^^^^^^^^^^^^^^^^^^^ [4]
 
 
@@ -417,13 +417,13 @@ Error --------------------------------------------------------------------------
 Cannot get `React.Missing` because property `Missing` is missing in module `react` [1]. [prop-missing]
 
    es-namespace.js:7:14
-   7| (null: React.Missing); // Error
-                   ^^^^^^^
+     7| (null: React.Missing); // Error
+                     ^^^^^^^
 
 References:
-   es-namespace.js:1:1
-   1| import * as React from 'react';
-      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ [1]
+   <BUILTINS>/react.js:216:16
+   216| declare module react {
+                       ^^^^^ [1]
 
 
 

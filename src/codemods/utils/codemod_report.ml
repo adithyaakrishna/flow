@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -25,3 +25,13 @@ let unit_reporter =
   let combine _ _ = () in
   let empty = () in
   { report; combine; empty }
+
+module type S = sig
+  type t
+
+  val report : reporter_options -> t -> string
+
+  val combine : t -> t -> t
+
+  val empty : t
+end

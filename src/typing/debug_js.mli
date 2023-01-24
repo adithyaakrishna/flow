@@ -1,19 +1,9 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
-
-val string_of_scope_entry : Context.t -> Scope.Entry.t -> string
-
-val string_of_scope_entries : Context.t -> Scope.Entry.t NameUtils.Map.t -> string
-
-val string_of_scope_refi : Context.t -> Scope.refi_binding -> string
-
-val string_of_scope_refis : Context.t -> Scope.refi_binding Key_map.t -> string
-
-val string_of_scope : Context.t -> Scope.t -> string
 
 val string_of_reason : Context.t -> Reason.t -> string
 

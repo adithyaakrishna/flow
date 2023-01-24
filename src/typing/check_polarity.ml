@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -14,30 +14,35 @@ module Kit (Flow : Flow_common.S) : Flow_common.CHECK_POLARITY = struct
   (* TODO: flesh this out *)
   let rec check_polarity cx ?trace tparams polarity = function
     (* base case *)
-    | BoundT (reason, name) ->
-      begin
-        match SMap.find_opt name tparams with
-        | None -> ()
-        | Some tp ->
-          if not (Polarity.compat (tp.polarity, polarity)) then
-            Flow_js_utils.add_output
-              cx
-              ?trace
-              (Error_message.EPolarityMismatch
-                 { reason; name; expected_polarity = tp.polarity; actual_polarity = polarity }
-              )
-      end
-    (* No need to walk into tvars, since we're looking for BoundT types, which
+    | GenericT { reason; name; bound; _ } -> begin
+      match Subst_name.Map.find_opt name tparams with
+      | None -> check_polarity cx ?trace tparams polarity bound
+      | Some tp ->
+        if not (Polarity.compat (tp.polarity, polarity)) then
+          Flow_js_utils.add_output
+            cx
+            ?trace
+            (Error_message.EPolarityMismatch
+               {
+                 reason;
+                 name = Subst_name.string_of_subst_name name;
+                 expected_polarity = tp.polarity;
+                 actual_polarity = polarity;
+               }
+            )
+    end
+    (* No need to walk into tvars, since we're looking for GenericT types, which
      * will certainly never appear in the bounds of a tvar. *)
     | OpenT _ -> ()
     (* This type can appear in an annotation due to the $Pred type constructor,
-     * but it won't contain a BoundT. *)
+     * but it won't contain a GenericT. *)
     | OpenPredT _ -> ()
     (* The annot will resolve to some type, but it doesn't matter because that
-     * type will certainly not contain a BoundT. *)
+     * type will certainly not contain a GenericT. *)
     | AnnotT _ -> ()
     | AnyT _
     | DefT (_, _, BoolT _)
+    | DefT (_, _, BigIntT _)
     | DefT (_, _, CharSetT _)
     | DefT (_, _, EmptyT)
     | DefT (_, _, EnumObjectT _)
@@ -48,6 +53,7 @@ module Kit (Flow : Flow_common.S) : Flow_common.CHECK_POLARITY = struct
     | DefT (_, _, SingletonBoolT _)
     | DefT (_, _, SingletonNumT _)
     | DefT (_, _, SingletonStrT _)
+    | DefT (_, _, SingletonBigIntT _)
     | DefT (_, _, StrT _)
     | DefT (_, _, VoidT)
     | DefT (_, _, SymbolT)
@@ -83,12 +89,12 @@ module Kit (Flow : Flow_common.S) : Flow_common.CHECK_POLARITY = struct
       check_polarity_propmap cx ?trace tparams polarity own_props;
       check_polarity_propmap cx ?trace ~skip_ctor:true tparams polarity proto_props;
       Base.Option.iter call_t ~f:(check_polarity_call cx ?trace tparams polarity)
-    (* We can ignore the statics and prototype of function annotations, since
-     * they will always be "uninteresting," never containing a BoundT. *)
-    | DefT (_, _, FunT (_static, _prototype, f)) ->
+    (* We can ignore the statics of function annotations, since
+     * they will always be "uninteresting," never containing a GenericT. *)
+    | DefT (_, _, FunT (_static, f)) ->
       let {
         (* Similarly, we can ignore this types, which can not be explicitly
-         * provided, and thus will not contain a BoundT. *)
+         * provided, and thus will not contain a GenericT. *)
         this_t = _;
         params;
         rest_param;
@@ -106,11 +112,14 @@ module Kit (Flow : Flow_common.S) : Flow_common.CHECK_POLARITY = struct
       (* This representation signifies a literal, which is not a type. *)
       raise (UnexpectedType (Debug_js.dump_t cx t))
     | DefT (_, _, ArrT (ArrayAT (t, None))) -> check_polarity cx ?trace tparams Polarity.Neutral t
-    | DefT (_, _, ArrT (TupleAT (_, ts))) ->
-      List.iter (check_polarity cx ?trace tparams Polarity.Neutral) ts
+    | DefT (_, _, ArrT (TupleAT { elements; _ })) ->
+      List.iter
+        (fun (TupleElement { t; polarity = p; name = _ }) ->
+          check_polarity cx ?trace tparams (Polarity.mult (polarity, p)) t)
+        elements
     | DefT (_, _, ArrT (ROArrayAT t)) -> check_polarity cx ?trace tparams polarity t
     | DefT (_, _, ObjT o) ->
-      let { flags; props_tmap; proto_t; call_t } = o in
+      let { flags; props_tmap; proto_t; call_t; reachable_targs = _ } = o in
       check_polarity_propmap cx ?trace tparams polarity props_tmap;
       let dict = Obj_type.get_dict_opt flags.obj_kind in
       Base.Option.iter dict ~f:(check_polarity_dict cx ?trace tparams polarity);
@@ -127,7 +136,7 @@ module Kit (Flow : Flow_common.S) : Flow_common.CHECK_POLARITY = struct
         Nel.fold_left
           (fun acc tp ->
             check_polarity_typeparam cx ?trace acc polarity tp;
-            SMap.add tp.name tp acc)
+            Subst_name.Map.add tp.name tp acc)
           tparams
           tps
       in
@@ -140,10 +149,10 @@ module Kit (Flow : Flow_common.S) : Flow_common.CHECK_POLARITY = struct
       ()
     | ThisTypeAppT (_, c, _, Some targs)
     | TypeAppT (_, _, c, targs) ->
-      (* Type arguments in a typeapp might contain a BoundT, but the root type
+      (* Type arguments in a typeapp might contain a GenericT, but the root type
        * which defines the type parameters is not necessarily resolved at this
        * point. We need to know the polarity of the type parameters in order to
-       * know the position of any found BoundTs. This constraint will continue
+       * know the position of any found GenericTs. This constraint will continue
        * checking the type args once the root type is resolved. *)
       let reason = reason_of_t c in
       Flow.flow_opt cx ?trace (c, VarianceCheckT (reason, tparams, targs, polarity))
@@ -151,7 +160,6 @@ module Kit (Flow : Flow_common.S) : Flow_common.CHECK_POLARITY = struct
       check_polarity cx ?trace tparams (Polarity.inv polarity) config;
       check_polarity cx ?trace tparams polarity instance
     | ShapeT (_, t) -> check_polarity cx ?trace tparams polarity t
-    | GenericT { bound; _ } -> check_polarity cx ?trace tparams polarity bound
     | KeysT (_, t) -> check_polarity cx ?trace tparams Polarity.Positive t
     (* TODO *)
     | CustomFunT _

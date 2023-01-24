@@ -191,7 +191,7 @@ References:
 
 Error --------------------------------------------------------------------------------------------------- test.js:107:16
 
-Cannot initialize property `s` with `0` because number [1] is incompatible with string [2]. [incompatible-type]
+Cannot initialize property `#s` with `0` because number [1] is incompatible with string [2]. [incompatible-type]
 
    test.js:107:16
    107|   #s: string = 0; // Error, number ~> string
@@ -205,7 +205,7 @@ References:
 
 Error --------------------------------------------------------------------------------------------------- test.js:112:24
 
-Cannot initialize property `ss` with `0` because number [1] is incompatible with string [2]. [incompatible-type]
+Cannot initialize property `#ss` with `0` because number [1] is incompatible with string [2]. [incompatible-type]
 
    test.js:112:24
    112|   static #ss: string = 0; // Error, number ~> string
@@ -260,9 +260,9 @@ Cannot return `this.#r` because number [1] is incompatible with string [2]. [inc
                    ^^^^^^^
 
 References:
-   test.js:133:15
-   133|     this.#r = 3;
-                      ^ [1]
+   test.js:106:7
+   106|   #r: number;
+              ^^^^^^ [1]
    test.js:129:12
    129|   test6(): string {
                    ^^^^^^ [2]
@@ -277,9 +277,9 @@ Cannot return `Annotations.#sr` because number [1] is incompatible with string [
                    ^^^^^^^^^^^^^^^
 
 References:
-   test.js:142:23
-   142|     Annotations.#sr = 3;
-                              ^ [1]
+   test.js:111:15
+   111|   static #sr: number;
+                      ^^^^^^ [1]
    test.js:138:12
    138|   test8(): string {
                    ^^^^^^ [2]
@@ -583,5 +583,21 @@ References:
                                   ^^^^^^ [2]
 
 
+Error ---------------------------------------------------------------------------------------------------- test.js:221:5
 
-Found 36 errors
+Cannot assign `42` to `other.#p` because property `p` is not writable. [cannot-write]
+
+   221|     other.#p = 42; // error;
+            ^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------------------- test.js:224:5
+
+Cannot assign `42` to `this.#p` because property `p` is not writable. [cannot-write]
+
+   224|     this.#p = 42; // error
+            ^^^^^^^
+
+
+
+Found 38 errors

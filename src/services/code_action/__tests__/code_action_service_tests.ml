@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,7 +16,41 @@ let string_opt = function
 
 let node_resolver_dirnames = ["node_modules"]
 
+(** Creates a mutator so we can write some files to sharedmem, and
+    cleans up at the end. *)
+let with_transaction iter_files f =
+  Transaction.with_transaction_sync "test" (fun transaction ->
+      let _reader = Mutator_state_reader.create transaction in
+      let mutator = Parsing_heaps.Saved_state_mutator.create transaction iter_files in
+      f mutator
+  )
+
 let reader = State_reader.create ()
+
+let add_package mutator file_key pkg =
+  let file_opt = None in
+  let module_name = None in
+  let hash = Xx.init 0L |> Xx.digest in
+  let (_ : Modulename.Set.t) =
+    Parsing_heaps.Saved_state_mutator.add_package mutator file_key file_opt hash module_name (Ok pkg)
+  in
+  ()
+
+let with_package fn pkg f =
+  let file_key = File_key.JsonFile fn in
+  let file_set = Utils_js.FilenameSet.singleton file_key in
+  let iter_files f = f file_key in
+  let () =
+    with_transaction iter_files @@ fun (_master_mutator, mutator) ->
+    add_package mutator file_key pkg
+  in
+  let finally () =
+    with_transaction iter_files @@ fun (master_mutator, mutator) ->
+    let dirty_modules = Parsing_heaps.Saved_state_mutator.clear_not_found mutator file_key in
+    ignore (dirty_modules : Modulename.Set.t);
+    Parsing_heaps.Saved_state_mutator.record_not_found master_mutator file_set
+  in
+  Fun.protect ~finally f
 
 let tests =
   "path_of_modulename"
@@ -110,10 +144,9 @@ let tests =
            assert_equal ~ctxt ~printer:string_opt (Some "../b/node_modules/module") path
          );
          ( "supports_package_json_main" >:: fun ctxt ->
-           let pkg = Package_json.create ~name:None ~main:(Some "main.js") in
-           Package_heaps.Package_heap_mutator.add_package_json
-             "/path/to/root/node_modules/pkg_with_main/package.json"
-             pkg;
+           let fn = "/path/to/root/node_modules/pkg_with_main/package.json" in
+           let pkg = Package_json.create ~name:None ~main:(Some "main.js") ~haste_commonjs:false in
+           with_package fn pkg @@ fun () ->
            let path =
              path_of_modulename
                ~node_resolver_dirnames
@@ -125,10 +158,11 @@ let tests =
            assert_equal ~ctxt ~printer:string_opt (Some "pkg_with_main") path
          );
          ( "supports_package_json_relative_main" >:: fun ctxt ->
-           let pkg = Package_json.create ~name:None ~main:(Some "./main.js") in
-           Package_heaps.Package_heap_mutator.add_package_json
-             "/path/to/root/node_modules/pkg_with_relative_main/package.json"
-             pkg;
+           let fn = "/path/to/root/node_modules/pkg_with_relative_main/package.json" in
+           let pkg =
+             Package_json.create ~name:None ~main:(Some "./main.js") ~haste_commonjs:false
+           in
+           with_package fn pkg @@ fun () ->
            let path =
              path_of_modulename
                ~node_resolver_dirnames
@@ -140,10 +174,11 @@ let tests =
            assert_equal ~ctxt ~printer:string_opt (Some "pkg_with_relative_main") path
          );
          ( "supports_package_json_nested_main" >:: fun ctxt ->
-           let pkg = Package_json.create ~name:None ~main:(Some "dist/main.js") in
-           Package_heaps.Package_heap_mutator.add_package_json
-             "/path/to/root/node_modules/pkg_with_nested_main/package.json"
-             pkg;
+           let fn = "/path/to/root/node_modules/pkg_with_nested_main/package.json" in
+           let pkg =
+             Package_json.create ~name:None ~main:(Some "dist/main.js") ~haste_commonjs:false
+           in
+           with_package fn pkg @@ fun () ->
            let path =
              path_of_modulename
                ~node_resolver_dirnames

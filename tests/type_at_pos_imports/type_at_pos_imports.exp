@@ -628,7 +628,7 @@ import-star.js:5:7 = {
   "end":23
 }
 import-star.js:5:31 = {
-  "type":"module \"./exports-type\" {declare var foo: () => MyUnionType; type MyUnionType = \"A\" | \"B\" | \"C\"; type MyStringType = \"A\"; type MyPolyType<T> = {f: T, ...}; }",
+  "type":"module \"./exports-type\"",
   "reasons":[],
   "loc":{
     "source":"import-star.js",
@@ -697,7 +697,7 @@ import-typeof-class.js:7:16 {
   "end":16
 }
 module-export-0.js:3:20 = {
-  "type":"module \"lib_a\" {class A; }",
+  "type":"module \"lib_a\"",
   "reasons":[],
   "loc":{
     "source":"module-export-0.js",
@@ -787,7 +787,7 @@ module-export-1.js:10:9 = {
   "end":15
 }
 module-import.js:3:7 = {
-  "type":"module \"./module-export-0\" {module \"lib_a\" {class A; }; }",
+  "type":"module \"./module-export-0\"",
   "reasons":[],
   "loc":{
     "source":"module-import.js",
@@ -884,4 +884,25 @@ import-type.js:7:7 = {
   "endline":7,
   "start":7,
   "end":7
+}
+rtype-main.js:4:13 = {
+  "expanded_type":{
+    "kind":"Generic",
+    "typeArgs":[{"kind":"Top"}],
+    "type":{"provenance":{"kind":"Remote","loc":"rtype-c.js:3:15-19"},"name":"Value"},
+    "generic_kind":"type alias"
+  },
+  "type":"Value<mixed>",
+  "reasons":[],
+  "loc":{
+    "source":"rtype-main.js",
+    "type":"SourceFile",
+    "start":{"line":4,"column":13,"offset":62},
+    "end":{"line":4,"column":13,"offset":63}
+  },
+  "path":"rtype-main.js",
+  "line":4,
+  "endline":4,
+  "start":13,
+  "end":13
 }

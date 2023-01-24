@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -59,6 +59,16 @@ assert_ok "$FLOW" force-recheck $IMPL_FILES
 assert_errors "$FLOW" status .
 ignore_files "$IMPL_FILES"
 assert_ok "$FLOW" force-recheck $IMPL_FILES
+assert_errors "$FLOW" status .
+
+printf "\n\n======Start off with neither .js files nor .flow files======\n"
+assert_ok "$FLOW" stop .
+ignore_files "$DECL_FILES"
+start_flow .
+
+assert_errors "$FLOW" status .
+use_files "$DECL_FILES"
+assert_ok "$FLOW" force-recheck $DECL_FILES
 assert_errors "$FLOW" status .
 
 # reset

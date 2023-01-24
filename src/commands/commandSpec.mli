@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -11,6 +11,7 @@ module ArgSpec : sig
   type ('a, 'b) t
 
   type flag_arg_count =
+    | Truthy
     | No_Arg
     | Arg
     | Arg_List
@@ -35,7 +36,9 @@ module ArgSpec : sig
 
   val collect : ('main -> 'a -> 'new_main) -> ('b, 'main) t -> ('b, 'a -> 'new_main) t
 
-  val no_arg : bool flag_t
+  val truthy : bool flag_t
+
+  val no_arg : bool option flag_t
 
   val string : string option flag_t
 
@@ -69,9 +72,16 @@ type ('a, 'b) builder_t = {
 
 type t
 
+type flags = ArgSpec.flag_metadata SMap.t
+
 exception Show_help
 
-exception Failed_to_parse of string * string
+exception
+  Failed_to_parse of {
+    msg: string;
+    arg: string;
+    details: string option;
+  }
 
 (* If no `col_width` is passed, the length of the longest string of the first column will be used.
    `col_pad` will be used as additional padding between the two columns. *)
@@ -89,7 +99,9 @@ val name : t -> string
 
 val doc : t -> string
 
-val flags : t -> ArgSpec.flag_metadata SMap.t
+val flags : t -> flags
+
+val find_flag : string -> flags -> string * ArgSpec.flag_metadata
 
 val args_of_argv : t -> string list -> string list SMap.t
 

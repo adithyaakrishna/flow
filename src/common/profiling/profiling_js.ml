@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -892,6 +892,7 @@ end = struct
     high_water_mark_delta: float;
     is_legacy: bool;
   }
+  [@@warning "-69"]
 
   and running' = {
     running_groups_rev: string list;

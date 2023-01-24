@@ -4,11 +4,6 @@ var sealed = {one: 'one', two: 'two'};
 (Object.keys(sealed): Array<'one'|'two'>);
 (Object.keys(sealed): void); // error, Array<string>
 
-var unsealed = {};
-Object.keys(unsealed).forEach(k => {
-  (k : number) // error: string ~> number
-});
-
 var dict: { [k: number]: string } = {};
 Object.keys(dict).forEach(k => {
   (k : number) // error: string ~> number
@@ -44,3 +39,19 @@ var tests = [
     (Object.keys(dict): Array<'123'>); // error: not supported yet
   },
 ];
+
+// Interfaces
+declare var iface: interface {a: number, b: string};
+declare var ifaceDict: interface {['x' | 'y']: boolean};
+declare var ifaceBoth: interface {['x' | 'y']: boolean, z: number};
+
+(Object.keys(iface): Array<'a' | 'b'>); // OK
+(Object.keys(ifaceDict): Array<'x' | 'y'>); // OK
+(Object.keys(ifaceBoth): Array<'x' | 'y' | 'z'>); // OK
+(Object.keys(ifaceDict): Array<'$value' | '$key'>); // ERROR
+
+// Invalid values
+Object.keys(undefined); // ERROR
+Object.keys(null); // ERROR
+Object.keys(1); // ERROR
+Object.keys(true); // ERROR

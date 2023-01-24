@@ -1,30 +1,126 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-module Ast = Flow_ast
+open Reason
+open Loc_collections
+open Name_def
+open Dependency_sigs
+module EnvMap = Env_api.EnvMap
+module EnvSet = Env_api.EnvSet
 
-module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
-  module L = L
-  module Provider_api = Env_api.Provider_api
-  module Name_def = Name_def.Make (L)
-  open Name_def
+module Tarjan =
+  Tarjan.Make
+    (struct
+      include Env_api.EnvKey
 
-  module Tarjan =
-    Tarjan.Make
-      (struct
-        include L
+      let to_string (_, l) = ALoc.debug_to_string l
+    end)
+    (EnvMap)
+    (EnvSet)
 
-        let to_string l = debug_to_string l
-      end)
-      (L.LMap)
-      (L.LSet)
+type 'k blame = {
+  payload: 'k;
+  reason: ALoc.t virtual_reason;
+  annot_locs: ALoc.t Env_api.annot_loc list;
+  recursion: ALoc.t list;
+}
+
+type element =
+  | Normal of Env_api.EnvKey.t
+  | Resolvable of Env_api.EnvKey.t
+  | Illegal of Env_api.EnvKey.t blame
+
+type result =
+  | Singleton of element
+  | ResolvableSCC of element Nel.t
+  | IllegalSCC of (element blame * bool) Nel.t
+
+let string_of_element graph =
+  let print_elt k =
+    match EnvMap.find_opt k graph with
+    | None -> "MISSING DEFINITION"
+    | Some (def, _, _, _) -> Print.string_of_source def
+  in
+  function
+  | Normal (k, l) ->
+    Utils_js.spf
+      "[%s (%s): %s]"
+      (ALoc.debug_to_string l)
+      (Env_api.show_def_loc_type k)
+      (print_elt (k, l))
+  | Resolvable (k, l) ->
+    Utils_js.spf
+      "[recursive %s (%s): %s]"
+      (ALoc.debug_to_string l)
+      (Env_api.show_def_loc_type k)
+      (print_elt (k, l))
+  | Illegal { payload = (k, l); _ } ->
+    Utils_js.spf
+      "[illegal %s (%s): %s]"
+      (ALoc.debug_to_string l)
+      (Env_api.show_def_loc_type k)
+      (print_elt (k, l))
+
+let string_of_component graph = function
+  | Singleton elt -> string_of_element graph elt
+  | ResolvableSCC elts ->
+    Utils_js.spf
+      "{(recursive cycle)\n%s\n}"
+      (Nel.to_list elts |> Base.List.map ~f:(string_of_element graph) |> String.concat ",\n")
+  | IllegalSCC elts ->
+    Utils_js.spf
+      "{(illegal cycle)\n%s\n}"
+      (Nel.to_list elts
+      |> Base.List.map ~f:(fun ({ payload = elt; _ }, _) -> string_of_element graph elt)
+      |> String.concat ",\n"
+      )
+
+class toplevel_expression_collector =
+  object (this)
+    inherit [(ALoc.t, ALoc.t) Ast.Expression.t list, ALoc.t] Flow_ast_visitor.visitor ~init:[]
+
+    method! expression expr =
+      this#update_acc (fun acc -> expr :: acc);
+      expr
+
+    method! class_ _ x = x
+
+    method! function_declaration _ x = x
+
+    method! function_expression _ x = x
+
+    method! arrow_function _ x = x
+  end
+
+module type S = sig
+  type cx
+
+  val build_ordering :
+    cx ->
+    autocomplete_hooks:Env_api.With_ALoc.autocomplete_hooks ->
+    Env_api.env_info ->
+    (Name_def.def * 'a * ALoc.t list * ALoc.t Reason.virtual_reason) EnvMap.t ->
+    result Base.List.t
+end
+
+module Make (Context : C) (FlowAPIUtils : F with type cx = Context.t) : S with type cx = Context.t =
+struct
+  type cx = Context.t
 
   module FindDependencies : sig
-    val depends : Env_api.env_info -> Name_def.def -> L.t Nel.t L.LMap.t
+    val depends :
+      Context.t ->
+      autocomplete_hooks:Env_api.With_ALoc.autocomplete_hooks ->
+      EnvMap.key EnvMap.t ->
+      Env_api.env_info ->
+      Env_api.def_loc_type ->
+      ALoc.t ->
+      Name_def.def ->
+      ALoc.t Nel.t EnvMap.t
 
     val recursively_resolvable : Name_def.def -> bool
   end = struct
@@ -56,31 +152,41 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
 
     (* Helper class for the dependency analysis--traverse the AST nodes
        in a def to determine which variables appear *)
-    class use_visitor ({ Env_api.env_values; env_entries; _ } as env) init =
+    class use_visitor
+      cx
+      ~named_only_for_synthesis
+      this_super_dep_loc_map
+      ({ Env_api.env_values; env_entries; providers; _ } as env)
+      init =
       object (this)
-        inherit [L.t Nel.t L.LMap.t, L.t] Flow_ast_visitor.visitor ~init
+        inherit [ALoc.t Nel.t EnvMap.t, ALoc.t] Flow_ast_visitor.visitor ~init as super
 
         method add ~why t =
-          this#update_acc (fun uses ->
-              L.LMap.update
-                t
-                (function
-                  | None -> Some (Nel.one why)
-                  | Some locs -> Some (Nel.cons why locs))
-                uses
-          )
+          if Env_api.has_assigning_write t env_entries then
+            this#update_acc (fun uses ->
+                EnvMap.update
+                  t
+                  (function
+                    | None -> Some (Nel.one why)
+                    | Some locs ->
+                      Some
+                        ( if Nel.mem ~equal:ALoc.equal why locs then
+                          locs
+                        else
+                          Nel.cons why locs
+                        ))
+                  uses
+            )
 
-        method find_writes ~for_type loc =
-          let write_locs =
-            try Env_api.write_locs_of_read_loc env_values loc with
-            | Not_found ->
-              failwith
-                (Printf.sprintf
-                   "missing write locs for %s"
-                   (L.debug_to_string ~include_source:true loc)
-                )
+        method add_write_locs ~for_type write_locs =
+          let writes =
+            write_locs
+            |> Base.List.concat_map ~f:(Env_api.writes_of_write_loc ~for_type providers)
+            |> Base.List.map ~f:(fun kind_and_loc ->
+                   EnvMap.find_opt kind_and_loc this_super_dep_loc_map
+                   |> Base.Option.value ~default:kind_and_loc
+               )
           in
-          let writes = Base.List.concat_map ~f:(Env_api.writes_of_write_loc ~for_type) write_locs in
           let refinements =
             Base.List.concat_map ~f:(Env_api.refinements_of_write_loc env) write_locs
           in
@@ -90,12 +196,13 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
             | InstanceOfR ((_loc, _) as exp)
             | LatentR { func = (_loc, _) as exp; _ } ->
               ignore (this#expression exp)
+            | SentinelR (_prop, loc) -> this#add ~why:loc (Env_api.ExpressionLoc, loc)
             | AndR (l, r)
             | OrR (l, r) ->
               writes_of_refinement l;
               writes_of_refinement r
             | NotR r -> writes_of_refinement r
-            | TruthyR _
+            | TruthyR
             | NullR
             | UndefinedR
             | MaybeR
@@ -103,17 +210,29 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
             | BoolR _
             | FunctionR
             | NumberR _
+            | BigIntR _
             | ObjectR
             | StringR _
-            | SentinelR _
             | SymbolR _
             | SingletonBoolR _
             | SingletonStrR _
-            | SingletonNumR _ ->
+            | SingletonNumR _
+            | SingletonBigIntR _
+            | PropExistsR _ ->
               ()
           in
           Base.List.iter ~f:writes_of_refinement refinements;
           writes
+
+        method find_writes ~for_type ?(allow_missing = false) loc =
+          let write_locs =
+            try Env_api.write_locs_of_read_loc env_values loc with
+            | Not_found ->
+              if not allow_missing then
+                FlowAPIUtils.add_output cx Error_message.(EInternal (loc, MissingEnvRead loc));
+              []
+          in
+          this#add_write_locs ~for_type write_locs
 
         (* In order to resolve a def containing a variable read, the writes that the
            Name_resolver determines reach the variable must be resolved *)
@@ -127,46 +246,243 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
           Base.List.iter ~f:(this#add ~why:loc) writes;
           id
 
+        (* In order to resolve a def containing a variable read, the writes that the
+           Name_resolver determines reach the variable must be resolved *)
+        method! yield loc yield =
+          let writes = this#find_writes ~for_type:false loc in
+          Base.List.iter ~f:(this#add ~why:loc) writes;
+          super#yield loc yield
+
         (* In order to resolve a def containing a variable write, the
            write itself should first be resolved *)
         method! pattern_identifier ?kind:_ ((loc, _) as id) =
-          (* Ignore cases that don't have bindings in the environment, like `var x;` *)
-          if L.LMap.mem loc env_entries then this#add ~why:loc loc;
+          ( if Provider_api.is_provider providers loc then
+            (* If this is a provider, then we still need to have *all* providers,
+               for this location added, because type-at-pos will show their union. We
+               won't call this method directly when resolving an assignment--only when
+               resolving a larger name_def (e.g. an unsynthesizable function) that
+               includes an assignment expression. *)
+            let { Provider_api.providers = provider_entries; _ } =
+              Base.Option.value_exn (Provider_api.providers_of_def providers loc)
+            in
+            Base.List.iter
+              ~f:(fun { Provider_api.reason = r; _ } ->
+                let key = (Env_api.OrdinaryNameLoc, Reason.poly_loc_of_reason r) in
+                this#add ~why:loc key)
+              provider_entries
+          );
+          (* Ignore cases that don't have bindings in the environment, like `var x;`
+             and illegal or unreachable writes. *)
+          this#add ~why:loc (Env_api.OrdinaryNameLoc, loc);
           id
 
         method! binding_type_identifier ((loc, _) as id) =
-          (* Unconditional, unlike the above, because all binding type identifiers should
-             exist in the environment. *)
-          this#add ~why:loc loc;
+          this#add ~why:loc (Env_api.OrdinaryNameLoc, loc);
           id
 
-        method! member_property_identifier (id : (L.t, L.t) Ast.Identifier.t) = id
+        method! this_expression loc this_ =
+          let writes = this#find_writes ~for_type:false loc in
+          Base.List.iter ~f:(this#add ~why:loc) writes;
+          this_
+
+        method! super_expression loc this_ =
+          let writes = this#find_writes ~for_type:false loc in
+          Base.List.iter ~f:(this#add ~why:loc) writes;
+          this_
+
+        method! jsx_element_name_identifier (ident : (ALoc.t, ALoc.t) Ast.JSX.Identifier.t) =
+          let (loc, _) = ident in
+          let writes = this#find_writes ~for_type:false loc in
+          Base.List.iter ~f:(this#add ~why:loc) writes;
+          super#jsx_identifier ident
+
+        method private jsx_function_call loc =
+          match (Context.react_runtime cx, Context.jsx cx) with
+          | (Options.ReactRuntimeClassic, Options.Jsx_react) ->
+            let writes = this#find_writes ~for_type:false loc in
+            Base.List.iter ~f:(this#add ~why:loc) writes
+          | (_, Options.Jsx_pragma (_, (_, Ast.Expression.Identifier _))) ->
+            let writes = this#find_writes ~for_type:false loc in
+            Base.List.iter ~f:(this#add ~why:loc) writes
+          | (Options.ReactRuntimeClassic, Options.Jsx_pragma (_, ast)) ->
+            ignore @@ this#expression ast
+          | _ -> ()
+
+        method! jsx_element loc expr =
+          let open Ast.JSX in
+          let { opening_element; closing_element; _ } = expr in
+          let loc =
+            match closing_element with
+            | None -> fst opening_element
+            | _ -> loc
+          in
+          this#jsx_function_call loc;
+          super#jsx_element loc expr
+
+        method! jsx_fragment loc expr =
+          this#jsx_function_call loc;
+          super#jsx_fragment loc expr
+
+        (* Skip names in function parameter types (e.g. declared functions) *)
+        method! function_param_type (fpt : ('loc, 'loc) Ast.Type.Function.Param.t) =
+          let open Ast.Type.Function.Param in
+          let (_, { annot; _ }) = fpt in
+          let _annot' = this#type_ annot in
+          fpt
+
+        method! member_property_identifier (id : (ALoc.t, ALoc.t) Ast.Identifier.t) = id
 
         method! typeof_member_identifier ident = ident
 
-        method! member_type_identifier (id : (L.t, L.t) Ast.Identifier.t) = id
+        method! member_type_identifier (id : (ALoc.t, ALoc.t) Ast.Identifier.t) = id
 
         method! pattern_object_property_identifier_key ?kind:_ id = id
 
         method! enum_member_identifier id = id
 
-        method! object_key_identifier (id : (L.t, L.t) Ast.Identifier.t) = id
+        method! object_key_identifier (id : (ALoc.t, ALoc.t) Ast.Identifier.t) = id
+
+        method! remote_identifier ident = ident
+
+        method! export_named_declaration_specifier
+            (spec : 'loc Ast.Statement.ExportNamedDeclaration.ExportSpecifier.t) =
+          let open Ast.Statement.ExportNamedDeclaration.ExportSpecifier in
+          (* Ignore renamed export *)
+          let (_, { local; exported = _ }) = spec in
+          let _local : (_, _) Ast.Identifier.t = this#identifier local in
+          spec
 
         (* For classes/functions that are known to be fully annotated, we skip property bodies *)
         method function_def ~fully_annotated (expr : ('loc, 'loc) Ast.Function.t) =
-          let open Ast.Function in
-          let { params; body; predicate; return; tparams; _ } = expr in
+          let { Ast.Function.params; body; predicate; return; tparams; _ } = expr in
           let open Flow_ast_mapper in
-          let _ = this#function_params params in
+          let _ = this#type_annotation_hint return in
           let _ =
             if fully_annotated then
-              (this#type_annotation_hint return, body)
+              (body, this#function_params_annotated params, predicate)
             else
-              (return, this#function_body_any body)
+              ( this#function_body_any body,
+                this#function_params params,
+                map_opt this#predicate predicate
+              )
           in
-          let _ = map_opt this#predicate predicate in
           let _ = map_opt this#type_params tparams in
           ()
+
+        method function_param_pattern_annotated (expr : ('loc, 'loc) Ast.Pattern.t) =
+          let open Ast.Pattern in
+          let open Flow_ast_mapper in
+          let (_, patt) = expr in
+          begin
+            match patt with
+            | Object { Object.properties; annot; comments = _ } ->
+              let _properties' =
+                map_list this#function_param_pattern_object_p_annotated properties
+              in
+              let _annot' = this#type_annotation_hint annot in
+              ()
+            | Array { Array.elements; annot; comments = _ } ->
+              let _elements' = map_list this#function_param_pattern_array_e_annotated elements in
+              let _annot' = this#type_annotation_hint annot in
+              ()
+            | Identifier { Identifier.name; annot; optional = _ } ->
+              let _name' = this#pattern_identifier name in
+              let _annot' = this#type_annotation_hint annot in
+              ()
+            | Expression e -> ignore @@ id this#pattern_expression e patt (fun e -> Expression e)
+          end;
+          expr
+
+        method function_param_pattern_object_p_annotated
+            (p : ('loc, 'loc) Ast.Pattern.Object.property) =
+          let open Ast.Pattern.Object in
+          let open Flow_ast_mapper in
+          match p with
+          | Property prop ->
+            id this#function_param_pattern_object_property_annotated prop p (fun prop ->
+                Property prop
+            )
+          | RestElement prop ->
+            id this#function_param_pattern_object_rest_property_annotated prop p (fun prop ->
+                RestElement prop
+            )
+
+        method function_param_pattern_object_property_annotated
+            (prop : ('loc, 'loc) Ast.Pattern.Object.Property.t) =
+          let open Ast.Pattern.Object.Property in
+          let (_, { key; pattern; default = _; shorthand = _ }) = prop in
+          let _key' = this#pattern_object_property_key key in
+          let _pattern' = this#function_param_pattern_annotated pattern in
+          (* Skip default *)
+          prop
+
+        method function_param_pattern_object_rest_property_annotated
+            (prop : ('loc, 'loc) Ast.Pattern.RestElement.t) =
+          let open Ast.Pattern.RestElement in
+          let (_, { argument; comments = _ }) = prop in
+          let _argument' = this#function_param_pattern_annotated argument in
+          prop
+
+        method function_param_pattern_array_e_annotated (e : ('loc, 'loc) Ast.Pattern.Array.element)
+            =
+          let open Ast.Pattern.Array in
+          let open Flow_ast_mapper in
+          match e with
+          | Hole _ -> e
+          | Element elem ->
+            id this#function_param_pattern_array_element_annotated elem e (fun elem -> Element elem)
+          | RestElement elem ->
+            id this#function_param_pattern_array_rest_element_annotated elem e (fun elem ->
+                RestElement elem
+            )
+
+        method function_param_pattern_array_element_annotated
+            (elem : ('loc, 'loc) Ast.Pattern.Array.Element.t) =
+          let open Ast.Pattern.Array.Element in
+          let (_, { argument; default = _ }) = elem in
+          let _argument' = this#function_param_pattern_annotated argument in
+          (* Skip default *)
+          elem
+
+        method function_param_pattern_array_rest_element_annotated
+            (elem : ('loc, 'loc) Ast.Pattern.RestElement.t) =
+          let open Ast.Pattern.RestElement in
+          let (_, { argument; comments = _ }) = elem in
+          let _argument' = this#function_param_pattern_annotated argument in
+          elem
+
+        method function_params_annotated (params : ('loc, 'loc) Ast.Function.Params.t) =
+          let open Flow_ast_mapper in
+          let open Ast.Function in
+          let (_, { Params.params = params_list; rest; comments = _; this_ }) = params in
+          let _ = map_list this#function_param_annotated params_list in
+          let _ = map_opt this#function_rest_param_annotated rest in
+          let _ = map_opt this#function_this_param this_ in
+          params
+
+        method function_param_annotated (param : ('loc, 'loc) Ast.Function.Param.t) =
+          let open Ast.Function.Param in
+          let (_, { argument; default = _ }) = param in
+          (* Skip default *)
+          let _ = this#function_param_pattern_annotated argument in
+          param
+
+        method function_rest_param_annotated (expr : ('loc, 'loc) Ast.Function.RestParam.t) =
+          let open Ast.Function.RestParam in
+          let (_, { argument; comments = _ }) = expr in
+          let _argument' = this#function_param_pattern_annotated argument in
+          expr
+
+        method! function_ loc expr =
+          let { Ast.Function.id; _ } = expr in
+          if not named_only_for_synthesis then (
+            (match id with
+            | Some _ -> ()
+            | None -> this#add ~why:loc (Env_api.OrdinaryNameLoc, loc));
+
+            super#function_ loc expr
+          ) else
+            expr
 
         method class_body_annotated (cls_body : ('loc, 'loc) Ast.Class.Body.t) =
           let open Ast.Class.Body in
@@ -189,61 +505,231 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
           let _ = this#function_def ~fully_annotated:true value in
           ()
 
+        method private class_property_value_annotated value =
+          let open Ast.Class.Property in
+          match value with
+          | Initialized
+              ((_, Ast.Expression.ArrowFunction function_) | (_, Ast.Expression.Function function_))
+            ->
+            this#function_def ~fully_annotated:true function_;
+            value
+          | Initialized _ -> value
+          | Declared -> value
+          | Uninitialized -> value
+
         method class_property_annotated (prop : ('loc, 'loc) Ast.Class.Property.t') =
           let open Ast.Class.Property in
-          let { key; value = _; annot; static = _; variance = _; comments = _ } = prop in
+          let { key; value; annot; static = _; variance = _; comments = _ } = prop in
           let _ = this#object_key key in
           let _ = this#type_annotation_hint annot in
+          let _ =
+            match annot with
+            | Ast.Type.Missing _ -> this#class_property_value_annotated value
+            | Ast.Type.Available _ -> value
+          in
           ()
 
         method class_private_field_annotated (prop : ('loc, 'loc) Ast.Class.PrivateField.t') =
           let open Ast.Class.PrivateField in
-          let { key; value = _; annot; static = _; variance = _; comments = _ } = prop in
+          let { key; value; annot; static = _; variance = _; comments = _ } = prop in
           let _ = this#private_name key in
           let _ = this#type_annotation_hint annot in
+          let _ =
+            match annot with
+            | Ast.Type.Missing _ -> this#class_property_value_annotated value
+            | Ast.Type.Available _ -> value
+          in
           ()
+
+        (* In order to resolve a def containing a read, the writes that the
+           Name_resolver determines reach the variable must be resolved *)
+        method! expression ((loc, _) as expr) =
+          (* An expression might read an refined value. e.g. if (foo.bar) foo.bar.
+             Therefore, we need to record these writes. *)
+          let writes = this#find_writes ~for_type:false ~allow_missing:true loc in
+          Base.List.iter ~f:(this#add ~why:loc) writes;
+          if not named_only_for_synthesis then (
+            this#add ~why:loc (Env_api.OrdinaryNameLoc, loc);
+            this#add ~why:loc (Env_api.ExpressionLoc, loc);
+            this#add ~why:loc (Env_api.ArrayProviderLoc, loc)
+          );
+          super#expression expr
+
+        method visit_expression_for_expression_writes ((loc, _) as expr) =
+          let writes = this#find_writes ~for_type:false ~allow_missing:true loc in
+          Base.List.iter ~f:(this#add ~why:loc) writes;
+          ignore @@ super#expression expr
       end
 
     (* For all the possible defs, explore the def's structure with the class above
        to find what variables have to be resolved before this def itself can be resolved *)
-    let depends ({ Env_api.providers; _ } as env) =
-      let visitor = new use_visitor env L.LMap.empty in
-      let depends_of_node mk_visit state =
+    let depends
+        cx
+        ~autocomplete_hooks
+        this_super_dep_loc_map
+        ({ Env_api.providers; env_entries; predicate_refinement_maps; _ } as env)
+        kind
+        id_loc =
+      let depends_of_node ?(named_only_for_synthesis = false) mk_visit state =
+        let visitor =
+          new use_visitor cx ~named_only_for_synthesis this_super_dep_loc_map env EnvMap.empty
+        in
         visitor#set_acc state;
         let node_visit () = mk_visit visitor in
         visitor#eval node_visit ()
       in
+      let depends_of_tparams_map tparams_map =
+        depends_of_node (fun visitor ->
+            ALocMap.iter
+              (fun loc _ -> visitor#add ~why:loc (Env_api.OrdinaryNameLoc, loc))
+              tparams_map
+        )
+      in
       (* depends_of_annotation and of_expression take the `state` parameter from
          `depends_of_node` above as an additional currried parameter. *)
-      let depends_of_annotation anno =
-        depends_of_node (fun visitor -> ignore @@ visitor#type_annotation anno)
+      let depends_of_annotation tparams_map anno state =
+        state
+        |> depends_of_tparams_map tparams_map
+        |> depends_of_node (fun visitor -> ignore @@ visitor#type_annotation anno)
       in
-      let depends_of_expression expr =
-        depends_of_node (fun visitor -> ignore @@ visitor#expression expr)
+      let depends_of_expression
+          ?(named_only_for_synthesis = false) ?(for_expression_writes = false) expr =
+        depends_of_node ~named_only_for_synthesis (fun visitor ->
+            if for_expression_writes then
+              visitor#visit_expression_for_expression_writes expr
+            else
+              ignore @@ visitor#expression expr
+        )
       in
-      let depends_of_fun fully_annotated function_ =
-        depends_of_node
-          (fun visitor -> visitor#function_def ~fully_annotated function_)
-          L.LMap.empty
+      let depends_of_hint_node state = function
+        | AnnotationHint (tparams_map, anno) -> depends_of_annotation tparams_map anno state
+        | ValueHint e -> depends_of_expression e state
+        | ProvidersHint providers ->
+          Nel.fold_left
+            (fun state loc ->
+              depends_of_node
+                (fun visitor -> visitor#add ~why:loc (Env_api.OrdinaryNameLoc, loc))
+                state)
+            state
+            providers
+        | WriteLocHint (kind, loc) ->
+          depends_of_node (fun visitor -> visitor#add ~why:loc (kind, loc)) state
+        | StringLiteralType _ -> state
+        | BuiltinType _ -> state
+      in
+      let rec depends_of_hint state = function
+        | Hint_api.Hint_Placeholder -> state
+        | Hint_api.Hint_t hint_node -> depends_of_hint_node state hint_node
+        | Hint_api.Hint_Decomp (ops, hint_node) ->
+          let depends_on_synthesizable_toplevel_expressions acc ~collect =
+            let collector = new toplevel_expression_collector in
+            collect collector;
+            Base.List.fold collector#acc ~init:acc ~f:(fun acc e ->
+                if Name_def.expression_is_definitely_synthesizable ~autocomplete_hooks e then
+                  depends_of_expression e acc
+                else
+                  depends_of_expression ~named_only_for_synthesis:true e acc
+            )
+          in
+          Nel.fold_left
+            (fun acc (_id, op) ->
+              match op with
+              | Hint_api.Decomp_ObjComputed r ->
+                let loc = aloc_of_reason r in
+                depends_of_node
+                  (fun visitor -> visitor#add ~why:loc (Env_api.ExpressionLoc, loc))
+                  acc
+              | Hint_api.Decomp_SentinelRefinement checks ->
+                SMap.fold
+                  (fun _ check acc ->
+                    match check with
+                    | Hint_api.Member r ->
+                      let loc = aloc_of_reason r in
+                      depends_of_node
+                        (fun visitor -> visitor#add ~why:loc (Env_api.ExpressionLoc, loc))
+                        acc
+                    | _ -> acc)
+                  checks
+                  acc
+              | Hint_api.Instantiate_Component { Hint_api.jsx_props; jsx_children; _ } ->
+                depends_on_synthesizable_toplevel_expressions acc ~collect:(fun collector ->
+                    Base.List.iter jsx_props ~f:(fun prop ->
+                        ignore @@ collector#jsx_opening_attribute prop
+                    );
+                    ignore @@ collector#jsx_children jsx_children
+                )
+              | Hint_api.Instantiate_Callee { Hint_api.return_hints; arg_list; arg_index; _ } ->
+                let rec loop acc i = function
+                  | [] -> acc
+                  | arg :: rest when i >= arg_index ->
+                    let acc =
+                      depends_on_synthesizable_toplevel_expressions acc ~collect:(fun collector ->
+                          ignore @@ collector#expression_or_spread arg
+                      )
+                    in
+                    loop acc (i + 1) rest
+                  | arg :: rest ->
+                    let acc =
+                      depends_of_node
+                        (fun visitor -> ignore @@ visitor#expression_or_spread arg)
+                        acc
+                    in
+                    loop acc (i + 1) rest
+                in
+                let (_, { Ast.Expression.ArgList.arguments; comments = _ }) = Lazy.force arg_list in
+                loop (depends_of_hints acc return_hints) 0 arguments
+              | _ -> acc)
+            (depends_of_hint_node state hint_node)
+            ops
+      and depends_of_hints state = Base.List.fold ~init:state ~f:depends_of_hint in
+
+      let depends_of_fun synth tparams_map ~hints ~statics function_ state =
+        let (fully_annotated, state) =
+          match synth with
+          | FunctionSynthesizable -> (true, state)
+          | FunctionPredicateSynthesizable (loc, _) ->
+            let (p_map, n_map) =
+              ALocMap.find_opt loc predicate_refinement_maps
+              |> Base.Option.value ~default:(SMap.empty, SMap.empty)
+            in
+            let state =
+              depends_of_node
+                (fun visitor ->
+                  SMap.iter
+                    (fun _ { Env_api.write_locs; _ } ->
+                      let writes = visitor#add_write_locs ~for_type:false write_locs in
+                      Base.List.iter ~f:(visitor#add ~why:loc) writes)
+                    p_map;
+                  SMap.iter
+                    (fun _ { Env_api.write_locs; _ } ->
+                      let writes = visitor#add_write_locs ~for_type:false write_locs in
+                      Base.List.iter ~f:(visitor#add ~why:loc) writes)
+                    n_map)
+                state
+            in
+            (true, state)
+          | _ -> (false, state)
+        in
+        let state = depends_of_hints state hints in
+        let state =
+          depends_of_node
+            (fun visitor -> visitor#function_def ~fully_annotated function_)
+            (depends_of_tparams_map tparams_map state)
+        in
+        depends_of_node (fun visitor -> SMap.iter (fun _ -> visitor#add ~why:id_loc) statics) state
       in
       let depends_of_class
-          fully_annotated
           { Ast.Class.id = _; body; tparams; extends; implements; class_decorators; comments = _ } =
         depends_of_node
           (fun visitor ->
             let open Flow_ast_mapper in
-            let _ =
-              if fully_annotated then
-                visitor#class_body_annotated body
-              else
-                visitor#class_body body
-            in
+            let _ = visitor#class_body_annotated body in
             let _ = map_opt (map_loc visitor#class_extends) extends in
             let _ = map_opt visitor#class_implements implements in
             let _ = map_list visitor#class_decorator class_decorators in
             let _ = map_opt visitor#type_params tparams in
             ())
-          L.LMap.empty
+          EnvMap.empty
       in
       let depends_of_declared_class
           {
@@ -264,7 +750,16 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
             let _ = map_list (map_loc visitor#generic_type) mixins in
             let _ = map_opt visitor#class_implements implements in
             ())
-          L.LMap.empty
+          EnvMap.empty
+      in
+      let depends_of_declared_module
+          { Ast.Statement.DeclareModule.id = _; body; kind = _; comments = _ } =
+        depends_of_node
+          (fun visitor ->
+            let open Flow_ast_mapper in
+            let _ = map_loc visitor#block body in
+            ())
+          EnvMap.empty
       in
       let depends_of_alias { Ast.Statement.TypeAlias.tparams; right; _ } =
         depends_of_node
@@ -273,7 +768,7 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
             let _ = map_opt visitor#type_params tparams in
             let _ = visitor#type_ right in
             ())
-          L.LMap.empty
+          EnvMap.empty
       in
       let depends_of_opaque { Ast.Statement.OpaqueType.tparams; impltype; supertype; _ } =
         depends_of_node
@@ -283,9 +778,9 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
             let _ = map_opt visitor#type_ impltype in
             let _ = map_opt visitor#type_ supertype in
             ())
-          L.LMap.empty
+          EnvMap.empty
       in
-      let depends_of_tparam (_, { Ast.Type.TypeParam.bound; variance; default; _ }) =
+      let depends_of_tparam tparams_map (_, { Ast.Type.TypeParam.bound; variance; default; _ }) =
         depends_of_node
           (fun visitor ->
             let open Flow_ast_mapper in
@@ -293,7 +788,7 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
             let _ = visitor#variance_opt variance in
             let _ = map_opt visitor#type_ default in
             ())
-          L.LMap.empty
+          (depends_of_tparams_map tparams_map EnvMap.empty)
       in
       let depends_of_interface { Ast.Statement.Interface.tparams; extends; body; _ } =
         depends_of_node
@@ -303,102 +798,284 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
             let _ = map_list (map_loc visitor#generic_type) extends in
             let _ = map_loc visitor#object_type body in
             ())
-          L.LMap.empty
+          EnvMap.empty
+      in
+      let depends_of_hinted_expression ~for_expression_writes hints expr state =
+        let open Ast.Expression in
+        let state = depends_of_expression ~for_expression_writes expr state in
+        match expr with
+        | ( _,
+            ( Array { Array.elements = []; _ }
+            | Call _ | New _
+            | Object { Object.properties = []; _ } )
+          ) ->
+          depends_of_hints state hints
+        | _ -> state
       in
       let depends_of_root state = function
-        | Annotation anno -> depends_of_annotation anno state
-        | Value exp -> depends_of_expression exp state
-        | For (_, exp) -> depends_of_expression exp state
-        | Contextual _ -> state
-        | Catch -> state
-      in
-      let depends_of_selector state = function
-        | Computed exp
-        | Default exp ->
-          depends_of_expression exp state
-        | Elem _
-        | Prop _
-        | ObjRest _
-        | ArrRest _ ->
-          state
-      in
-      let depends_of_lhs id_loc =
-        (* When looking at a binding def, like `x = y`, in order to resolve this def we need
-             to have resolved the providers for `x`, as well as the type of `y`, in order to check
-             the type of `y` against `x`. So in addition to exploring the RHS, we also add the providers
-             for `x` to the set of dependencies. *)
-        if not @@ Provider_api.is_provider providers id_loc then
-          let (_, providers) =
-            Base.Option.value_exn (Provider_api.providers_of_def providers id_loc)
+        | Annotation { annot; tparams_map; _ } -> depends_of_annotation tparams_map annot state
+        | Value { hints; expr } ->
+          let state = depends_of_hints state hints in
+          depends_of_expression expr state
+        | ObjectValue { obj; synthesizable = ObjectSynthesizable _; _ } ->
+          let open Ast.Expression.Object in
+          let open Ast.Expression.Object.Property in
+          let open Ast.Expression.Object.SpreadProperty in
+          let rec depends_of_synthesizable_expression state ((_, exp) as expression) =
+            match exp with
+            | Ast.Expression.Object obj -> loop state obj
+            | Ast.Expression.TypeCast { Ast.Expression.TypeCast.annot; _ } ->
+              depends_of_annotation ALocMap.empty annot state
+            | Ast.Expression.Array { Ast.Expression.Array.elements; _ } ->
+              Base.List.fold elements ~init:state ~f:(fun state -> function
+                | Ast.Expression.Array.Expression exp
+                | Ast.Expression.Array.Spread (_, { Ast.Expression.SpreadElement.argument = exp; _ })
+                  ->
+                  depends_of_synthesizable_expression state exp
+                | Ast.Expression.Array.Hole _ -> state
+              )
+            | Ast.Expression.Function fn
+            | Ast.Expression.ArrowFunction fn ->
+              depends_of_fun
+                FunctionSynthesizable
+                ALocMap.empty
+                ~hints:[]
+                ~statics:SMap.empty
+                fn
+                state
+            | Ast.Expression.Member
+                {
+                  Ast.Expression.Member._object;
+                  property = Ast.Expression.Member.PropertyIdentifier _;
+                  _;
+                } ->
+              depends_of_synthesizable_expression state _object
+            | _ -> depends_of_expression expression state
+          and loop state { Ast.Expression.Object.properties; _ } =
+            Base.List.fold properties ~init:state ~f:(fun state -> function
+              | SpreadProperty (_, { argument; _ }) -> depends_of_expression argument state
+              | Property (_, Method { key = Identifier _; value = (_, fn); _ }) ->
+                depends_of_fun
+                  FunctionSynthesizable
+                  ALocMap.empty
+                  ~hints:[]
+                  ~statics:SMap.empty
+                  fn
+                  state
+              | Property (_, Init { key = Identifier _; value; _ }) ->
+                depends_of_synthesizable_expression state value
+              | _ ->
+                raise Env_api.(Env_invariant (Some id_loc, Impossible "Object not synthesizable"))
+            )
           in
-          Base.List.fold
-            ~init:L.LMap.empty
-            ~f:(fun acc r ->
-              let key = Reason.poly_loc_of_reason r in
-              L.LMap.update
-                key
+          loop state obj
+        | ObjectValue { obj; obj_loc; _ } ->
+          depends_of_expression (obj_loc, Ast.Expression.Object obj) EnvMap.empty
+        | FunctionValue
+            {
+              hints;
+              synthesizable_from_annotation;
+              function_loc = _;
+              function_;
+              statics;
+              arrow = _;
+              tparams_map;
+            } ->
+          depends_of_fun synthesizable_from_annotation tparams_map ~hints ~statics function_ state
+        | EmptyArray { array_providers; _ } ->
+          ALocSet.fold
+            (fun loc acc ->
+              EnvMap.update
+                (Env_api.ArrayProviderLoc, loc)
                 (function
                   | None -> Some (Nel.one id_loc)
                   | Some locs -> Some (Nel.cons id_loc locs))
                 acc)
-            providers
-        else
-          L.LMap.empty
+            array_providers
+            state
+        | For (_, exp) -> depends_of_expression exp state
+        | Contextual { reason = _; hints; optional = _; default_expression } ->
+          let state =
+            Base.Option.value_map default_expression ~default:state ~f:(fun e ->
+                depends_of_expression e state
+            )
+          in
+          depends_of_hints state hints
+        | CatchUnannotated -> state
       in
-      let depends_of_binding id_loc bind =
-        let state = depends_of_lhs id_loc in
-        let rec rhs_loop bind state =
-          match bind with
-          | Root root -> depends_of_root state root
-          | Select (selector, binding) ->
-            let state = depends_of_selector state selector in
-            rhs_loop binding state
+      let depends_of_selector state = function
+        | Computed { expression; _ } -> depends_of_expression expression state
+        | Prop { prop_loc; _ } ->
+          (* In `const {d: {a, b}} = obj`, each prop might be reading from a refined value, \
+             which is a write. We need to track these dependencies as well. *)
+          let visitor =
+            new use_visitor cx ~named_only_for_synthesis:false this_super_dep_loc_map env state
+          in
+          let writes = visitor#find_writes ~for_type:false ~allow_missing:true prop_loc in
+          Base.List.iter ~f:(visitor#add ~why:prop_loc) writes;
+          visitor#acc
+        | Default
+        | Elem _
+        | ObjRest _
+        | ArrRest _ ->
+          state
+      in
+      let depends_of_lhs id_loc lhs_member_expression =
+        (* When looking at a binding def, like `x = y`, in order to resolve this def we need
+             to have resolved the providers for `x`, as well as the type of `y`, in order to check
+             the type of `y` against `x`. So in addition to exploring the RHS, we also add the providers
+             for `x` to the set of dependencies. *)
+        match lhs_member_expression with
+        | None ->
+          let { Provider_api.providers = provider_entries; _ } =
+            Base.Option.value_exn (Provider_api.providers_of_def providers id_loc)
+          in
+          if not @@ Provider_api.is_provider providers id_loc then
+            Base.List.fold
+              ~init:EnvMap.empty
+              ~f:(fun acc { Provider_api.reason = r; _ } ->
+                let key = (Env_api.OrdinaryNameLoc, Reason.poly_loc_of_reason r) in
+                if Env_api.has_assigning_write key env_entries then
+                  EnvMap.update
+                    key
+                    (function
+                      | None -> Some (Nel.one id_loc)
+                      | Some locs -> Some (Nel.cons id_loc locs))
+                    acc
+                else
+                  acc)
+              provider_entries
+          else
+            EnvMap.empty
+        | Some e -> depends_of_expression ~for_expression_writes:true e EnvMap.empty
+      in
+      let depends_of_binding bind =
+        let state =
+          if kind = Env_api.PatternLoc then
+            EnvMap.empty
+          else
+            depends_of_lhs id_loc None
         in
-        rhs_loop bind state
+        match bind with
+        | Root root -> depends_of_root state root
+        | Select { selector; parent = (parent_loc, _) } ->
+          let state = depends_of_selector state selector in
+          depends_of_node
+            (fun visitor -> visitor#add ~why:parent_loc (Env_api.PatternLoc, parent_loc))
+            state
       in
-      let depends_of_update id_loc =
-        let state = depends_of_lhs id_loc in
-        let visitor = new use_visitor env state in
-        let writes = visitor#find_writes ~for_type:false id_loc in
-        Base.List.iter ~f:(visitor#add ~why:id_loc) writes;
-        visitor#acc
+      let depends_of_update lhs =
+        let state = depends_of_lhs id_loc lhs in
+        match lhs with
+        | Some _ -> (* assigning to member *) state
+        | None ->
+          (* assigning to identifier *)
+          let visitor =
+            new use_visitor cx ~named_only_for_synthesis:false this_super_dep_loc_map env state
+          in
+          let writes = visitor#find_writes ~for_type:false id_loc in
+          Base.List.iter ~f:(visitor#add ~why:id_loc) writes;
+          visitor#acc
       in
-      let depends_of_op_assign id_loc rhs =
+      let depends_of_op_assign lhs rhs =
+        let lhs =
+          match lhs with
+          | (_, Ast.Pattern.Expression e) -> Some e
+          | _ -> None
+        in
         (* reusing depends_of_update, since the LHS of an op-assign is handled identically to an update *)
-        let state = depends_of_update id_loc in
+        let state = depends_of_update lhs in
+        depends_of_expression rhs state
+      in
+      let depends_of_member_assign member_loc member rhs =
+        let state =
+          depends_of_node (fun visitor -> ignore @@ visitor#member member_loc member) EnvMap.empty
+        in
         depends_of_expression rhs state
       in
       function
-      | Binding (id_loc, binding) -> depends_of_binding id_loc binding
-      | Update (id_loc, _) -> depends_of_update id_loc
-      | OpAssign (id_loc, _, rhs) -> depends_of_op_assign id_loc rhs
-      | Function { fully_annotated; function_ } -> depends_of_fun fully_annotated function_
-      | Class { fully_annotated; class_ } -> depends_of_class fully_annotated class_
-      | DeclaredClass decl -> depends_of_declared_class decl
-      | TypeAlias alias -> depends_of_alias alias
-      | OpaqueType alias -> depends_of_opaque alias
-      | TypeParam tparam -> depends_of_tparam tparam
-      | Interface inter -> depends_of_interface inter
+      | Binding binding -> depends_of_binding binding
+      | ExpressionDef { expr; hints; _ } ->
+        depends_of_hinted_expression ~for_expression_writes:true hints expr EnvMap.empty
+      | Update _ -> depends_of_update None
+      | MemberAssign { member_loc; member; rhs; _ } ->
+        depends_of_member_assign member_loc member rhs
+      | OpAssign { lhs; rhs; _ } -> depends_of_op_assign lhs rhs
+      | Function
+          {
+            synthesizable_from_annotation;
+            arrow = _;
+            function_;
+            has_this_def = _;
+            function_loc = _;
+            tparams_map;
+            statics;
+            hints;
+          } ->
+        depends_of_fun
+          synthesizable_from_annotation
+          tparams_map
+          ~hints
+          ~statics
+          function_
+          EnvMap.empty
+      | Class { class_; class_loc = _; class_implicit_this_tparam = _; this_super_write_locs = _ }
+        ->
+        depends_of_class class_
+      | DeclaredClass (_, decl) -> depends_of_declared_class decl
+      | TypeAlias (_, alias) -> depends_of_alias alias
+      | OpaqueType (_, alias) -> depends_of_opaque alias
+      | TypeParam (tparams_map, tparam) -> depends_of_tparam tparams_map tparam
+      | Interface (_, inter) -> depends_of_interface inter
+      | GeneratorNext (Some { return_annot; tparams_map; _ }) ->
+        depends_of_annotation tparams_map return_annot EnvMap.empty
+      | DeclaredModule (_, module_) -> depends_of_declared_module module_
+      | GeneratorNext None -> EnvMap.empty
       | Enum _ ->
-        (* Enums don't contain any code or type references, they're literal-like *) L.LMap.empty
-      | Import _ -> (* same with all imports *) L.LMap.empty
+        (* Enums don't contain any code or type references, they're literal-like *) EnvMap.empty
+      | Import _ -> (* same with all imports *) EnvMap.empty
+      | NonBindingParam -> EnvMap.empty
+      | MissingThisAnnot -> EnvMap.empty
 
     (* Is the variable defined by this def able to be recursively depended on, e.g. created as a 0->1 tvar before being
        resolved? *)
     let recursively_resolvable =
       let rec bind_loop b =
         match b with
-        | Root (Annotation _ | Catch) -> true
-        | Root (For _ | Value _ | Contextual _) -> false
-        | Select ((Computed _ | Default _), _) -> false
-        | Select (_, b) -> bind_loop b
+        | Root CatchUnannotated -> true
+        | Root (Annotation _) -> true
+        | Root (ObjectValue { synthesizable = ObjectSynthesizable _; _ }) -> true
+        | Root (For _ | Value _ | FunctionValue _ | Contextual _ | EmptyArray _ | ObjectValue _) ->
+          false
+        | Select { selector = Computed _; _ } -> false
+        | Select { parent = (_, binding); _ } -> bind_loop binding
+      in
+      let rec expression_resolvable (_, expr) =
+        (* A variable read or member expression is assumed to be recursively resolvable if the
+           write that reaches the read is also resolvable, and we can extend this to
+           ExpressionDef nodes as long as they only contain such expressions. These nodes will
+           always depend on the definition of the variable or member, and if the definitions
+           are not resolvable, the entire component won't be either. *)
+        match expr with
+        | Ast.Expression.Literal _
+        | Ast.Expression.Identifier _ ->
+          true
+        | Ast.Expression.Member
+            {
+              Ast.Expression.Member._object;
+              property = Ast.Expression.Member.(PropertyIdentifier _);
+              _;
+            } ->
+          expression_resolvable _object
+        | _ -> false
       in
       function
-      | Binding (_, bind) -> bind_loop bind
+      | Binding bind -> bind_loop bind
+      | ExpressionDef { hints = []; expr; chain = false; _ } -> expression_resolvable expr
+      | GeneratorNext _
       | TypeAlias _
       | OpaqueType _
       | TypeParam _
-      | Function { fully_annotated = true; _ }
       | Interface _
       (* Imports are academic here since they can't be in a cycle anyways, since they depend on nothing *)
       | Import { import_kind = Ast.Statement.ImportDeclaration.(ImportType | ImportTypeof); _ }
@@ -408,81 +1085,291 @@ module Make (L : Loc_sig.S) (Env_api : Env_api.S with module L = L) = struct
               Named { kind = Some Ast.Statement.ImportDeclaration.(ImportType | ImportTypeof); _ };
             _;
           }
-      | Class { fully_annotated = true; _ }
-      | DeclaredClass _ ->
+      | Class _
+      | NonBindingParam
+      | MissingThisAnnot
+      | DeclaredClass _
+      | DeclaredModule _
+      | Function
+          {
+            synthesizable_from_annotation = FunctionSynthesizable | FunctionPredicateSynthesizable _;
+            _;
+          } ->
         true
+      | ExpressionDef _
       | Update _
+      | MemberAssign _
       | OpAssign _
-      | Function { fully_annotated = false; _ }
+      | Function _
       | Enum _
-      | Import _
-      | Class { fully_annotated = false; _ } ->
+      | Import _ ->
         false
   end
 
-  type element =
-    | Normal of L.t
-    | Resolvable of L.t
-    | Illegal of L.t
+  let annotation_locs scopes providers kind loc =
+    let bind_loop b =
+      match b with
+      | Root CatchUnannotated
+      | Root (Annotation _)
+      | Root (ObjectValue { synthesizable = ObjectSynthesizable _; _ }) ->
+        []
+      | Root (FunctionValue { synthesizable_from_annotation = MissingReturn loc; _ }) ->
+        [Env_api.Loc loc]
+      | Root (ObjectValue { synthesizable = MissingMemberAnnots { locs }; _ }) ->
+        let (functions, others) =
+          Base.List.fold
+            ~f:
+              (fun (functions, others) -> function
+                | OtherMissingAnnot l -> (functions, l :: others)
+                | FuncMissingAnnot l -> (Env_api.Loc l :: functions, others))
+            ~init:([], [])
+            (Nel.to_list locs)
+        in
+        if List.length others = 0 then
+          functions
+        else begin
+          try
+            let { Provider_api.state; _ } =
+              Base.Option.value_exn (Provider_api.providers_of_def providers loc)
+            in
+            match state with
+            | Find_providers.AnnotatedVar { contextual = false; _ } -> functions
+            | _ ->
+              let { Scope_api.With_ALoc.Def.locs = (loc, _); _ } =
+                Scope_api.With_ALoc.def_of_use scopes loc
+              in
+              Env_api.Object { loc; props = others } :: functions
+          with
+          | Scope_api.With_ALoc.Missing_def _ -> functions
+        end
+      | Root (For _ | Value _ | FunctionValue _ | Contextual _ | EmptyArray _ | ObjectValue _) ->
+      begin
+        try
+          let { Provider_api.state; _ } =
+            Base.Option.value_exn (Provider_api.providers_of_def providers loc)
+          in
+          match state with
+          | Find_providers.AnnotatedVar { contextual = false; _ } -> []
+          | _ ->
+            let { Scope_api.With_ALoc.Def.locs = (loc, _); _ } =
+              Scope_api.With_ALoc.def_of_use scopes loc
+            in
+            [Env_api.Loc loc]
+        with
+        | Scope_api.With_ALoc.Missing_def _ -> []
+      end
+      | Select _ -> []
+    in
+    function
+    | _ when kind = Env_api.PatternLoc -> []
+    | Binding bind -> bind_loop bind
+    | GeneratorNext None -> [Env_api.Loc loc]
+    | Function { synthesizable_from_annotation = MissingReturn loc; _ } -> [Env_api.Loc loc]
+    | TypeAlias _
+    | OpaqueType _
+    | TypeParam _
+    | Function _
+    | Interface _
+    | Enum _
+    | Import _
+    | Class _
+    | DeclaredClass _
+    | ExpressionDef _
+    | DeclaredModule _
+    | NonBindingParam
+    | MissingThisAnnot
+    | GeneratorNext (Some _) ->
+      []
+    (* TODO *)
+    | Update _
+    | MemberAssign _
+    | OpAssign _ ->
+      []
 
-  type result =
-    | Singleton of element
-    | ResolvableSCC of element Nel.t
-    | IllegalSCC of element Nel.t
+  let dependencies cx ~autocomplete_hooks this_super_dep_loc_map env (kind, loc) (def, _, _, _) acc
+      =
+    let depends =
+      FindDependencies.depends cx ~autocomplete_hooks this_super_dep_loc_map env kind loc def
+    in
+    EnvMap.update
+      (kind, loc)
+      (function
+        | None -> Some depends
+        | Some _ ->
+          raise
+            Env_api.(
+              Env_invariant (Some loc, Impossible "Duplicate name defs for the same location")
+            ))
+      acc
 
-  let dependencies env loc def acc =
-    let depends = FindDependencies.depends env def in
-    L.LMap.add loc depends acc
+  let build_graph cx ~autocomplete_hooks env map =
+    (* This is a forwarding map from the def loc of this and super to the def loc of the functions
+       and classes that define this and super. We need this forwarding mechanism, because this and
+       super are not write entries that will be resolved by env_resolution. Instead, they are
+       indirectly resolved when resolving their defining functions and classes. Therefore, when
+       we see a read of `this`/`super`, instead of saying it depends on the write of `this`/`super`,
+       we use this forwarding map to say it actually depends on the functions/classes that define
+       `this`/`super`. *)
+    let this_super_dep_loc_map =
+      EnvMap.fold
+        (fun kind_and_loc def acc ->
+          match def with
+          | (Class { this_super_write_locs = locs; _ }, _, _, _)
+          | ( Binding
+                (Root
+                  (ObjectValue { synthesizable = ObjectSynthesizable { this_write_locs = locs }; _ })
+                  ),
+              _,
+              _,
+              _
+            ) ->
+            acc
+            |> EnvSet.fold
+                 (fun this_super_kind_and_loc acc ->
+                   EnvMap.add this_super_kind_and_loc kind_and_loc acc)
+                 locs
+          | _ -> acc)
+        map
+        EnvMap.empty
+    in
+    EnvMap.fold (dependencies cx ~autocomplete_hooks this_super_dep_loc_map env) map EnvMap.empty
 
-  let build_graph env map = L.LMap.fold (dependencies env) map L.LMap.empty
-
-  let build_ordering env map =
-    let graph = build_graph env map in
-    let order_graph = L.LMap.map (fun deps -> L.LMap.keys deps |> L.LSet.of_list) graph in
-    let roots = L.LMap.keys order_graph |> L.LSet.of_list in
+  let build_ordering cx ~autocomplete_hooks ({ Env_api.scopes; providers; _ } as env) map =
+    let env_map_find k map =
+      match EnvMap.find_opt k map with
+      | Some t -> t
+      | None -> raise Env_api.(Env_invariant (None, NameDefGraphMismatch))
+    in
+    let graph = build_graph cx ~autocomplete_hooks env map in
+    let order_graph = EnvMap.map (fun deps -> EnvMap.keys deps |> EnvSet.of_list) graph in
+    let roots = EnvMap.keys order_graph |> EnvSet.of_list in
     let sort =
       try Tarjan.topsort ~roots order_graph |> List.rev with
       | Not_found ->
-        let all =
-          L.LMap.values order_graph
-          |> List.map L.LSet.elements
+        let all_locs =
+          EnvMap.values order_graph
+          |> List.map EnvSet.elements
           |> List.flatten
-          |> L.LSet.of_list
-          |> L.LSet.elements
-          |> Base.List.map ~f:(L.debug_to_string ~include_source:false)
-          |> String.concat ","
+          |> EnvSet.of_list
+          |> EnvSet.elements
         in
-        let roots =
-          L.LSet.elements roots
-          |> Base.List.map ~f:(L.debug_to_string ~include_source:true)
-          |> String.concat ","
+        let all = List.map snd all_locs in
+        let missing_roots =
+          all_locs |> Base.List.filter ~f:(fun l -> not @@ EnvSet.mem l roots) |> List.map snd
         in
-        failwith (Printf.sprintf "roots: %s\n\nall: %s" roots all)
+        let roots = EnvSet.elements roots |> List.map snd in
+        raise Env_api.(Env_invariant (None, NameDefOrderingFailure { all; missing_roots; roots }))
     in
     let result_of_scc (fst, rest) =
-      let element_of_loc loc =
-        if L.LSet.mem loc (L.LMap.find loc order_graph) then
-          if FindDependencies.recursively_resolvable (L.LMap.find loc map) then
-            Resolvable loc
+      let element_of_loc (kind, loc) =
+        let (def, _, _, reason) = env_map_find (kind, loc) map in
+        if EnvSet.mem (kind, loc) (env_map_find (kind, loc) order_graph) then
+          if FindDependencies.recursively_resolvable def then
+            Resolvable (kind, loc)
           else
-            Illegal loc
+            let depends = env_map_find (kind, loc) graph in
+            let recursion = env_map_find (kind, loc) depends |> Nel.to_list in
+            Illegal
+              {
+                payload = (kind, loc);
+                reason;
+                recursion;
+                annot_locs = annotation_locs scopes providers kind loc def;
+              }
         else
-          Normal loc
+          Normal (kind, loc)
       in
       match rest with
       | [] -> Singleton (element_of_loc fst)
       | _ ->
+        let component = (fst, rest) in
         if
           Base.List.for_all
-            ~f:(fun m -> FindDependencies.recursively_resolvable (L.LMap.find m map))
+            ~f:(fun m ->
+              let (def, _, _, _) = env_map_find m map in
+              FindDependencies.recursively_resolvable def)
             (fst :: rest)
         then
-          ResolvableSCC (Nel.map element_of_loc (fst, rest))
+          ResolvableSCC (Nel.map element_of_loc component)
         else
-          IllegalSCC (Nel.map element_of_loc (fst, rest))
+          let rec shortest_cycle targ seen parents q =
+            (* BFS search *)
+            match Queue.take_opt q with
+            | None -> None
+            | Some cur ->
+              let adj = env_map_find cur order_graph in
+              if EnvSet.mem targ adj then
+                let rec path x =
+                  match EnvMap.find_opt x parents with
+                  | Some y -> x :: path y
+                  | None -> [x]
+                in
+                Some (targ :: path cur)
+              else
+                let seen = EnvSet.add cur seen in
+                let adj = EnvSet.diff adj seen in
+                let parents =
+                  EnvSet.fold
+                    (fun next parents ->
+                      Queue.add next q;
+                      EnvMap.add next cur parents)
+                    adj
+                    parents
+                in
+                shortest_cycle targ seen parents q
+          in
+          let cycle_elts =
+            Base.List.filter_map (Nel.to_list component) ~f:(fun payload ->
+                let (def, _, _, _) = EnvMap.find payload map in
+                if FindDependencies.recursively_resolvable def then
+                  None
+                else
+                  let q = Queue.create () in
+                  Queue.add payload q;
+                  shortest_cycle payload EnvSet.empty EnvMap.empty q
+            )
+            |> Base.List.concat
+            |> EnvSet.of_list
+          in
+          let elements =
+            Nel.map
+              (fun (kind, loc) ->
+                let (def, _, _, reason) = env_map_find (kind, loc) map in
+                let depends = env_map_find (kind, loc) graph in
+                let edges =
+                  EnvMap.fold
+                    (fun ((_, kl) as k) v acc ->
+                      if (not (ALoc.equal kl loc)) && EnvSet.mem k cycle_elts then
+                        let rev_v =
+                          Base.List.rev_filter ~f:(fun l -> not (ALoc.equal l loc)) (Nel.to_list v)
+                        in
+                        Base.List.rev_append rev_v acc
+                      else
+                        acc)
+                    depends
+                    []
+                in
+                let display = EnvSet.mem (kind, loc) cycle_elts in
+                ( {
+                    payload = element_of_loc (kind, loc);
+                    reason;
+                    recursion = edges;
+                    annot_locs = annotation_locs scopes providers kind loc def;
+                  },
+                  display
+                ))
+              component
+          in
+
+          IllegalSCC elements
     in
     Base.List.map ~f:result_of_scc sort
 end
 
-module With_Loc = Make (Loc_sig.LocS) (Env_api.With_Loc)
-module With_ALoc = Make (Loc_sig.ALocS) (Env_api.With_ALoc)
+module DummyFlow (Context : C) = struct
+  type cx = Context.t
+
+  let add_output _ ?trace _ = ignore trace
+end
+
+module Make_Test_With_Cx (Context : C) = Make (Context) (DummyFlow (Context))

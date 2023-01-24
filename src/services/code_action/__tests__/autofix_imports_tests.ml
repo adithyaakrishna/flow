@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -34,18 +34,7 @@ let dedent_trim str =
   String.trim (String.concat "\n" lines) ^ "\n"
 
 let parse contents =
-  let parse_options =
-    Some
-      Parser_env.
-        {
-          default_parse_options with
-          enums = true;
-          esproposal_class_instance_fields = true;
-          esproposal_class_static_fields = true;
-          esproposal_export_star_as = true;
-        }
-      
-  in
+  let parse_options = Some Parser_env.{ default_parse_options with enums = true } in
 
   let (ast, _errors) = Parser_flow.program ~parse_options contents in
   ast
@@ -178,6 +167,26 @@ let add_import_tests =
         foo
       |} in
       assert_import ~ctxt expected binding from contents );
+
+    ( "import_named_below_existing_between_sections" >:: fun ctxt ->
+      let binding = Autofix_imports.Named [named_binding "xyz"] in
+      let from = "./xyz" in
+      let contents = {|
+        import { foo } from "./relative";
+
+        import { bar } from "module";
+
+        foo
+      |} in
+      let expected = {|
+        import { foo } from "./relative";
+        import { xyz } from "./xyz";
+
+        import { bar } from "module";
+
+        foo
+      |} in
+      assert_import ~ctxt expected binding from contents);
 
     ( "import_named_sorted_existing" >:: fun ctxt ->
       let binding = Autofix_imports.Named [named_binding "baz"] in

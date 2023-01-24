@@ -2,9 +2,9 @@
 
 import * as React from 'react';
 
-function connect<TProps>(
+function connect<TProps: {}>(
   Component: React.ComponentType<TProps>,
-): React.ComponentType<$Diff<TProps, {prop: number}>> {
+): React.ComponentType<$Diff<TProps, {prop?: number}>> {
   return (null: any);
 }
 
@@ -12,7 +12,7 @@ class MyComponent extends React.Component<{
   a: number,
   b: number,
   prop: number,
-}> { render() { return null } }
+}> { render(): React.Node { return null } }
 
 function MyFunctionComponent(props: {
   a: number,
@@ -21,7 +21,7 @@ function MyFunctionComponent(props: {
 }) { return null }
 
 const MyEnhancedComponent = connect(MyComponent);
-const MyEnhancedFunctionComponent = connect(MyFunctionComponent);
+const MyEnhancedFunctionComponent = connect<{a: number, b: number, prop: number}>(MyFunctionComponent);
 
 <MyEnhancedComponent />; // Error: Needs `a` and `b`.
 <MyEnhancedComponent a={1} b={2} />; // OK

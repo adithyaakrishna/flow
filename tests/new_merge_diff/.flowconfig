@@ -8,7 +8,7 @@
 
 [options]
 no_flowlib=false
+inference_mode=lti
 suppress_type=$FlowExpectedError
-experimental.new_merge=true
 
 [strict]

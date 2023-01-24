@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -36,7 +36,7 @@ module Command (CommandList : COMMAND_LIST) = struct
       None
     else
       try
-        let metadata = SMap.find key flags in
+        let (_, metadata) = CommandSpec.find_flag key flags in
         Some metadata.CommandSpec.ArgSpec.arg_count
       with
       | Not_found -> None
@@ -45,7 +45,7 @@ module Command (CommandList : COMMAND_LIST) = struct
     let flags = CommandSpec.flags command in
     let prev = List.nth rest (current - 1) in
     match find_flag prev flags with
-    | Some CommandSpec.ArgSpec.No_Arg
+    | Some CommandSpec.ArgSpec.Truthy
     | None ->
       if current < List.length rest && is_partial_flag (List.nth rest current) then
         let flags = SMap.keys flags in

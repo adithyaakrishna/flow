@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -12,137 +12,251 @@ open Type
 open TypeUtil
 include Func_sig_intf
 
-(* We use this value to indicate places where values stored in the environment can have
- * an annotation with some more work *)
-let annotated_todo t = Inferred t
+class func_scope_visitor cx ~has_return_annot ~return_t ~yield_t ~next_t ~body_loc kind exhaust =
+  object (this)
+    inherit
+      [ALoc.t, ALoc.t * Type.t, ALoc.t, ALoc.t * Type.t] Flow_polymorphic_ast_mapper.mapper as super
+
+    val mutable no_return = true
+
+    val mutable has_throw = false
+
+    val mutable no_yield = true
+
+    method on_type_annot x = x
+
+    method on_loc_annot x = x
+
+    method! function_ fn = fn
+
+    method visit statements =
+      ignore @@ this#statement_list statements;
+      if not has_return_annot then (
+        ( if no_return && has_throw then
+          let reason = mk_reason REmpty body_loc in
+          let t = EmptyT.make reason (Trust.literal_trust ()) in
+          Flow.flow cx (t, UseT (unknown_use, return_t))
+        );
+        if no_yield then
+          Flow.flow_t cx (VoidT.make (mk_reason RVoid body_loc) (Trust.literal_trust ()), yield_t)
+      )
+
+    method! switch ({ Ast.Statement.Switch.exhaustive_out = (loc, t); _ } as switch) =
+      Base.Option.iter exhaust ~f:(fun (exhaustive_t, exhaust_locs, _) ->
+          if Base.List.mem ~equal:ALoc.equal exhaust_locs loc then Flow.flow_t cx (t, exhaustive_t)
+      );
+      super#switch switch
+
+    method! yield ({ Ast.Expression.Yield.result_out = (_, t); argument; delegate; _ } as yield) =
+      let use_op =
+        if delegate then
+          unknown_use
+        else
+          Op
+            (GeneratorYield
+               {
+                 value =
+                   Base.Option.value_map argument ~default:(reason_of_t t) ~f:(fun expr ->
+                       mk_expression_reason (Typed_ast_utils.untyped_ast_mapper#expression expr)
+                   );
+               }
+            )
+      in
+      Flow.flow cx (t, UseT (use_op, yield_t));
+      no_yield <- false;
+      super#yield yield
+
+    (* Override statement so that we have the loc for return *)
+    method! statement (loc, stmt) =
+      begin
+        match stmt with
+        | Ast.Statement.Return return -> this#custom_return loc return
+        | Ast.Statement.Throw _ -> has_throw <- true
+        | _ -> ()
+      end;
+      super#statement (loc, stmt)
+
+    method! call loc expr =
+      let open Ast.Expression.Call in
+      let { callee; arguments; _ } = expr in
+      ( if Flow_ast_utils.is_call_to_invariant callee then
+        match arguments with
+        (* invariant() and invariant(false, ...) are treated like throw *)
+        | (_, { Ast.Expression.ArgList.arguments = []; comments = _ })
+        | ( _,
+            {
+              Ast.Expression.ArgList.arguments =
+                Ast.Expression.Expression
+                  (_, Ast.Expression.Literal { Ast.Literal.value = Ast.Literal.Boolean false; _ })
+                :: _;
+              comments = _;
+            }
+          ) ->
+          has_throw <- true
+        | _ -> ()
+      );
+      super#call loc expr
+
+    method custom_return loc { Ast.Statement.Return.return_out = (_, t); argument; _ } =
+      let open Func_class_sig_types.Func in
+      let t =
+        match kind with
+        | Async ->
+          (* Convert the return expression's type T to Promise<T>. If the
+             * expression type is itself a Promise<T>, ensure we still return
+             * a Promise<T> via Promise.resolve. *)
+          let reason = mk_reason (RCustom "async return") loc in
+          let t' =
+            Flow.get_builtin_typeapp
+              cx
+              reason
+              (OrdinaryName "Promise")
+              [
+                Tvar.mk_where cx reason (fun tvar ->
+                    let funt = Flow.get_builtin cx (OrdinaryName "$await") reason in
+                    let callt = mk_functioncalltype reason None [Arg t] (open_tvar tvar) in
+                    let reason = repos_reason (aloc_of_reason (reason_of_t t)) reason in
+                    Flow.flow
+                      cx
+                      ( funt,
+                        CallT
+                          {
+                            use_op = unknown_use;
+                            reason;
+                            call_action = Funcalltype callt;
+                            return_hint = Type.hint_unavailable;
+                          }
+                      )
+                );
+              ]
+          in
+          Flow.reposition cx ~desc:(desc_of_t t) loc t'
+        | Generator _ ->
+          (* Convert the return expression's type R to Generator<Y,R,N>, where
+           * Y and R are internals, installed earlier. *)
+          let reason = mk_reason (RCustom "generator return") loc in
+          let t' =
+            Flow.get_builtin_typeapp
+              cx
+              reason
+              (OrdinaryName "Generator")
+              [yield_t; Tvar.mk_where cx reason (fun tvar -> Flow.flow_t cx (t, tvar)); next_t]
+          in
+          Flow.reposition cx ~desc:(desc_of_t t) loc t'
+        | AsyncGenerator _ ->
+          let reason = mk_reason (RCustom "async generator return") loc in
+          let t' =
+            Flow.get_builtin_typeapp
+              cx
+              reason
+              (OrdinaryName "AsyncGenerator")
+              [yield_t; Tvar.mk_where cx reason (fun tvar -> Flow.flow_t cx (t, tvar)); next_t]
+          in
+          Flow.reposition cx ~desc:(desc_of_t t) loc t'
+        | _ -> t
+      in
+      let use_op =
+        Op
+          (FunReturnStatement
+             {
+               value =
+                 Base.Option.value_map argument ~default:(reason_of_t t) ~f:(fun expr ->
+                     mk_expression_reason (Typed_ast_utils.untyped_ast_mapper#expression expr)
+                 );
+             }
+          )
+      in
+      Flow.flow cx (t, UseT (use_op, return_t));
+      no_return <- false
+  end
 
 module Make
-    (Env : Env_sig.S)
-    (Abnormal : Abnormal_sig.S with module Env := Env)
-    (Statement : Statement_sig.S with module Env := Env)
-    (F : Func_params.S) =
+    (Statement : Statement_sig.S)
+    (CT : Func_class_sig_types.Config.S)
+    (C : Func_params.Config with module Types := CT)
+    (F : Func_params.S with module Config_types := CT and module Config := C)
+    (T : Func_class_sig_types.Func.S with module Config := CT and module Param := F.Types) :
+  S with module Config_types := CT and module Config := C and module Param := F and module Types = T =
 struct
-  module Toplevels = Toplevels.DependencyToplevels (Env) (Abnormal)
-
-  type func_params = F.t
-
-  type func_params_tast = (ALoc.t * Type.t) F.ast
-
-  type t = {
-    reason: reason;
-    kind: kind;
-    tparams: Type.typeparams;
-    tparams_map: Type.t SMap.t;
-    fparams: func_params;
-    body: (ALoc.t, ALoc.t) Ast.Function.body option;
-    return_t: Type.annotated_or_inferred;
-    (* To be unified with the type of the function. *)
-    knot: Type.t;
-  }
+  module Types = T
+  open Func_class_sig_types.Func
 
   let this_param = F.this
 
   let default_constructor reason =
     {
-      reason;
+      T.reason;
       kind = Ctor;
       tparams = None;
-      tparams_map = SMap.empty;
+      tparams_map = Subst_name.Map.empty;
       fparams = F.empty (fun _ _ _ -> None);
       body = None;
       return_t = Annotated (VoidT.why reason |> with_trust bogus_trust);
-      (* This can't be directly recursively called. In case this type is accidentally used downstream,
-       * stub it out with mixed. *)
-      knot = MixedT.why reason |> with_trust bogus_trust;
+      statics = None;
     }
 
   let field_initializer tparams_map reason expr return_annot_or_inferred =
     {
-      reason;
+      T.reason;
       kind = FieldInit expr;
       tparams = None;
       tparams_map;
       fparams = F.empty (fun _ _ _ -> None);
       body = None;
       return_t = return_annot_or_inferred;
-      (* This can't be recursively called. In case this type is accidentally used downstream, stub it
-       * out with mixed. *)
-      knot = MixedT.why reason |> with_trust bogus_trust;
+      statics = None;
     }
 
-  let subst cx map x =
-    let { tparams; tparams_map; fparams; return_t; _ } = x in
-    (* Remove shadowed type params from `map`, but allow bounds/defaults to be
-       substituted if they refer to a type param before it is shadowed. *)
-    let tparams =
-      tparams
-      |> TypeParams.map (fun tp ->
-             let bound = Flow.subst cx map tp.bound in
-             let default = Base.Option.map ~f:(Flow.subst cx map) tp.default in
-             { tp with bound; default }
-         )
-    in
-    let map =
-      TypeParams.to_list tparams |> List.fold_left (fun map tp -> SMap.remove tp.name map) map
-    in
-    let tparams_map = SMap.map (Flow.subst cx map) tparams_map in
-    let fparams = F.subst cx map fparams in
-    let return_t = TypeUtil.map_annotated_or_inferred (Flow.subst cx map) return_t in
-    { x with tparams; tparams_map; fparams; return_t }
-
-  let check_with_generics cx f x =
-    let { tparams; tparams_map; fparams; return_t; _ } = x in
-    Flow_js_utils.check_with_generics cx (tparams |> TypeParams.to_list) (fun map ->
-        f
-          {
-            x with
-            tparams_map = SMap.map (Flow.subst cx map) tparams_map;
-            fparams = F.subst cx map fparams;
-            return_t = TypeUtil.map_annotated_or_inferred (Flow.subst cx map) return_t;
-          }
-    )
-
-  let functiontype cx this_default { reason; kind; tparams; fparams; return_t; knot; _ } =
+  let functiontype
+      cx
+      ~arrow
+      func_loc
+      this_default
+      ({ T.reason; kind; tparams; fparams; return_t; statics; _ } as x) =
     let make_trust = Context.trust_constructor cx in
-    let static =
-      let proto = FunProtoT reason in
-      Obj_type.mk_unsealed cx reason ~proto
-    in
-    let prototype =
-      let reason = replace_desc_reason RPrototype reason in
-      Obj_type.mk_unsealed cx reason
-    in
+    let this_type = F.this fparams |> Base.Option.value ~default:this_default in
     let funtype =
       {
-        Type.this_t = (F.this fparams |> Base.Option.value ~default:this_default, true);
+        Type.this_t = (this_type, This_Function);
         params = F.value fparams;
         rest_param = F.rest fparams;
-        return_t = TypeUtil.type_t_of_annotated_or_inferred return_t;
+        return_t =
+          (match return_t with
+          | Inferred t
+            when Context.in_synthesis_mode cx && (not @@ F.all_params_annotated x.T.fparams) ->
+            Context.mk_placeholder cx (TypeUtil.reason_of_t t)
+          | _ -> TypeUtil.type_t_of_annotated_or_inferred return_t);
         is_predicate = kind = Predicate;
         def_reason = reason;
       }
     in
-    let t = DefT (reason, make_trust (), FunT (static, prototype, funtype)) in
-    let t = poly_type_of_tparams (Context.generate_poly_id cx) tparams t in
-    Flow.unify cx t knot;
-    t
+    let statics_t =
+      match statics with
+      | Some t -> t
+      | None -> Obj_type.mk_with_proto cx reason (Type.FunProtoT reason) ~obj_kind:Type.Inexact
+    in
+    let t = DefT (reason, make_trust (), FunT (statics_t, funtype)) in
+    if not arrow then Base.Option.iter func_loc ~f:(Env.bind_function_this cx this_type);
+    poly_type_of_tparams (Type.Poly.generate_id ()) tparams t
 
-  let methodtype cx this_default { reason; tparams; fparams; return_t; _ } =
+  let methodtype cx method_this_loc this_default { T.reason; tparams; fparams; return_t; _ } =
     let params = F.value fparams in
     let (params_names, params_tlist) = List.split params in
     let rest_param = F.rest fparams in
     let def_reason = reason in
-    let param_this_t = F.this fparams |> Base.Option.value ~default:this_default in
+    let this_anno_t = F.this fparams in
+    Base.Option.both this_anno_t method_this_loc
+    |> Base.Option.iter ~f:(fun (t, loc) -> Env.bind_function_this cx t loc);
+    let param_this_t = Base.Option.value ~default:this_default this_anno_t in
     let t =
       DefT
         ( reason,
           bogus_trust (),
           FunT
             ( dummy_static reason,
-              dummy_prototype,
               mk_boundfunctiontype
                 ~this:param_this_t
-                ~subtyping:false
+                ~subtyping:(This_Method { unbound = false })
                 params_tlist
                 ~rest_param
                 ~def_reason
@@ -151,91 +265,110 @@ struct
             )
         )
     in
-    poly_type_of_tparams (Context.generate_poly_id cx) tparams t
+    poly_type_of_tparams (Type.Poly.generate_id ()) tparams t
 
-  let gettertype ({ return_t; _ } : t) = TypeUtil.type_t_of_annotated_or_inferred return_t
+  let gettertype ({ T.return_t; _ } : T.t) = TypeUtil.type_t_of_annotated_or_inferred return_t
 
-  let settertype { fparams; _ } =
+  let settertype { T.fparams; _ } =
     match F.value fparams with
     | [(_, param_t)] -> param_t
     | _ -> failwith "Setter property with unexpected type"
 
-  let toplevels id cx this_recipe super x =
-    let { reason = reason_fn; kind; tparams_map; fparams; body; return_t; knot; _ } = x in
-    let loc =
+  let toplevels cx x =
+    let { T.reason = reason_fn; kind; tparams_map; fparams; body; return_t; _ } = x in
+    let body_loc =
       let open Ast.Function in
       match body with
       | Some (BodyBlock (loc, _)) -> loc
       | Some (BodyExpression (loc, _)) -> loc
       | None -> ALoc.none
     in
-    let reason = mk_reason RFunctionBody loc in
-    let env = Env.peek_env () in
-    let new_env = Env.clone_env env in
-    Env.update_env loc new_env;
-    Env.havoc_all ();
+    let reason = mk_reason RFunctionBody body_loc in
 
-    (* create and prepopulate function scope *)
-    let function_scope =
+    (* Set the scope early so default exprs can reference earlier params *)
+    let prev_scope_kind =
       let var_scope_kind =
         match kind with
         | Ordinary
         | FieldInit _ ->
-          Scope.Ordinary
-        | Predicate -> Scope.Predicate
-        | Async -> Scope.Async
-        | Generator -> Scope.Generator
-        | AsyncGenerator -> Scope.AsyncGenerator
-        | Ctor -> Scope.Ctor
+          Name_def.Ordinary
+        | Predicate -> Name_def.Predicate
+        | Async -> Name_def.Async
+        | Generator _ -> Name_def.Generator
+        | AsyncGenerator _ -> Name_def.AsyncGenerator
+        | Ctor -> Name_def.Ctor
       in
-      Scope.fresh ~var_scope_kind ()
+      Env.set_scope_kind cx var_scope_kind
     in
-    (* push the scope early so default exprs can reference earlier params *)
-    Env.push_var_scope function_scope;
-
-    let (this_t, this) = this_recipe fparams in
-
-    (* add `this` and `super` before looking at parameter bindings as when using
-     * `this` in default parameter values it refers to the function scope and
-     * `super` should resolve to the method's [[HomeObject]]
-     *)
-    Scope.add_entry (internal_name "this") this function_scope;
-    Scope.add_entry (internal_name "super") super function_scope;
 
     (* bind type params *)
-    SMap.iter
+    Subst_name.Map.iter
       (fun name t ->
         let r = reason_of_t t in
         let loc = aloc_of_reason r in
-        if name <> "this" then
-          Env.bind_type
-            cx
-            name
-            (DefT (r, bogus_trust (), TypeT (TypeParamKind, t)))
-            loc
-            ~state:Scope.State.Initialized
+        if Subst_name.string_of_subst_name name <> "this" then
+          ()
         else
-          Env.bind_this_tparam
-            ~state:Scope.State.Initialized
-            cx
-            (DefT (r, bogus_trust (), TypeT (TypeParamKind, t)))
-            loc)
+          Env.bind_this_tparam (DefT (r, bogus_trust (), TypeT (TypeParamKind, t))) loc)
       tparams_map;
 
     (* add param bindings *)
     let params_ast = F.eval cx fparams in
-    (* early-add our own name binding for recursive calls. *)
-    Base.Option.iter id ~f:(fun (loc, { Ast.Identifier.name; comments = _ }) ->
-        let entry = annotated_todo knot |> Scope.Entry.new_var ~loc ~provider:knot in
-        Scope.add_entry (OrdinaryName name) entry function_scope
-    );
 
     let (yield_t, next_t) =
-      if kind = Generator || kind = AsyncGenerator then
-        ( Tvar.mk cx (replace_desc_reason (RCustom "yield") reason),
-          Tvar.mk cx (replace_desc_reason (RCustom "next") reason)
-        )
-      else
+      match kind with
+      | Generator _
+      | AsyncGenerator _ ->
+        let yield_t = Tvar.mk cx (replace_desc_reason (RCustom "yield") reason) in
+        let next_t =
+          match return_t with
+          | Annotated _ -> Tvar.mk cx (replace_desc_reason (RCustom "next") reason)
+          | Inferred _ ->
+            VoidT.make (replace_desc_reason RUnannotatedNext reason) |> with_trust bogus_trust
+        in
+        let return_targ = Tvar.mk cx reason in
+        let (iterable, generator) =
+          match kind with
+          | Generator _ -> ("$Iterable", "Generator")
+          | AsyncGenerator _ -> ("$AsyncIterable", "AsyncGenerator")
+          | _ -> failwith "Bad kind"
+        in
+        let () =
+          let t =
+            Flow.get_builtin_typeapp
+              cx
+              reason
+              (OrdinaryName iterable)
+              [yield_t; return_targ; next_t]
+          in
+          let t =
+            Flow.reposition
+              cx
+              ~desc:(desc_of_t t)
+              (type_t_of_annotated_or_inferred return_t |> reason_of_t |> aloc_of_reason)
+              t
+          in
+          Flow.flow_t cx (type_t_of_annotated_or_inferred return_t, t)
+        in
+        let () =
+          let t =
+            Flow.get_builtin_typeapp
+              cx
+              reason
+              (OrdinaryName generator)
+              [yield_t; return_targ; next_t]
+          in
+          let t =
+            Flow.reposition
+              cx
+              ~desc:(desc_of_t t)
+              (type_t_of_annotated_or_inferred return_t |> reason_of_t |> aloc_of_reason)
+              t
+          in
+          Flow.flow_t cx (t, type_t_of_annotated_or_inferred return_t)
+        in
+        (yield_t, next_t)
+      | _ ->
         ( DefT
             ( replace_desc_reason (RCustom "no yield") reason,
               bogus_trust (),
@@ -245,47 +378,21 @@ struct
             (replace_desc_reason (RCustom "no next") reason, bogus_trust (), MixedT Mixed_everything)
         )
     in
-    let (yield, next, return) =
-      Scope.(
-        let new_entry t =
-          Entry.(
-            let loc = loc_of_t (TypeUtil.type_t_of_annotated_or_inferred t) in
-            let state = State.Initialized in
-            new_const ~loc ~state t
-          )
-        in
-        (new_entry (Inferred yield_t), new_entry (Inferred next_t), new_entry return_t)
-      )
-    in
-    Scope.add_entry (internal_name "yield") yield function_scope;
-    Scope.add_entry (internal_name "next") next function_scope;
-    Scope.add_entry (internal_name "return") return function_scope;
-
-    let maybe_exhaustively_checked_t =
-      Tvar.mk cx (replace_desc_reason (RCustom "maybe_exhaustively_checked") reason)
-    in
-    let maybe_exhaustively_checked =
-      Scope.Entry.new_let
-        ~loc:(loc_of_t maybe_exhaustively_checked_t)
-        ~state:Scope.State.Declared
-        (Inferred maybe_exhaustively_checked_t)
-        ~provider:maybe_exhaustively_checked_t
-    in
-    Scope.add_entry
-      (internal_name "maybe_exhaustively_checked")
-      maybe_exhaustively_checked
-      function_scope;
 
     let (statements, reconstruct_body) =
       let open Ast.Statement in
       match body with
-      | None -> ([], Fn.const None)
+      | None -> ([], Fun.const None)
       | Some (Ast.Function.BodyBlock (loc, { Block.body; comments })) ->
         (body, (fun body -> Some (Ast.Function.BodyBlock (loc, { Block.body; comments }))))
       | Some (Ast.Function.BodyExpression expr) ->
-        ( [(fst expr, Return { Return.argument = Some expr; comments = None })],
+        ( [
+            ( fst expr,
+              Return { Return.argument = Some expr; comments = None; return_out = fst expr }
+            );
+          ],
           (function
-          | [(_, Return { Return.argument = Some expr; comments = _ })]
+          | [(_, Return { Return.argument = Some expr; comments = _; return_out = _ })]
           | [(_, Expression { Expression.expression = expr; _ })] ->
             Some (Ast.Function.BodyExpression expr)
           | _ -> failwith "expected return body")
@@ -296,19 +403,22 @@ struct
     *)
     Ast.Statement.(
       match kind with
-      | Predicate ->
-        begin
-          match statements with
-          | [(_, Return { Return.argument = Some _; comments = _ })] -> ()
-          | _ ->
-            let loc = aloc_of_reason reason in
-            Flow_js.add_output cx Error_message.(EUnsupportedSyntax (loc, PredicateInvalidBody))
-        end
+      | Predicate -> begin
+        match statements with
+        | [(_, Return { Return.argument = Some _; comments = _; return_out = _ })] -> ()
+        | _ ->
+          let loc = aloc_of_reason reason in
+          Flow_js.add_output cx Error_message.(EUnsupportedSyntax (loc, PredicateInvalidBody))
+      end
       | _ -> ()
     );
 
-    (* decl/type visit pre-pass *)
-    Statement.toplevel_decls cx statements;
+    let (has_return_annot, return_t) =
+      match (return_t, kind) with
+      | (Inferred t, _) -> (false, t)
+      | (Annotated t, (Async | Generator _ | AsyncGenerator _)) -> (true, t)
+      | (Annotated t, _) -> (true, t)
+    in
 
     (* statement visit pass *)
     let (statements_ast, statements_abnormal) =
@@ -316,6 +426,7 @@ struct
           Toplevels.toplevels Statement.statement cx statements
       )
     in
+
     let maybe_void =
       Abnormal.(
         match statements_abnormal with
@@ -329,13 +440,8 @@ struct
     in
     let body_ast = reconstruct_body statements_ast in
     (* build return type for void funcs *)
-    let init_ast =
-      let (return_t, return_annot) =
-        match return_t with
-        | Inferred t -> (t, None)
-        | Annotated t -> (t, Some t)
-      in
-      if maybe_void then (
+    let (init_ast, exhaust) =
+      if maybe_void then
         let loc = loc_of_t return_t in
         (* Some branches add an ImplicitTypeParam frame to force our flow_use_op
          * algorithm to pick use_ops outside the provided loc. *)
@@ -353,7 +459,7 @@ struct
             let use_op = Op (FunImplicitReturn { fn = reason_fn; upper = reason_of_t return_t }) in
             let use_op = Frame (ImplicitTypeParam, use_op) in
             (use_op, t, None)
-          | Generator ->
+          | Generator _ ->
             let reason = mk_annot_reason (RType (OrdinaryName "Generator")) loc in
             let void_t = VoidT.at loc |> with_trust bogus_trust in
             let t =
@@ -366,7 +472,7 @@ struct
             let use_op = Op (FunImplicitReturn { fn = reason_fn; upper = reason_of_t return_t }) in
             let use_op = Frame (ImplicitTypeParam, use_op) in
             (use_op, t, None)
-          | AsyncGenerator ->
+          | AsyncGenerator _ ->
             let reason = mk_annot_reason (RType (OrdinaryName "AsyncGenerator")) loc in
             let void_t = VoidT.at loc |> with_trust bogus_trust in
             let t =
@@ -380,7 +486,7 @@ struct
             let use_op = Frame (ImplicitTypeParam, use_op) in
             (use_op, t, None)
           | FieldInit e ->
-            let (((_, t), _) as ast) = Statement.expression ?cond:None cx ~hint:return_annot e in
+            let (((_, t), _) as ast) = Statement.expression ?cond:None cx e in
             let body = mk_expression_reason e in
             let use_op = Op (InitField { op = reason_fn; body }) in
             (use_op, t, Some ast)
@@ -391,29 +497,52 @@ struct
             let use_op = Op (FunImplicitReturn { fn = reason_fn; upper = reason_of_t return_t }) in
             (use_op, t, None)
         in
-        Flow.flow
-          cx
-          ( Env.get_internal_var cx "maybe_exhaustively_checked" loc,
-            FunImplicitVoidReturnT
-              { use_op; reason = reason_of_t return_t; return = return_t; void_t }
-          );
-        init_ast
-      ) else
-        None
-    in
-    Env.pop_var_scope ();
 
-    Env.update_env loc env;
+        let exhaust =
+          match body with
+          | None ->
+            Flow.flow cx (void_t, UseT (use_op, return_t));
+            None
+          | Some _ ->
+            let (exhaustive, undeclared) = Context.exhaustive_check cx body_loc in
+            Some
+              ( Tvar.mk_where
+                  cx
+                  (replace_desc_reason (RCustom "maybe_exhaustively_checked") reason_fn)
+                  (fun t ->
+                    if undeclared then Flow.flow_t cx (VoidT.at body_loc (bogus_trust ()), t)
+                ),
+                exhaustive,
+                FunImplicitVoidReturnT
+                  { use_op; reason = reason_of_t return_t; return = return_t; void_t }
+              )
+        in
+        (init_ast, exhaust)
+      else
+        (None, None)
+    in
+
+    let () =
+      (new func_scope_visitor cx ~has_return_annot ~return_t ~yield_t ~next_t ~body_loc kind exhaust)
+        #visit
+        statements_ast
+    in
+
+    Base.Option.iter exhaust ~f:(fun (maybe_exhaustively_checked, _, implicit_return) ->
+        Flow.flow cx (maybe_exhaustively_checked, implicit_return)
+    );
+
+    ignore @@ Env.set_scope_kind cx prev_scope_kind;
 
     (* return a tuple of (function body AST option, field initializer AST option).
-       - the function body option is Some _ if the func sig's body was Some, and
-         None if the func sig's body was None.
-       - the field initializer is Some expr' if the func sig's kind was FieldInit expr,
+       - the function body option is Some _ if the Param sig's body was Some, and
+         None if the Param sig's body was None.
+       - the field initializer is Some expr' if the Param sig's kind was FieldInit expr,
          where expr' is the typed AST translation of expr.
     *)
-    (this_t, params_ast, body_ast, init_ast)
+    (params_ast, body_ast, init_ast)
 
-  let to_ctor_sig f = { f with kind = Ctor }
+  let to_ctor_sig f = { f with T.kind = Ctor }
 end
 
 let return_loc = function

@@ -23,7 +23,7 @@ var { qux = "string" } = obj; // Error, qux missing
 // Begin React examples
 
 const React = require('react');
-function Component({defaultProps = "default", regularProp}) { // Error, missing regularProp
+function Component({defaultProps = "default", regularProp}: {|regularProp?: number|}) { // Error, missing regularProp
   (defaultProps: string);
   (regularProp: number);
   return null;
@@ -35,6 +35,7 @@ const _b = <Component />;
 class A {
   prop: boolean;
   // No err! prop will always be initialized to a boolean
-  constructor({prop = false}: {| prop: boolean |} = {}) {
+  constructor({prop = false}: {| prop?: boolean |} = {...null}) {
+    (prop: boolean); // OK
   }
 }

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,3 +18,13 @@ end
 
 module ALocIDSet = Flow_set.Make (ALocIDS)
 module ALocIDMap = Flow_map.Make (ALocIDS)
+
+module ALocFuzzy = struct
+  type t = ALoc.t
+
+  let compare = ALoc.quick_compare
+end
+
+(* For ALocMaps that may contain both keyed and concrete locations. We call it fuzzy because
+ * locations that are "equal" but represented differently would be considered unequal. *)
+module ALocFuzzyMap = Flow_map.Make (ALocFuzzy)

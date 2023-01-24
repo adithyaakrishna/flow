@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -220,29 +220,28 @@ let create_extracted_function_call
           Statements.const_declaration ~loc:extracted_statements_loc declarations
     | _ ->
       let pattern =
-        Flow_ast.Pattern.
-          ( Loc.none,
-            Object
-              {
-                Object.properties =
-                  returned_variables
-                  |> List.map (fun (def, _) ->
-                         Object.Property
-                           ( Loc.none,
-                             {
-                               Object.Property.key =
-                                 Object.Property.Identifier (Identifiers.identifier def);
-                               pattern = Patterns.identifier def;
-                               default = None;
-                               shorthand = true;
-                             }
-                           )
-                     );
-                annot = Flow_ast.Type.Missing Loc.none;
-                comments = None;
-              }
-          )
-        
+        let open Flow_ast.Pattern in
+        ( Loc.none,
+          Object
+            {
+              Object.properties =
+                returned_variables
+                |> List.map (fun (def, _) ->
+                       Object.Property
+                         ( Loc.none,
+                           {
+                             Object.Property.key =
+                               Object.Property.Identifier (Identifiers.identifier def);
+                             pattern = Patterns.identifier def;
+                             default = None;
+                             shorthand = true;
+                           }
+                         )
+                   );
+              annot = Flow_ast.Type.Missing Loc.none;
+              comments = None;
+            }
+        )
       in
 
       if has_vars_with_shadowed_local_reassignments then
@@ -446,14 +445,13 @@ let available_refactors_for_statements
     in
     let extract_to_functions_refactor_results =
       top_level_function_refactor
-      ::
-      List.map
-        create_inner_function_refactor
-        (InsertionPointCollectors.collect_function_method_inserting_points
-           ~typed_ast
-           ~reader
-           ~extracted_loc:extracted_statements_loc
-        )
+      :: List.map
+           create_inner_function_refactor
+           (InsertionPointCollectors.collect_function_method_inserting_points
+              ~typed_ast
+              ~reader
+              ~extracted_loc:extracted_statements_loc
+           )
     in
     let extract_to_functions_refactors =
       Base.List.filter_map extract_to_functions_refactor_results ~f:Base.Result.ok
@@ -727,7 +725,9 @@ let extract_to_type_alias_refactors
         | _ ->
           Some
             (type_params_to_add
-            |> List.map (fun { Type.name; _ } -> Types.unqualified_generic name)
+            |> List.map (fun { Type.name; _ } ->
+                   Types.unqualified_generic (Subst_name.string_of_subst_name name)
+               )
             |> Types.type_args
             )
       in

@@ -14,17 +14,17 @@ y.baaa;
 class A {
     foo : 3;
     func() {}
-    static s1111;
+    static s1111: void;
 }
 
 class B extends A {
     bar : 3;
-    static s2222;
+    static s2222: void;
 }
 
 class C extends B {
     baz : 3;
-    static s3333;
+    static s3333: void;
 }
 
 let a = new A;
@@ -51,3 +51,7 @@ C.s11111;
 C.s22222;
 C.s33333;
 
+// Test prop suggestions:
+if (x.asd) {} // Error with suggestion
+if (b.fooo) {} // Error with suggestion
+if (C.s333) {} // Error with suggestion

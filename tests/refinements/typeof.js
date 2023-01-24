@@ -1,6 +1,6 @@
 /* @flow */
 
-function foo(x: bool | number) {
+function foo(x: boolean | number) {
   if (typeof x === "boolean") {
     x[0]; // error for boolean, not number
   }
@@ -124,5 +124,12 @@ function testMixedWithBoolean(x: mixed) {
 function testAnyWithSymbol(x: any) {
   if (typeof x === "symbol") {
     (x: empty); // error symbol ~> empty
+  }
+}
+
+function testPolyClassCtorWithFunction() {
+  declare class C<X> {}
+  if (typeof C === 'function') {
+    (C: empty); // error class C ~> empty
   }
 }

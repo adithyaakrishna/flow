@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -24,6 +24,7 @@ module UnionSimplification = struct
               Ty.Obj
                 {
                   Ty.obj_kind = Ty.InexactObj;
+                  obj_def_loc = None;
                   obj_frozen = false;
                   obj_literal = None;
                   obj_props =
@@ -33,7 +34,8 @@ module UnionSimplification = struct
                           name = Reason.OrdinaryName "f";
                           prop =
                             Ty.Field { t = Ty.Num None; polarity = Ty.Neutral; optional = false };
-                          from_proto = false;
+                          inherited = false;
+                          source = Ty.Other;
                           def_loc = None;
                         };
                     ];
@@ -41,6 +43,7 @@ module UnionSimplification = struct
               Ty.Obj
                 {
                   Ty.obj_kind = Ty.InexactObj;
+                  obj_def_loc = None;
                   obj_frozen = false;
                   obj_literal = None;
                   obj_props =
@@ -50,7 +53,8 @@ module UnionSimplification = struct
                           name = Reason.OrdinaryName "f";
                           prop =
                             Ty.Field { t = Ty.Num None; polarity = Ty.Neutral; optional = false };
-                          from_proto = false;
+                          inherited = false;
+                          source = Ty.Other;
                           def_loc = None;
                         };
                     ];
@@ -63,6 +67,7 @@ module UnionSimplification = struct
           Ty.Obj
             {
               Ty.obj_kind = Ty.InexactObj;
+              obj_def_loc = None;
               obj_frozen = false;
               obj_literal = None;
               obj_props =
@@ -71,7 +76,8 @@ module UnionSimplification = struct
                     {
                       name = Reason.OrdinaryName "f";
                       prop = Ty.Field { t = Ty.Num None; polarity = Ty.Neutral; optional = false };
-                      from_proto = false;
+                      inherited = false;
+                      source = Ty.Other;
                       def_loc = None;
                     };
                 ];
@@ -91,6 +97,7 @@ module UnionSimplification = struct
               Ty.Obj
                 {
                   Ty.obj_kind = Ty.InexactObj;
+                  obj_def_loc = None;
                   obj_frozen = false;
                   obj_literal = None;
                   obj_props =
@@ -100,7 +107,8 @@ module UnionSimplification = struct
                           name = Reason.OrdinaryName "f";
                           prop =
                             Ty.Field { t = Ty.Num None; polarity = Ty.Positive; optional = false };
-                          from_proto = false;
+                          inherited = false;
+                          source = Ty.Other;
                           def_loc = None;
                         };
                     ];
@@ -108,6 +116,7 @@ module UnionSimplification = struct
               Ty.Obj
                 {
                   Ty.obj_kind = Ty.InexactObj;
+                  obj_def_loc = None;
                   obj_frozen = false;
                   obj_literal = None;
                   obj_props =
@@ -117,7 +126,8 @@ module UnionSimplification = struct
                           name = Reason.OrdinaryName "f";
                           prop =
                             Ty.Field { t = Ty.Num None; polarity = Ty.Negative; optional = false };
-                          from_proto = false;
+                          inherited = false;
+                          source = Ty.Other;
                           def_loc = None;
                         };
                     ];
@@ -149,6 +159,7 @@ module BotAndTopSimplification = struct
               Ty.Obj
                 {
                   Ty.obj_kind = Ty.InexactObj;
+                  obj_def_loc = None;
                   obj_frozen = false;
                   obj_literal = None;
                   obj_props =
@@ -159,7 +170,8 @@ module BotAndTopSimplification = struct
                           prop =
                             Ty.Field
                               { t = Ty.Bot Ty.EmptyType; polarity = Ty.Neutral; optional = false };
-                          from_proto = false;
+                          inherited = false;
+                          source = Ty.Other;
                           def_loc = None;
                         };
                     ];
@@ -167,6 +179,7 @@ module BotAndTopSimplification = struct
               Ty.Obj
                 {
                   Ty.obj_kind = Ty.InexactObj;
+                  obj_def_loc = None;
                   obj_frozen = false;
                   obj_literal = None;
                   obj_props =
@@ -181,7 +194,8 @@ module BotAndTopSimplification = struct
                                 polarity = Ty.Neutral;
                                 optional = false;
                               };
-                          from_proto = false;
+                          inherited = false;
+                          source = Ty.Other;
                           def_loc = None;
                         };
                     ];
@@ -194,6 +208,7 @@ module BotAndTopSimplification = struct
           Ty.Obj
             {
               Ty.obj_kind = Ty.InexactObj;
+              obj_def_loc = None;
               obj_frozen = false;
               obj_literal = None;
               obj_props =
@@ -204,7 +219,8 @@ module BotAndTopSimplification = struct
                       prop =
                         Ty.Field
                           { t = Ty.Bot Ty.EmptyType; polarity = Ty.Neutral; optional = false };
-                      from_proto = false;
+                      inherited = false;
+                      source = Ty.Other;
                       def_loc = None;
                     };
                 ];

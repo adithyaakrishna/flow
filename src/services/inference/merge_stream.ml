@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -43,7 +43,6 @@ type node = {
   (* the number of leaders this node is currently blocking on *)
   mutable blocking: int;
   mutable recheck: bool;
-  has_old_state: bool;
   size: int;
 }
 
@@ -63,6 +62,7 @@ type 'a t = {
   mutable skipped_files: int;
   mutable new_or_changed_files: FilenameSet.t;
 }
+[@@warning "-69"]
 
 let add_ready node stream =
   assert (node.blocking = 0);
@@ -92,87 +92,74 @@ let bucket_size stream =
 
 let is_done stream = stream.blocked_components = 0
 
-let create ~num_workers ~reader ~sig_dependency_graph ~leader_map ~component_map ~recheck_leader_set
-    =
+let create ~num_workers ~sig_dependency_graph ~components ~recheck_set =
+  let ready = Queue.create () in
   (* create node for each component *)
-  let graph =
-    FilenameMap.mapi
-      (fun leader component ->
-        (* This runs after we have oldified the files to be merged, so we have to check if there
-         * is an old version of the state to get useful results. We check for the old leader state
-         * instead of sig context because new check mode does not store sig contexts, but both modes
-         * store leader information during merge. *)
-        let has_old_state = Context_heaps.Mutator_reader.leader_mem_old ~reader leader in
-        (* If this node has no old state, we need to force it to be merged. This can happen
-         * when we load sig hashes from the saved state. *)
-        let recheck = FilenameSet.mem leader recheck_leader_set || not has_old_state in
-        {
-          component;
-          (* computed later *)
-          dependents = FilenameMap.empty;
-          (* computed later *)
-          blocking = 0;
-          recheck;
-          has_old_state;
-          size = Nel.length component;
-        })
-      component_map
-  in
-  let (total_components, total_files) =
-    FilenameMap.fold (fun _ node (c, f) -> (c + 1, f + node.size)) graph (0, 0)
+  let (leaders, graph) =
+    let fold_component (leaders, graph) ((leader, _) as component) =
+      let fold_file (size, recheck, leaders) f =
+        let recheck = recheck || FilenameSet.mem f recheck_set in
+        let leaders = FilenameMap.add f leader leaders in
+        (size + 1, recheck, leaders)
+      in
+      let (size, recheck, leaders) = Nel.fold_left fold_file (0, false, leaders) component in
+      let dependents = FilenameMap.empty (* computed later *) in
+      let blocking = 0 (* computed later *) in
+      let node = { component; dependents; blocking; recheck; size } in
+      (leaders, FilenameMap.add leader node graph)
+    in
+    List.fold_left fold_component (FilenameMap.empty, FilenameMap.empty) components
   in
   (* calculate dependents, blocking for each node *)
-  let () =
-    let leader f = FilenameMap.find f leader_map in
-    FilenameMap.iter
-      (fun f dep_fs ->
-        let leader_f = leader f in
-        let node = FilenameMap.find leader_f graph in
-        FilenameSet.iter
-          (fun dep_f ->
-            let dep_leader_f = leader dep_f in
-            if dep_leader_f = leader_f then
-              ()
-            else
-              let dep_node = FilenameMap.find dep_leader_f graph in
-              let dependents = FilenameMap.add leader_f node dep_node.dependents in
-              if dependents != dep_node.dependents then (
-                dep_node.dependents <- dependents;
-                node.blocking <- node.blocking + 1
-              ))
-          dep_fs)
-      sig_dependency_graph
+  let (ready_components, ready_files, blocked_components, blocked_files) =
+    let fold_node leader node (readyc, readyf, blockedc, blockedf) =
+      let fold_dep_file dep_f blocking =
+        match FilenameMap.find_opt dep_f leaders with
+        | None -> blocking
+        | Some dep_leader ->
+          let dep_node = FilenameMap.find dep_leader graph in
+          if dep_node == node then
+            blocking
+          else
+            let dependents = FilenameMap.add leader node dep_node.dependents in
+            if dependents == dep_node.dependents then
+              blocking
+            else (
+              dep_node.dependents <- dependents;
+              blocking + 1
+            )
+      in
+      let fold_file blocking f =
+        let dep_fs = FilenameGraph.find f sig_dependency_graph in
+        FilenameSet.fold fold_dep_file dep_fs blocking
+      in
+      let blocking = Nel.fold_left fold_file 0 node.component in
+      if blocking = 0 then (
+        Queue.add node ready;
+        (readyc + 1, readyf + node.size, blockedc, blockedf)
+      ) else (
+        node.blocking <- blocking;
+        (readyc, readyf, blockedc + 1, blockedf + node.size)
+      )
+    in
+    FilenameMap.fold fold_node graph (0, 0, 0, 0)
   in
-  let stream =
-    {
-      graph;
-      ready = Queue.create ();
-      num_workers;
-      total_components;
-      total_files;
-      ready_components = 0;
-      ready_files = 0;
-      blocked_components = 0;
-      blocked_files = 0;
-      merged_components = 0;
-      merged_files = 0;
-      skipped_components = 0;
-      skipped_files = 0;
-      new_or_changed_files = FilenameSet.empty;
-    }
-  in
-  (* calculate the components ready to schedule and blocked counts *)
-  FilenameMap.iter
-    (fun _ node ->
-      if node.blocking = 0 then
-        add_ready node stream
-      else (
-        stream.blocked_components <- stream.blocked_components + 1;
-        stream.blocked_files <- stream.blocked_files + node.size
-      ))
+  {
     graph;
-
-  stream
+    ready;
+    num_workers;
+    total_components = ready_components + blocked_components;
+    total_files = ready_files + blocked_files;
+    ready_components;
+    ready_files;
+    blocked_components;
+    blocked_files;
+    merged_components = 0;
+    merged_files = 0;
+    skipped_components = 0;
+    skipped_files = 0;
+    new_or_changed_files = FilenameSet.empty;
+  }
 
 let update_server_status stream =
   let status =
@@ -180,7 +167,7 @@ let update_server_status stream =
       Merging_progress { finished = stream.merged_files; total = Some stream.total_files }
     )
   in
-  MonitorRPC.status_update status
+  MonitorRPC.status_update ~event:status
 
 let next stream =
   let rec take acc n =
@@ -200,17 +187,7 @@ let next stream =
         Bucket.Wait
     | components -> Bucket.Job components
 
-let merge ~master_mutator stream =
-  (* If a component is unchanged, either because we merged it and the sig hash
-   * was unchanged or because the component was skipped entirely, we need to
-   * revive the shared heap entires corresponding to the component. These heap
-   * entries were oldified before merge began. *)
-  let revive node =
-    node.component
-    |> Nel.to_list
-    |> FilenameSet.of_list
-    |> Context_heaps.Merge_context_mutator.revive_files master_mutator
-  in
+let merge stream =
   let mark_new_or_changed node =
     stream.new_or_changed_files <-
       node.component
@@ -222,28 +199,7 @@ let merge ~master_mutator stream =
   let rec push ~diff node =
     stream.merged_components <- stream.merged_components + 1;
     stream.merged_files <- stream.merged_files + node.size;
-    if diff then
-      (* If the new sighash is different from the old one, mark the component as new or changed.
-       * This gets used downstream to drive recheck opts for the check phase. *)
-      mark_new_or_changed node
-    else if node.has_old_state then
-      (* If the new sighash is the same as the old one, AND there was previously a sig cx for
-       * this component, then revive it, since the newly computed sig cx was not written (see
-       * Context_heaps.add_merge_on_diff). *)
-      revive node
-    else
-      (* Otherwise, there was no difference in sighash between the new and old, AND there was no
-       * old sig cx. This only happens when we load sighashes from the saved state, so we have the
-       * old sighash but not the old sig context. In this case, we write the new sig context (again,
-       * see Context_heaps.add_merge_on_diff), but if we called `revive` here it would get deleted,
-       * since there is no old one to revive.
-       *
-       * We also don't want to mark this as new or changed, since it's really neither. We leave it
-       * out of that set in order to allow recheck opts to fire in the check phase.
-       *
-       * This else branch could be omitted; it's just a vessel for this comment.
-       *)
-      ();
+    if diff then mark_new_or_changed node;
     FilenameMap.iter (fun _ node -> unblock diff node) node.dependents
   and unblock diff node =
     (* dependent blocked on one less *)
@@ -267,13 +223,17 @@ let merge ~master_mutator stream =
     push ~diff:false node
   in
   fun merged acc ->
-    List.iter
-      (fun (leader_f, diff, _) ->
-        let node = FilenameMap.find leader_f stream.graph in
-        push ~diff node)
-      merged;
+    let acc =
+      List.fold_left
+        (fun acc (leader_f, diff, result) ->
+          let node = FilenameMap.find leader_f stream.graph in
+          push ~diff node;
+          result :: acc)
+        acc
+        merged
+    in
     update_server_status stream;
-    List.rev_append merged acc
+    acc
 
 (* NOTE: call these functions only at the end of merge, not during. *)
 let total_files stream = stream.total_files

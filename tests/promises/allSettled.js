@@ -1,10 +1,10 @@
 // @flow
 
 // First argument is required
-Promise.allSettled(); // Error: expected $Iterable instead of undefined (too few arguments)
+Promise.allSettled<Array<mixed>>(); // Error: expected $Iterable instead of undefined (too few arguments)
 
 // Invalid arg type
-Promise.allSettled(0); // Error: expected $Iterable instead of number
+Promise.allSettled<Array<mixed>>(0); // Error: expected $Iterable instead of number
 
 // Promise.allSettled is a function
 (Promise.allSettled : Function);
@@ -43,7 +43,7 @@ async function test1(): Promise<[$SettledPromiseResult<Foo>, $SettledPromiseResu
   } else if (second.status === 'rejected')  {
     console.log(second.reason);
   } else {
-    return (second.status: empty);
+    return (second.status: empty); // Spurious underconstrained-implicit-instantiation error in LTI due to lack of empty propagation
   }
 
   return settled;

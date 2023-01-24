@@ -1,60 +1,37 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 module type S = sig
-  type func_sig
+  module Config_types : Func_class_sig_types.Config.S
 
-  type func_params_tast
+  module Config : Func_params_intf.Config with module Types := Config_types
 
-  type t
+  module Param :
+    Func_params_intf.S with module Config_types := Config_types and module Config := Config
 
-  type set_asts =
-    func_params_tast option
-    * (ALoc.t, ALoc.t * Type.t) Flow_ast.Function.body option
-    * (ALoc.t, ALoc.t * Type.t) Flow_ast.Expression.t option ->
-    unit
+  module Func :
+    Func_sig_intf.S
+      with module Config_types := Config_types
+       and module Config := Config
+       and module Param := Param
 
-  type set_type = Type.t -> unit
-
-  type field =
-    | Annot of Type.t
-    | Infer of func_sig * set_asts
-
-  type field' = ALoc.t option * Polarity.t * field
-
-  type typeapp = ALoc.t * Type.t * Type.t list option
-
-  type extends =
-    | Explicit of typeapp
-    | Implicit of { null: bool }
-
-  type class_super = {
-    extends: extends;
-    mixins: typeapp list;
-    (* declare class only *)
-    implements: typeapp list;
-    this_tparam: Type.typeparam;
-    this_t: Type.t;
-  }
-
-  type interface_super = {
-    inline: bool;
-    extends: typeapp list;
-    callable: bool;
-  }
-
-  type super =
-    | Interface of interface_super
-    | Class of class_super
+  module Types :
+    Func_class_sig_types.Class.S
+      with module Config := Config_types
+       and module Param := Param.Types
+       and module Func := Func.Types
 
   (** 1. Constructors **)
 
+  open Types
+
   (** Create signature with no elements. *)
-  val empty : ALoc.id -> Reason.t -> Type.typeparams -> Type.t SMap.t -> super -> t
+  val empty :
+    ALoc.id -> ALoc.t -> Reason.t -> Type.typeparams -> Type.t Subst_name.Map.t -> super -> t
 
   (** Add constructor to signature.
 
@@ -62,7 +39,7 @@ module type S = sig
       classes, which permit duplicate definitions where latter definitions
       overwrite former ones. *)
   val add_constructor :
-    ALoc.t option -> func_sig -> ?set_asts:set_asts -> ?set_type:set_type -> t -> t
+    id_loc:ALoc.t option -> func_sig:func_sig -> ?set_asts:set_asts -> ?set_type:set_type -> t -> t
 
   val add_default_constructor : Reason.t -> t -> t
 
@@ -72,7 +49,7 @@ module type S = sig
       interfaces, which interpret duplicate definitions as branches of a single
       overloaded constructor. *)
   val append_constructor :
-    ALoc.t option -> func_sig -> ?set_asts:set_asts -> ?set_type:set_type -> t -> t
+    id_loc:ALoc.t option -> func_sig:func_sig -> ?set_asts:set_asts -> ?set_type:set_type -> t -> t
 
   (** Add field to signature. *)
   val add_field : static:bool -> string -> ALoc.t -> Polarity.t -> field -> t -> t
@@ -91,13 +68,23 @@ module type S = sig
 
   (** Add private method to signature. *)
   val add_private_method :
-    static:bool -> string -> ALoc.t -> func_sig -> set_asts:set_asts -> set_type:set_type -> t -> t
+    static:bool ->
+    string ->
+    id_loc:ALoc.t ->
+    this_write_loc:ALoc.t option ->
+    func_sig:func_sig ->
+    set_asts:set_asts ->
+    set_type:set_type ->
+    t ->
+    t
 
   (* Access public fields of signature *)
   val public_fields_of_signature : static:bool -> t -> field' SMap.t
 
   (* Access private fields of signature *)
   val private_fields_of_signature : static:bool -> t -> field' SMap.t
+
+  val mk_class_binding : Context.t -> t -> Type.class_binding
 
   (** Add method to signature.
 
@@ -107,8 +94,9 @@ module type S = sig
   val add_method :
     static:bool ->
     string ->
-    ALoc.t ->
-    func_sig ->
+    id_loc:ALoc.t ->
+    this_write_loc:ALoc.t option ->
+    func_sig:func_sig ->
     ?set_asts:set_asts ->
     ?set_type:set_type ->
     t ->
@@ -122,8 +110,9 @@ module type S = sig
   val append_method :
     static:bool ->
     string ->
-    ALoc.t ->
-    func_sig ->
+    id_loc:ALoc.t ->
+    this_write_loc:ALoc.t option ->
+    func_sig:func_sig ->
     ?set_asts:set_asts ->
     ?set_type:set_type ->
     t ->
@@ -135,8 +124,9 @@ module type S = sig
   val add_getter :
     static:bool ->
     string ->
-    ALoc.t ->
-    func_sig ->
+    id_loc:ALoc.t ->
+    this_write_loc:ALoc.t option ->
+    func_sig:func_sig ->
     ?set_asts:set_asts ->
     ?set_type:set_type ->
     t ->
@@ -146,8 +136,9 @@ module type S = sig
   val add_setter :
     static:bool ->
     string ->
-    ALoc.t ->
-    func_sig ->
+    id_loc:ALoc.t ->
+    this_write_loc:ALoc.t option ->
+    func_sig:func_sig ->
     ?set_asts:set_asts ->
     ?set_type:set_type ->
     t ->
@@ -181,17 +172,10 @@ module type S = sig
       with its type **)
   val check_methods : Context.t -> Reason.reason -> t -> unit
 
-  (** Invoke callback with type parameters substituted by upper/lower bounds. *)
-  val check_with_generics : Context.t -> (t -> 'a) -> t -> 'a
+  val make_thises : Context.t -> t -> Type.t * Type.t * Type.t * Type.t
 
   (** Evaluate the class body. *)
-  val toplevels :
-    Context.t ->
-    private_property_map:Type.Properties.id ->
-    instance_this_type:Type.t ->
-    static_this_type:Type.t ->
-    t ->
-    unit
+  val toplevels : Context.t -> t -> unit
 
   (** 1. Type Conversion *)
 

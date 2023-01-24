@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -50,7 +50,6 @@ let variance_ = function
 
 let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~exact_by_default elt
     =
-  let env_map : Layout.layout_node IMap.t ref = ref IMap.empty in
   let size = ref size in
   (* util to limit the number of calls to a (usually recursive) function *)
   let counted_map f xs =
@@ -80,7 +79,6 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
     count_calls ~counter:size ~default:crop_atom (fun () -> type_impl ~depth t)
   and type_impl ~depth (t : Ty.t) =
     match t with
-    | TVar (v, targs) -> type_reference ~depth (type_var v) targs
     | Bound (_, name) -> Atom name
     | Any k -> any ~depth k
     | Top -> Atom "mixed"
@@ -90,6 +88,7 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
     | Num _ -> Atom "number"
     | Str _ -> Atom "string"
     | Bool _ -> Atom "boolean"
+    | BigInt _ -> Atom "bigint"
     | Symbol -> Atom "symbol"
     | Fun func -> type_function ~depth ~sep:(fuse [pretty_space; Atom "=>"]) func
     | Obj obj -> type_object ~depth obj
@@ -106,8 +105,22 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
           Atom "["
       in
       fuse [type_ ~depth _object; left_delim; type_ ~depth index; Atom "]"]
-    | Tup ts ->
-      list ~wrap:(Atom "[", Atom "]") ~sep:(Atom ",") ~trailing:false (counted_map (type_ ~depth) ts)
+    | Tup elements ->
+      let tuple_element ~depth (TupleElement { name; t; polarity }) =
+        fuse
+          [
+            variance_ polarity;
+            (match name with
+            | Some id -> fuse [identifier (Reason.OrdinaryName id); Atom ":"; pretty_space]
+            | None -> Empty);
+            type_ ~depth t;
+          ]
+      in
+      list
+        ~wrap:(Atom "[", Atom "]")
+        ~sep:(Atom ",")
+        ~trailing:false
+        (counted_map (tuple_element ~depth) elements)
     | StrLit raw -> fuse (in_quotes ~prefer_single_quotes (Reason.display_string_of_name raw))
     | NumLit raw -> Atom raw
     | BoolLit value ->
@@ -117,22 +130,18 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
         else
           "false"
         )
+    | BigIntLit raw -> Atom raw
     | InlineInterface { if_extends; if_props; if_dict } ->
       type_interface ~depth if_extends if_props if_dict
     | TypeOf pv -> fuse [Atom "typeof"; space; builtin_value pv]
-    | Mu (i, t) ->
-      let t = type_ ~depth:0 t in
-      env_map := IMap.add i t !env_map;
-      Atom (varname i)
     | CharSet s ->
       fuse [Atom "$CharSet"; Atom "<"; fuse (in_quotes ~prefer_single_quotes s); Atom ">"]
-  and type_var (RVar i) = Atom (varname i)
   and type_generic ~depth g =
     let ({ sym_name = name; _ }, _, targs) = g in
     let name = identifier name in
     type_reference ~depth name targs
   and type_reference ~depth name targs =
-    let targs = option (type_args ~depth) targs in
+    let targs = option ~f:(type_args ~depth) targs in
     fuse [name; targs]
   and type_args ~depth targs =
     list ~wrap:(Atom "<", Atom ">") ~sep:(Atom ",") (counted_map (type_ ~depth) targs)
@@ -141,7 +150,12 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
     let kind =
       match kind with
       | Annotated _ -> "explicit"
-      | _ -> "implicit"
+      | Recursive -> "recursive"
+      | Placeholder -> "placeholder"
+      | AnyError _
+      | Unsound _
+      | Untyped ->
+        "implicit"
     in
     fuse
       [
@@ -179,7 +193,7 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
     in
     fuse
       [
-        option (type_parameter ~depth) fun_type_params;
+        option ~f:(type_parameter ~depth) fun_type_params;
         list ~wrap:(Atom "(", Atom ")") ~sep:(Atom ",") ~trailing:false params;
         sep;
         pretty_space;
@@ -217,54 +231,52 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
     Ty.(
       fun ~depth prop ->
         match prop with
-        | NamedProp { name = key; prop = named_prop; _ } ->
-          begin
-            match named_prop with
-            | Field { t; polarity; optional } ->
-              fuse
-                [
-                  variance_ polarity;
-                  to_key (Reason.display_string_of_name key);
-                  ( if optional then
-                    Atom "?"
-                  else
-                    Empty
-                  );
-                  Atom ":";
-                  pretty_space;
-                  type_ ~depth t;
-                ]
-            | Method func ->
-              fuse
-                [
-                  to_key (Reason.display_string_of_name key);
-                  type_function ~depth ~sep:(Atom ":") func;
-                ]
-            | Get t ->
-              group
-                [
-                  Atom "get";
-                  space;
-                  to_key (Reason.display_string_of_name key);
-                  Atom "(";
-                  softline;
-                  Atom ")";
-                  Atom ":";
-                  pretty_space;
-                  type_ ~depth t;
-                ]
-            | Set t ->
-              group
-                [
-                  Atom "set";
-                  space;
-                  to_key (Reason.display_string_of_name key);
-                  wrap_and_indent (Atom "(", Atom ")") [type_ ~depth t];
-                  Atom ":";
-                  pretty_space;
-                  type_ ~depth Void;
-                ]
-          end
+        | NamedProp { name = key; prop = named_prop; _ } -> begin
+          match named_prop with
+          | Field { t; polarity; optional } ->
+            fuse
+              [
+                variance_ polarity;
+                to_key (Reason.display_string_of_name key);
+                ( if optional then
+                  Atom "?"
+                else
+                  Empty
+                );
+                Atom ":";
+                pretty_space;
+                type_ ~depth t;
+              ]
+          | Method func ->
+            fuse
+              [
+                to_key (Reason.display_string_of_name key); type_function ~depth ~sep:(Atom ":") func;
+              ]
+          | Get t ->
+            group
+              [
+                Atom "get";
+                space;
+                to_key (Reason.display_string_of_name key);
+                Atom "(";
+                softline;
+                Atom ")";
+                Atom ":";
+                pretty_space;
+                type_ ~depth t;
+              ]
+          | Set t ->
+            group
+              [
+                Atom "set";
+                space;
+                to_key (Reason.display_string_of_name key);
+                wrap_and_indent (Atom "(", Atom ")") [type_ ~depth t];
+                Atom ":";
+                pretty_space;
+                type_ ~depth Void;
+              ]
+        end
         | CallProp func -> fuse [type_function ~depth ~sep:(Atom ":") func]
         | SpreadProp t -> fuse [Atom "..."; type_ ~depth t]
     )
@@ -372,7 +384,7 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
       [
         variance_ tp_polarity;
         Atom tp_name;
-        option (type_annotation ~depth) tp_bound;
+        option ~f:(type_annotation ~depth) tp_bound;
         begin
           match tp_default with
           | Some t -> fuse [pretty_space; Atom "="; pretty_space; type_ ~depth t]
@@ -382,14 +394,15 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
   and type_annotation ~depth t = fuse [Atom ":"; pretty_space; type_ ~depth t] in
 
   let class_decl ~depth { sym_name = name; _ } typeParameters =
-    fuse [Atom "class"; space; identifier name; option (type_parameter ~depth) typeParameters]
+    fuse [Atom "class"; space; identifier name; option ~f:(type_parameter ~depth) typeParameters]
   in
   let interface_decl ~depth { sym_name = name; _ } typeParameters =
-    fuse [Atom "interface"; space; identifier name; option (type_parameter ~depth) typeParameters]
+    fuse
+      [Atom "interface"; space; identifier name; option ~f:(type_parameter ~depth) typeParameters]
   in
   let type_alias ~depth name tparams t_opt =
     let { sym_name = name; _ } = name in
-    let tparams = option (type_parameter ~depth) tparams in
+    let tparams = option ~f:(type_parameter ~depth) tparams in
     let body =
       match t_opt with
       | Some t -> fuse [pretty_space; Atom "="; pretty_space; type_ ~depth t]
@@ -402,42 +415,27 @@ let layout_of_elt ~prefer_single_quotes ?(size = 5000) ?(with_comments = true) ~
     fuse
       [Atom "declare"; space; Atom "var"; space; identifier name; Atom ":"; space; type_ ~depth t]
   in
-  let rec module_ ~depth name exports default =
-    let exports = counted_map (decl ~depth) exports in
-    let default =
-      match default with
-      | Some t -> fuse [Atom "exports"; Atom ":"; space; type_ ~depth t]
-      | None -> Empty
-    in
-    let body = list ~wrap:(Atom "{", Atom "}") ~sep:(Atom ";") (exports @ [default]) in
+  let module_ ~depth:_ name =
     let name =
       match name with
       | Some name ->
-        fuse (in_quotes ~prefer_single_quotes (Reason.display_string_of_name name.Ty.sym_name))
+        fuse
+          (space :: in_quotes ~prefer_single_quotes (Reason.display_string_of_name name.Ty.sym_name))
       | None -> Empty
     in
-    fuse [Atom "module"; space; name; space; body]
-  and decl ~depth = function
+    fuse [Atom "module"; name]
+  in
+  let decl ~depth = function
     | VariableDecl (name, t) -> variable_decl ~depth name t
     | TypeAliasDecl { name; tparams; type_; _ } -> type_alias ~depth name tparams type_
     | ClassDecl (s, ps) -> class_decl ~depth s ps
     | InterfaceDecl (s, ps) -> interface_decl ~depth s ps
     | EnumDecl n -> enum_decl n
-    | ModuleDecl { name; exports; default } -> module_ ~depth name exports default
+    | ModuleDecl { name; exports = _; default = _ } -> module_ ~depth name
   in
-  let elt_ ~depth = function
-    | Type t -> type_ ~depth t
-    | Decl d -> decl ~depth d
-  in
-  let env_ (i, layout) =
-    with_semicolon
-      (fuse [Atom "type"; space; Atom (varname i); pretty_space; Atom "="; pretty_space; layout])
-  in
-  (* Main call *)
-  let layout = elt_ ~depth:0 elt in
-  (* Run type_ first so that env_map has been populated *)
-  let env_layout = Base.List.map ~f:env_ (IMap.bindings !env_map) in
-  Layout.(join Newline (env_layout @ [layout]))
+  match elt with
+  | Type t -> type_ ~depth:0 t
+  | Decl d -> decl ~depth:0 d
 
 (* Same as Compact_printer with the exception of locations *)
 let print_single_line ~source_maps node =

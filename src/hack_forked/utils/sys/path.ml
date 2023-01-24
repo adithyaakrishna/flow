@@ -1,28 +1,31 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-open Reordered_argument_collections
-include Sys
-
-module S = struct
-  type t = string
-
-  let compare = Stdlib.compare
-
-  let to_string x = x
-end
-
-type t = S.t
+type t = string
 
 let dummy_path : t = ""
 
+let file_exists = Sys.file_exists
+
+let is_directory = Sys.is_directory
+
 let cat = Sys_utils.cat
 
-let compare = Stdlib.compare
+(** [is_ancestor ~prefix path] determines if [prefix] is an ancestor directory of [path] *)
+let is_ancestor ~prefix path =
+  let prefix =
+    if String.ends_with prefix ~suffix:Filename.dir_sep then
+      prefix
+    else
+      prefix ^ Filename.dir_sep
+  in
+  String.starts_with ~prefix path
+
+let compare = String.compare
 
 let dirname = Filename.dirname
 
@@ -56,55 +59,9 @@ let to_string path = path
 let concat path more = make (Filename.concat path more)
 
 let parent path =
-  if is_directory path then
+  if Sys.is_directory path then
     make (concat path Filename.parent_dir_name)
   else
     make (Filename.dirname path)
 
 let output = output_string
-
-let slash_escaped_string_of_path path =
-  let buf = Buffer.create (String.length path) in
-  String.iter
-    (fun ch ->
-      match ch with
-      | '\\' -> Buffer.add_string buf "zB"
-      | ':' -> Buffer.add_string buf "zC"
-      | '/' -> Buffer.add_string buf "zS"
-      | '\x00' -> Buffer.add_string buf "z0"
-      | 'z' -> Buffer.add_string buf "zZ"
-      | _ -> Buffer.add_char buf ch)
-    path;
-  Buffer.contents buf
-
-let path_of_slash_escaped_string str =
-  let length = String.length str in
-  let buf = Buffer.create length in
-  let rec consume i =
-    if i >= length then
-      ()
-    else
-      let replacement =
-        if i < length - 1 && str.[i] = 'z' then
-          match str.[i + 1] with
-          | 'B' -> Some '\\'
-          | 'C' -> Some ':'
-          | 'S' -> Some '/'
-          | '0' -> Some '\x00'
-          | 'Z' -> Some 'z'
-          | _ -> None
-        else
-          None
-      in
-      let (c, next_i) =
-        match replacement with
-        | Some r -> (r, i + 2)
-        | None -> (str.[i], i + 1)
-      in
-      Buffer.add_char buf c;
-      consume next_i
-  in
-  consume 0;
-  make (Buffer.contents buf)
-
-module Set = Reordered_argument_set (Flow_set.Make (S))

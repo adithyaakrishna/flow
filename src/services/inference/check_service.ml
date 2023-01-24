@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,7 +7,7 @@
 
 type module_ref = string
 
-type require = module_ref * ALoc.t Nel.t * Modulename.t
+type require = module_ref * ALoc.t Nel.t * Parsing_heaps.resolved_module
 
 type check_file =
   File_key.t ->
@@ -56,31 +56,19 @@ let copier =
       else
         let (root_id, constraints) = Context.find_constraints src_cx id in
         if id == root_id then (
-          let constraints =
-            lazy
-              (let t =
-                 match Lazy.force constraints with
-                 | Unresolved { lower; _ } ->
-                   lazy
-                     (let ts = TypeMap.keys lower |> List.filter Type.is_proper_def in
-                      match ts with
-                      | [t] -> t
-                      | t0 :: t1 :: ts -> UnionT (r, UnionRep.make t0 t1 ts)
-                      | [] -> Unsoundness.merged_any r
-                     )
-                 | Resolved (_, t) -> lazy t
-                 | FullyResolved (_, t) -> t
-               in
-               let t =
-                 lazy
-                   (let t = Lazy.force t in
-                    let (_ : Context.t) = self#type_ src_cx pole dst_cx t in
-                    t
-                   )
-               in
-               FullyResolved (unknown_use, t)
-              )
+          let t =
+            match constraints with
+            | Unresolved _
+            | Resolved _ ->
+              failwith "unexpected unresolved constraint"
+            | FullyResolved (_, thunk) ->
+              lazy
+                (let (lazy t) = thunk in
+                 let (_ : Context.t) = self#type_ src_cx pole dst_cx t in
+                 t
+                )
           in
+          let constraints = FullyResolved (unknown_use, t) in
           let node = Root { rank = 0; constraints } in
           Context.set_graph dst_cx (IMap.add id node dst_graph);
           dst_cx
@@ -133,14 +121,14 @@ let copy_into dst_cx src_cx t =
   let (_ : Context.t) = copier#type_ src_cx Polarity.Positive dst_cx t in
   ()
 
-let unknown_module_t cx mref provider =
-  let react_server_module_err = provider = Modulename.String Type.react_server_module_ref in
+let unknown_module_t cx mref m =
+  let react_server_module_err = m = Modulename.String Type.react_server_module_ref in
   let desc = Reason.RCustom mref in
   let m_name =
-    match provider with
+    match m with
     | Modulename.String ("react" | "React") when Context.in_react_server_component_file cx ->
       Type.react_server_module_ref
-    | _ -> Modulename.to_string provider
+    | _ -> Modulename.to_string m
   in
   let m_name = Reason.internal_module_name m_name in
   fun loc ->
@@ -162,157 +150,7 @@ let get_lint_severities metadata options =
   let strict_mode = Options.strict_mode options in
   Merge_js.get_lint_severities metadata strict_mode lint_severities
 
-module ConsGen : Type_sig_merge.CONS_GEN = struct
-  include Flow_js
-
-  let dst_cx_ref = ref None
-
-  let set_dst_cx cx = dst_cx_ref := Some cx
-
-  let unresolved_tvar = Tvar.mk_no_wrap
-
-  (* Helper to create a lazy type. The returned tvar contains a lazy thunk which
-   * evaluates to a type. While the lazy thunk is under evaluation, we swap out
-   * the tvar's constraint with a fresh unresolved root. This deals with the
-   * recursive case where forcing `resolved` loops back to the tvar being defined.
-   * *)
-  let mk_lazy_tvar cx reason f =
-    let open Type in
-    let open Constraint in
-    let id = Reason.mk_id () in
-    let tvar = OpenT (reason, id) in
-    let constraints =
-      lazy
-        (let node = new_unresolved_root () in
-         Context.add_tvar cx id node;
-         f tvar;
-         Lazy.force (Context.find_graph cx id)
-        )
-    in
-    Context.add_tvar cx id (Root { rank = 0; constraints });
-    tvar
-
-  let mk_sig_tvar cx reason resolved =
-    let f tvar =
-      let t = Lazy.force resolved in
-      Flow_js.unify cx tvar t
-    in
-    mk_lazy_tvar cx reason f
-
-  let assert_export_is_type cx reason name t =
-    let open Type in
-    let f tvar =
-      let name = Reason.OrdinaryName name in
-      Flow_js.flow cx (t, AssertExportIsTypeT (reason, name, tvar))
-    in
-    mk_lazy_tvar cx reason f
-
-  let get_prop cx use_op reason propname t =
-    Tvar.mk_no_wrap_where cx reason (fun tout ->
-        Flow_js.flow cx (t, Type.GetPropT (use_op, reason, Type.Named (reason, propname), tout))
-    )
-
-  let get_elem cx use_op reason ~key t =
-    Tvar.mk_no_wrap_where cx reason (fun tout ->
-        Flow_js.flow cx (t, Type.GetElemT (use_op, reason, key, tout))
-    )
-
-  let qualify_type cx use_op reason (reason_name, name) t =
-    let open Type in
-    let f tvar =
-      Flow_js.flow cx (t, GetPropT (use_op, reason, Named (reason_name, name), open_tvar tvar))
-    in
-    mk_lazy_tvar cx reason f
-
-  let mk_type_reference cx reason c =
-    let open Type in
-    let f tvar =
-      let type_t = DefT (reason, bogus_trust (), TypeT (InstanceKind, tvar)) in
-      Flow_js.flow cx (c, UseT (unknown_use, type_t))
-    in
-    let tvar = mk_lazy_tvar cx reason f in
-    AnnotT (reason, tvar, false)
-
-  let cjs_require cx module_t reason is_strict =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (module_t, Type.CJSRequireT (reason, tout, is_strict))
-    )
-
-  let export_named cx reason kind named module_t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (module_t, Type.ExportNamedT (reason, named, kind, tout))
-    )
-
-  let cjs_extract_named_exports cx reason local_module t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (t, Type.CJSExtractNamedExportsT (reason, local_module, tout))
-    )
-
-  let import_default cx reason kind local mref is_strict t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (t, Type.ImportDefaultT (reason, kind, (local, mref), tout, is_strict))
-    )
-
-  let import_named cx reason kind remote mref is_strict module_t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (module_t, Type.ImportNamedT (reason, kind, remote, mref, tout, is_strict))
-    )
-
-  let import_ns cx reason is_strict module_t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (module_t, Type.ImportModuleNsT (reason, tout, is_strict))
-    )
-
-  let import_typeof cx reason export_name ns_t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (ns_t, Type.ImportTypeofT (reason, export_name, tout))
-    )
-
-  let specialize cx t use_op reason_op reason_tapp ts =
-    Tvar.mk_where cx reason_op (fun tout ->
-        Flow_js.flow cx (t, Type.SpecializeT (use_op, reason_op, reason_tapp, None, ts, tout))
-    )
-
-  let copy_named_exports cx ~from_ns reason ~module_t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (from_ns, Type.CopyNamedExportsT (reason, module_t, tout))
-    )
-
-  let copy_type_exports cx ~from_ns reason ~module_t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (from_ns, Type.CopyTypeExportsT (reason, module_t, tout))
-    )
-
-  let unary_minus cx reason t =
-    Tvar.mk_where cx reason (fun tout -> Flow_js.flow cx (t, Type.UnaryMinusT (reason, tout)))
-
-  let unary_not cx reason t =
-    Tvar.mk_no_wrap_where cx reason (fun tout -> Flow_js.flow cx (t, Type.NotT (reason, tout)))
-
-  let mixin cx reason t =
-    Tvar.mk_where cx reason (fun tout -> Flow_js.flow cx (t, Type.MixinT (reason, tout)))
-
-  let object_spread cx use_op reason target state t =
-    let tool = Type.Object.(Resolve Next) in
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow
-          cx
-          (t, Type.(ObjKitT (use_op, reason, tool, Object.Spread (target, state), tout)))
-    )
-
-  let obj_test_proto cx reason l =
-    Tvar.mk_where cx reason (fun proto -> Flow_js.flow cx (l, Type.ObjTestProtoT (reason, proto)))
-
-  let obj_rest cx reason xs t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (t, Type.ObjRestT (reason, xs, tout, Reason.mk_id ()))
-    )
-
-  let arr_rest cx use_op reason i t =
-    Tvar.mk_where cx reason (fun tout ->
-        Flow_js.flow cx (t, Type.ArrRestT (use_op, reason, i, tout))
-    )
-end
+let resolve_require_id = Flow_js.resolve_id
 
 [@@@warning "-60"]
 
@@ -322,72 +160,128 @@ module Flow_js = struct end
 
 [@@@warning "+60"]
 
+module type READER = sig
+  type provider
+
+  type typed_parse
+
+  val get_master_cx : unit -> Context.master_context
+
+  val get_provider : Modulename.t -> provider option
+
+  val get_file_key : provider -> File_key.t
+
+  val get_typed_parse : provider -> typed_parse option
+
+  val get_leader_key : typed_parse -> File_key.t
+
+  val get_aloc_table : typed_parse -> ALoc.table
+
+  val get_docblock : typed_parse -> Docblock.t
+
+  val get_type_sig_buf : typed_parse -> Type_sig_bin.buf
+
+  val get_resolved_modules : typed_parse -> Parsing_heaps.resolved_module SMap.t
+end
+
+let mk_heap_reader reader =
+  let module Reader = struct
+    module Heap = SharedMem.NewAPI
+
+    type provider = File_key.t * Parsing_heaps.file_addr
+
+    type typed_parse = File_key.t * [ `typed ] Parsing_heaps.parse_addr
+
+    let get_master_cx () = Context_heaps.Reader_dispatcher.find_master ~reader
+
+    let get_provider m =
+      match Parsing_heaps.Reader_dispatcher.get_provider ~reader m with
+      | None -> None
+      | Some dep_addr ->
+        let file_key =
+          try Parsing_heaps.read_file_key dep_addr with
+          | SharedMem.Invalid_header _ as exn ->
+            let exn = Exception.wrap exn in
+            Exception.raise_with_backtrace
+              (Failure
+                 (Printf.sprintf
+                    "Invalid provider for %s: %s"
+                    (Modulename.to_string m)
+                    (Exception.get_ctor_string exn)
+                 )
+              )
+              exn
+        in
+        Some (file_key, dep_addr)
+
+    let get_file_key (file_key, _) = file_key
+
+    let get_typed_parse (file_key, dep_addr) =
+      match Parsing_heaps.Reader_dispatcher.get_typed_parse ~reader dep_addr with
+      | None -> None
+      | Some parse -> Some (file_key, parse)
+
+    let get_leader_key (file_key, parse) =
+      Parsing_heaps.Reader_dispatcher.get_leader_unsafe ~reader file_key parse
+      |> Parsing_heaps.read_file_key
+
+    let get_aloc_table (file_key, parse) = Parsing_heaps.read_aloc_table_unsafe file_key parse
+
+    let get_docblock (file_key, parse) = Parsing_heaps.read_docblock_unsafe file_key parse
+
+    let get_type_sig_buf (_, parse) = Heap.type_sig_buf (Option.get (Heap.get_type_sig parse))
+
+    let get_resolved_modules (file_key, parse) =
+      Parsing_heaps.Reader_dispatcher.get_resolved_modules_unsafe ~reader file_key parse
+  end in
+  (module Reader : READER)
+
 (* This function is designed to be applied up to the unit argument and returns a
  * function which can be called repeatedly. The returned function closes over an
  * environment which defines caches that can be re-used when checking multiple
  * files. *)
-let mk_check_file ~options ~reader ~cache () =
+let mk_check_file (module Reader : READER) ~options ~cache () =
   let open Type_sig_collections in
-  let module ConsGen = ( val if Options.new_merge options then
-                               (module Annotation_inference.ConsGen)
-                             else
-                               (module ConsGen) : Type_sig_merge.CONS_GEN
-                       )
-  in
-  let module Merge = Type_sig_merge.Make (ConsGen) in
+  let module ConsGen = Annotation_inference.ConsGen in
+  let module Merge = Type_sig_merge in
   let module Pack = Type_sig_pack in
   let module Bin = Type_sig_bin in
-  let module Heap = SharedMem.NewAPI in
-  let audit = Expensive.ok in
-
-  let get_file = Module_heaps.Reader_dispatcher.get_file ~reader ~audit in
-  let get_type_sig_unsafe = Parsing_heaps.Reader_dispatcher.get_checked_file_addr_unsafe ~reader in
-  let get_info_unsafe = Module_heaps.Reader_dispatcher.get_info_unsafe ~reader ~audit in
-  let get_aloc_table_unsafe = Parsing_heaps.Reader_dispatcher.get_aloc_table_unsafe ~reader in
-  let find_leader = Context_heaps.Reader_dispatcher.find_leader ~reader in
-  let get_resolved_requires_unsafe =
-    Module_heaps.Reader_dispatcher.get_resolved_requires_unsafe ~reader ~audit
-  in
-
-  let master_cx = Context_heaps.Reader_dispatcher.find_master ~reader in
+  let master_cx = Reader.get_master_cx () in
 
   let base_metadata = Context.metadata_of_options options in
-
-  (* Create a merging context for a dependency of a checked file. These contexts
-   * are used when converting signatures to types. *)
-  let create_dep_cx file_key docblock ccx =
-    let metadata = Context.docblock_overrides docblock base_metadata in
-    let module_ref = Reason.OrdinaryName (Files.module_ref file_key) in
-    let aloc_table = lazy (get_aloc_table_unsafe file_key) in
-    Context.make ccx metadata file_key aloc_table module_ref Context.Merging
-  in
 
   (* Create a type representing the exports of a dependency. For checked
    * dependencies, we will create a "sig tvar" with a lazy thunk that evaluates
    * to a ModuleT type. *)
-  let rec dep_module_t cx mref provider =
-    match get_file provider with
-    | None -> unknown_module_t cx mref provider
-    | Some (File_key.ResourceFile f) -> Merge.merge_resource_module_t cx f
-    | Some dep_file ->
-      let { Module_heaps.checked; parsed; _ } = get_info_unsafe dep_file in
-      if checked && parsed then
-        sig_module_t cx dep_file
-      else
-        unchecked_module_t cx mref
-  and sig_module_t cx file_key _loc =
-    let file =
-      Check_cache.find_or_create cache ~find_leader ~master_cx ~create_file:dep_file file_key
-    in
-    let t = file.Type_sig_merge.exports () in
+  let rec dep_module_t cx mref = function
+    | Error mapped_name ->
+      let m = Option.value mapped_name ~default:mref in
+      unknown_module_t cx mref (Modulename.String m)
+    | Ok m ->
+      (match Reader.get_provider m with
+      | None -> unknown_module_t cx mref m
+      | Some provider ->
+        (match Reader.get_file_key provider with
+        | File_key.ResourceFile f -> Merge.merge_resource_module_t cx f
+        | dep_file ->
+          (match Reader.get_typed_parse provider with
+          | Some parse -> sig_module_t cx dep_file parse
+          | None -> unchecked_module_t cx mref)))
+  and sig_module_t cx file_key parse _loc =
+    let create_file = dep_file file_key parse in
+    let leader = lazy (Reader.get_leader_key parse) in
+    let file = Check_cache.find_or_create cache ~leader ~master_cx ~create_file file_key in
+    let t = file.Type_sig_merge.exports in
     copy_into cx file.Type_sig_merge.cx t;
     t
   (* Create a Type_sig_merge.file record for a dependency, which we use to
    * convert signatures into types. This function reads the signature for a file
    * from shared memory and creates thunks (either lazy tvars or lazy types)
    * that resolve to types. *)
-  and dep_file file_key ccx =
+  and dep_file file_key parse ccx =
     let source = Some file_key in
+
+    let aloc_table = lazy (Reader.get_aloc_table parse) in
 
     let aloc (loc : Locs.index) = ALoc.ALocRepresentationDoNotUse.make_keyed source (loc :> int) in
 
@@ -395,26 +289,24 @@ let mk_check_file ~options ~reader ~cache () =
       if Options.abstract_locations options then
         aloc
       else
-        let aloc_table = lazy (get_aloc_table_unsafe file_key) in
-        (fun loc -> aloc loc |> ALoc.to_loc aloc_table |> ALoc.of_loc)
+        fun loc ->
+      aloc loc |> ALoc.to_loc aloc_table |> ALoc.of_loc
     in
 
-    let deserialize x = Marshal.from_string x 0 in
+    let buf = Reader.get_type_sig_buf parse in
 
-    let file_addr = get_type_sig_unsafe file_key in
-
-    let buf = Heap.type_sig_buf (Heap.file_type_sig file_addr) in
-
-    let docblock = Heap.file_docblock file_addr |> Heap.read_docblock |> deserialize in
-
-    let cx = create_dep_cx file_key docblock ccx in
+    let cx =
+      let docblock = Reader.get_docblock parse in
+      let metadata = Context.docblock_overrides docblock base_metadata in
+      Context.make ccx metadata file_key aloc_table Context.Merging
+    in
 
     let dependencies =
-      let { Module_heaps.resolved_modules; _ } = get_resolved_requires_unsafe file_key in
+      let resolved_modules = Reader.get_resolved_modules parse in
       let f buf pos =
         let mref = Bin.read_str buf pos in
-        let provider = SMap.find mref resolved_modules in
-        (mref, dep_module_t cx mref provider)
+        let m = SMap.find mref resolved_modules in
+        (mref, dep_module_t cx mref m)
       in
       let pos = Bin.module_refs buf in
       Bin.read_tbl_generic f buf pos Module_refs.init
@@ -434,7 +326,7 @@ let mk_check_file ~options ~reader ~cache () =
         lazy
           (Bin.read_hashed Bin.read_packed buf pos
           |> Pack.map_packed aloc
-          |> Merge.merge (Lazy.force file_rec)
+          |> Merge.merge SMap.empty (Lazy.force file_rec)
           )
       in
       let es_export buf pos =
@@ -483,42 +375,39 @@ let mk_check_file ~options ~reader ~cache () =
           |> Merge.merge_exports (Lazy.force file_rec) reason
           )
       in
-      let t = ConsGen.mk_sig_tvar cx reason resolved in
-      (fun () -> t)
+      ConsGen.mk_sig_tvar cx reason resolved
     in
 
     let local_def file_rec buf pos =
-      let thunk =
-        lazy
-          (let def = Pack.map_packed_def aloc (Bin.read_local_def buf pos) in
-           let loc = Type_sig.def_id_loc def in
-           let name = Type_sig.def_name def in
-           let reason = Type_sig_merge.def_reason def in
-           let resolved = lazy (Merge.merge_def (Lazy.force file_rec) reason def) in
-           let t = ConsGen.mk_sig_tvar cx reason resolved in
-           (loc, name, t)
-          )
-      in
-      (fun () -> Lazy.force thunk)
+      lazy
+        (let def = Pack.map_packed_def aloc (Bin.read_local_def buf pos) in
+         let loc = Type_sig.def_id_loc def in
+         let name = Type_sig.def_name def in
+         let reason = Type_sig_merge.def_reason def in
+         let resolved = lazy (Merge.merge_def (Lazy.force file_rec) reason def) in
+         let t = ConsGen.mk_sig_tvar cx reason resolved in
+         (loc, name, t)
+        )
     in
 
     let remote_ref file_rec buf pos =
-      let thunk =
-        lazy
-          (let remote_ref = Pack.map_remote_ref aloc (Bin.read_remote_ref buf pos) in
-           let loc = Pack.remote_ref_loc remote_ref in
-           let name = Pack.remote_ref_name remote_ref in
-           let reason = Type_sig_merge.remote_ref_reason remote_ref in
-           let resolved = lazy (Merge.merge_remote_ref (Lazy.force file_rec) reason remote_ref) in
-           let t = ConsGen.mk_sig_tvar cx reason resolved in
-           (loc, name, t)
-          )
-      in
-      (fun () -> Lazy.force thunk)
+      lazy
+        (let remote_ref = Pack.map_remote_ref aloc (Bin.read_remote_ref buf pos) in
+         let loc = Pack.remote_ref_loc remote_ref in
+         let name = Pack.remote_ref_name remote_ref in
+         let reason = Type_sig_merge.remote_ref_reason remote_ref in
+         let resolved = lazy (Merge.merge_remote_ref (Lazy.force file_rec) reason remote_ref) in
+         let t = ConsGen.mk_sig_tvar cx reason resolved in
+         (loc, name, t)
+        )
     in
 
     let pattern_def file_rec buf pos =
-      lazy (Bin.read_packed buf pos |> Pack.map_packed aloc |> Merge.merge (Lazy.force file_rec))
+      lazy
+        (Bin.read_packed buf pos
+        |> Pack.map_packed aloc
+        |> Merge.merge SMap.empty (Lazy.force file_rec)
+        )
     in
 
     let pattern file_rec buf pos =
@@ -565,12 +454,12 @@ let mk_check_file ~options ~reader ~cache () =
     Lazy.force file_rec
   in
 
-  let connect_require cx (mref, locs, provider) =
-    let module_t = dep_module_t cx mref provider in
+  let connect_require cx (mref, locs, m) =
+    let module_t = dep_module_t cx mref m in
     let connect loc =
       let module_t = module_t loc in
       let (_, require_id) = Context.find_require cx loc in
-      ConsGen.resolve_id cx require_id module_t
+      resolve_require_id cx require_id module_t
     in
     Nel.iter connect locs
   in
@@ -578,17 +467,11 @@ let mk_check_file ~options ~reader ~cache () =
   fun file_key requires ast comments file_sig docblock aloc_table ->
     let ccx = Context.make_ccx master_cx in
     let metadata = Context.docblock_overrides docblock base_metadata in
-    let module_ref = Reason.OrdinaryName (Files.module_ref file_key) in
-    let cx = Context.make ccx metadata file_key aloc_table module_ref Context.Checking in
+    let cx = Context.make ccx metadata file_key aloc_table Context.Checking in
     ConsGen.set_dst_cx cx;
-    let infer_ast =
-      match Context.env_mode cx with
-      | Options.SSAEnv _ -> Type_inference_js.NewEnvInference.infer_ast
-      | _ -> Type_inference_js.infer_ast
-    in
     let lint_severities = get_lint_severities metadata options in
-    Type_inference_js.add_require_tvars ~unresolved_tvar:ConsGen.unresolved_tvar cx file_sig;
+    Type_inference_js.add_require_tvars cx file_sig;
     List.iter (connect_require cx) requires;
-    let typed_ast = infer_ast cx file_key comments ast ~lint_severities in
+    let typed_ast = Type_inference_js.infer_ast cx file_key comments ast ~lint_severities in
     Merge_js.post_merge_checks cx master_cx ast typed_ast metadata file_sig;
     (cx, typed_ast)

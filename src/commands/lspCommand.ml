@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -25,7 +25,7 @@ let spec =
         |> base_flags
         |> temp_dir_flag
         |> shm_flags
-        |> flag "--lazy" no_arg ~doc:"Deprecated, has no effect"
+        |> flag "--lazy" truthy ~doc:"Deprecated, has no effect"
         |> flag "--lazy-mode" string ~doc:"Deprecated, has no effect"
         |> autostop_flag
         |> from_flag

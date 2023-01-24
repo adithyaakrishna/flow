@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,17 +8,11 @@
  * @format
  */
 
+const {access, readFile, unlink, writeFile} = require('fs').promises;
 const {join, relative, resolve} = require('path');
 const {format} = require('util');
 
-const {
-  exec,
-  exists,
-  mkdirp,
-  readFile,
-  unlink,
-  writeFile,
-} = require('../utils/async');
+const {exec, mkdirp} = require('../utils/async');
 const {getTestsDir, defaultFlowConfigName} = require('../constants');
 
 import type {Args} from './new-testCommand';
@@ -30,9 +24,9 @@ async function newTest(bin: string, suiteName: string): Promise<void> {
 
   const dest = join(getTestsDir(), suiteName);
 
-  const alreadyExists = await exists(dest);
-
-  if (alreadyExists) {
+  try {
+    await access(dest);
+  } catch (_) {
     log('There is already a test with that name. Skipping...');
     return;
   }
@@ -65,7 +59,7 @@ module.exports = (suite(({addFile, addFiles, addCode}) => [
   // Rename .flowconfig to _flowconfig
   const config = await readFile(join(dest, '.flowconfig'));
   await Promise.all([
-    writeFile(join(dest, defaultFlowConfigName), config.toString()),
+    writeFile(join(dest, defaultFlowConfigName), config),
     unlink(join(dest, '.flowconfig')),
   ]);
 

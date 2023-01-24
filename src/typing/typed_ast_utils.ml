@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -14,13 +14,12 @@ let polarity = function
   | Some (_, { Ast.Variance.kind = Ast.Variance.Plus; comments = _ }) -> Polarity.Positive
   | Some (_, { Ast.Variance.kind = Ast.Variance.Minus; comments = _ }) -> Polarity.Negative
   | None -> Polarity.Neutral
+  | Some (_, Ast.Variance.{ kind = Readonly | In | Out | InOut; comments = _ }) -> Polarity.Neutral
 
-let mk_bound_t loc name =
-  let reason = Reason.(mk_annot_reason (RType (OrdinaryName name)) loc) in
-  Type.BoundT (reason, name)
+let mk_bound_t cx tparam = Flow_js_utils.generic_of_tparam cx ~f:(fun x -> x) tparam
 
 class type_parameter_mapper =
-  object
+  object (self)
     inherit
       [ALoc.t, ALoc.t * Type.t, ALoc.t, ALoc.t * Type.t] Flow_polymorphic_ast_mapper.mapper as super
 
@@ -37,9 +36,14 @@ class type_parameter_mapper =
 
     (* Imperatively adds type parameter to bound_tparams environment. *)
     method! type_param tparam =
-      let open Ast.Type.TypeParam in
       let res = super#type_param tparam in
-      let (_, { name = id; bound; variance; default }) = tparam in
+      let tparam = self#make_typeparam tparam in
+      rev_bound_tparams <- tparam :: rev_bound_tparams;
+      res
+
+    method private make_typeparam tparam =
+      let open Ast.Type.TypeParam in
+      let (_, { name = id; bound; bound_kind = _; variance; default }) = tparam in
       let (name_loc, { Ast.Identifier.name; comments = _ }) = id in
       let reason = Reason.(mk_annot_reason (RType (OrdinaryName name)) name_loc) in
       let bound =
@@ -54,9 +58,7 @@ class type_parameter_mapper =
         | Some ((_, t), _) -> Some t
       in
       let polarity = polarity variance in
-      let tparam = { Type.reason; name; bound; polarity; default; is_this = false } in
-      rev_bound_tparams <- tparam :: rev_bound_tparams;
-      res
+      { Type.reason; name = Subst_name.Name name; bound; polarity; default; is_this = false }
 
     (* Record and restore the parameter environment around nodes that might
        update it. *)
@@ -80,7 +82,7 @@ class type_parameter_mapper =
       in
       let this_tparam =
         {
-          Type.name = "this";
+          Type.name = Subst_name.Name "this";
           reason = replace_desc_reason RThisType (TypeUtil.reason_of_t bound);
           bound;
           polarity = Polarity.Positive;
@@ -93,6 +95,26 @@ class type_parameter_mapper =
       let cls = super#class_ cls in
       rev_bound_tparams <- originally_bound_tparams;
       cls
+
+    method! declare_class decl =
+      let open Reason in
+      let { Ast.Statement.DeclareClass.id; _ } = decl in
+      let ((_, bound), _) = id in
+      let this_tparam =
+        {
+          Type.name = Subst_name.Name "this";
+          reason = replace_desc_reason RThisType (TypeUtil.reason_of_t bound);
+          bound;
+          polarity = Polarity.Positive;
+          default = None;
+          is_this = true;
+        }
+      in
+      let originally_bound_tparams = rev_bound_tparams in
+      rev_bound_tparams <- this_tparam :: rev_bound_tparams;
+      let decl = super#declare_class decl in
+      rev_bound_tparams <- originally_bound_tparams;
+      decl
   end
 
 (* Find exact location match *)
@@ -101,16 +123,17 @@ module ExactMatchQuery = struct
 
   let found ~tparams_rev t = raise (Found { Type.TypeScheme.tparams_rev; type_ = t })
 
-  class exact_match_searcher (target_loc : ALoc.t) =
+  class exact_match_searcher cx (target_loc : ALoc.t) =
     object (self)
       inherit type_parameter_mapper as super
 
-      method! type_param_identifier id =
-        let (loc, { Ast.Identifier.name; comments = _ }) = id in
-        if target_loc = loc then
-          self#annot_with_tparams (found (mk_bound_t loc name))
-        else
-          super#type_param_identifier id
+      method! type_param ((_, { Ast.Type.TypeParam.name = (loc, _); _ }) as tparam) =
+        if target_loc = loc then (
+          let tparam = self#make_typeparam tparam in
+          rev_bound_tparams <- tparam :: rev_bound_tparams;
+          self#annot_with_tparams (found (mk_bound_t cx tparam))
+        ) else
+          super#type_param tparam
 
       method! on_type_annot annot =
         let (loc, t) = annot in
@@ -120,8 +143,8 @@ module ExactMatchQuery = struct
           super#on_type_annot annot
     end
 
-  let find typed_ast aloc =
-    let searcher = new exact_match_searcher aloc in
+  let find cx typed_ast aloc =
+    let searcher = new exact_match_searcher cx aloc in
     try
       ignore (searcher#program typed_ast);
       None
@@ -130,6 +153,49 @@ module ExactMatchQuery = struct
 end
 
 let find_exact_match_annotation = ExactMatchQuery.find
+
+(* Find exact location match *)
+module TparamsRevQuery = struct
+  exception Found of Type.typeparam list
+
+  let found ~tparams_rev = raise (Found tparams_rev)
+
+  class tparams_searcher (target_loc : ALoc.t) =
+    object (self)
+      inherit type_parameter_mapper as super
+
+      method! type_param ((_, { Ast.Type.TypeParam.name = (loc, _); _ }) as tparam) =
+        if target_loc = loc then (
+          let tparam = self#make_typeparam tparam in
+          rev_bound_tparams <- tparam :: rev_bound_tparams;
+          self#annot_with_tparams found
+        ) else
+          super#type_param tparam
+
+      method! on_type_annot annot =
+        let (loc, _) = annot in
+        if target_loc = loc then
+          self#annot_with_tparams found
+        else
+          super#on_type_annot annot
+
+      method! on_loc_annot loc =
+        if target_loc = loc then
+          self#annot_with_tparams found
+        else
+          super#on_loc_annot loc
+    end
+
+  let find typed_ast aloc =
+    let searcher = new tparams_searcher aloc in
+    try
+      ignore (searcher#program typed_ast);
+      None
+    with
+    | Found scheme -> Some scheme
+end
+
+let find_tparams_rev_at_location = TparamsRevQuery.find
 
 (* Find identifier under location *)
 module Type_at_pos = struct
@@ -142,7 +208,7 @@ module Type_at_pos = struct
    * - `this`, `super`          (handled in expression)
    * - private property names   (handled in expression)
    *)
-  class type_at_pos_searcher (target_loc : Loc.t) =
+  class type_at_pos_searcher cx (target_loc : Loc.t) =
     object (self)
       inherit type_parameter_mapper as super
 
@@ -163,12 +229,13 @@ module Type_at_pos = struct
         else
           super#jsx_identifier id
 
-      method! type_param_identifier id =
-        let (loc, { Ast.Identifier.name; comments = _ }) = id in
-        if self#covers_target loc then
-          self#annot_with_tparams (self#find_loc loc (mk_bound_t loc name))
-        else
-          super#type_param_identifier id
+      method! type_param ((_, { Ast.Type.TypeParam.name = (loc, _); _ }) as tparam) =
+        if self#covers_target loc then (
+          let tparam = self#make_typeparam tparam in
+          rev_bound_tparams <- tparam :: rev_bound_tparams;
+          self#annot_with_tparams (self#find_loc loc (mk_bound_t cx tparam))
+        ) else
+          super#type_param tparam
 
       method! object_key key =
         let open Ast.Expression.Object.Property in
@@ -200,8 +267,8 @@ module Type_at_pos = struct
           super#implicit impl
     end
 
-  let find typed_ast loc =
-    let searcher = new type_at_pos_searcher loc in
+  let find cx typed_ast loc =
+    let searcher = new type_at_pos_searcher cx loc in
     try
       ignore (searcher#program typed_ast);
       None
@@ -283,4 +350,13 @@ let unchecked_mapper =
     method on_loc_annot loc = loc
 
     method on_type_annot loc = (loc, Type.(AnyT.at (Unsound Unchecked)) loc)
+  end
+
+let untyped_ast_mapper =
+  object
+    inherit [ALoc.t, ALoc.t * Type.t, ALoc.t, ALoc.t] Flow_polymorphic_ast_mapper.mapper
+
+    method on_loc_annot loc = loc
+
+    method on_type_annot (loc, _) = loc
   end

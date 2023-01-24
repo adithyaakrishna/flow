@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -24,7 +24,20 @@ val partition_directives :
   (Loc.t, Loc.t) Flow_ast.Statement.t list ->
   (Loc.t, Loc.t) Flow_ast.Statement.t list * (Loc.t, Loc.t) Flow_ast.Statement.t list
 
+val hoist_function_declarations :
+  ('a, 'b) Flow_ast.Statement.t list -> ('a, 'b) Flow_ast.Statement.t list
+
+val is_call_to_invariant : ('a, 'b) Flow_ast.Expression.t -> bool
+
+val is_call_to_is_array : ('a, 'b) Flow_ast.Expression.t -> bool
+
+val is_call_to_object_dot_freeze : ('a, 'b) Flow_ast.Expression.t -> bool
+
+val is_call_to_object_static_method : ('a, 'b) Flow_ast.Expression.t -> bool
+
 val negate_number_literal : float * string -> float * string
+
+val negate_bigint_literal : int64 option * string -> int64 option * string
 
 val loc_of_expression : ('a, 'a) Flow_ast.Expression.t -> 'a
 

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -49,7 +49,7 @@ let type_at_pos_type
       max_depth = Some max_depth;
     }
   in
-  match find_type_at_pos_annotation typed_ast loc with
+  match find_type_at_pos_annotation full_cx typed_ast loc with
   | None -> FailureNoMatch
   | Some (loc, scheme) -> type_of_scheme ~options ~full_cx ~file ~file_sig typed_ast loc scheme
 
@@ -80,7 +80,7 @@ let insert_type_normalize
       (* Utility types won't are not serialized so it may be worth evaluating them away
        * if we find them in the resulting Ty.t. The trade off is that types might get
        * larger. *)
-      evaluate_type_destructors = false;
+      evaluate_type_destructors = Ty_normalizer_env.EvaluateNone;
       (* Optimize types is false because Insert_types manually calls the simplifier with
          a custom comparison operation *)
       optimize_types = false;

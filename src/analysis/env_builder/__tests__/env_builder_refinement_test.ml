@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,9 +18,23 @@ module TestCx = struct
 
   let enable_enums _ = true
 
+  let file _cx = File_key.SourceFile "test.js"
+
   let jsx _cx = !jsx_mode
 
   let react_runtime _cx = !react_runtime
+
+  let lti _cx = true
+
+  let enable_const_params _cx = false
+
+  let add_literal_subtypes _ _ = ()
+
+  let add_matching_props _ _ = ()
+
+  let add_exhaustive_check _ _ _ = ()
+
+  let exhaustive_check _ _ = ([], false)
 end
 
 module Name_resolver = Name_resolver.Make_Test_With_Cx (TestCx)
@@ -31,12 +45,6 @@ let print_values refinement_of_id =
     match write_loc with
     | Uninitialized _ -> "(uninitialized)"
     | Undeclared _ -> "(undeclared)"
-    | UninitializedClass { def; _ } ->
-      let loc = Reason.poly_loc_of_reason def in
-      Utils_js.spf
-        "(uninitialized class) %s: (%s)"
-        (L.debug_to_string loc)
-        Reason.(desc_of_reason def |> string_of_desc)
     | Projection l -> Utils_js.spf "projection at %s" (L.debug_to_string l)
     | Write reason ->
       let loc = Reason.poly_loc_of_reason reason in
@@ -44,19 +52,40 @@ let print_values refinement_of_id =
         "%s: (%s)"
         (L.debug_to_string loc)
         Reason.(desc_of_reason reason |> string_of_desc)
-    | Refinement { refinement_id; writes } ->
+    | EmptyArray { reason; _ } ->
+      let loc = Reason.poly_loc_of_reason reason in
+      Utils_js.spf
+        "(empty array) %s: (%s)"
+        (L.debug_to_string loc)
+        Reason.(desc_of_reason reason |> string_of_desc)
+    | IllegalWrite reason ->
+      let loc = Reason.poly_loc_of_reason reason in
+      Utils_js.spf "illegal write at %s" (L.debug_to_string loc)
+    | Refinement { refinement_id; writes; write_id = _ } ->
       let refinement = refinement_of_id refinement_id in
       let refinement_str = show_refinement_kind_without_locs (snd refinement) in
       let writes_str = String.concat "," (List.map print_value writes) in
       Printf.sprintf "{refinement = %s; writes = %s}" refinement_str writes_str
+    | FunctionThis _ -> "This(function)"
+    | GlobalThis _ -> "This(global)"
+    | IllegalThis _ -> "This(illegal)"
+    | ClassInstanceThis _ -> "This(instance)"
+    | ClassStaticThis _ -> "This(static)"
+    | ClassInstanceSuper _ -> "Super(instance)"
+    | ClassStaticSuper _ -> "Super(static)"
+    | Exports -> "Exports"
+    | ModuleScoped name -> "ModuleScoped " ^ name
     | Global name -> "Global " ^ name
     | Unreachable _ -> "unreachable"
+    | Undefined _ -> "undefined"
+    | Number _ -> "number"
+    | DeclaredFunction l -> Printf.sprintf "declared function %s" (L.debug_to_string l)
   in
   fun values ->
     let kvlist = L.LMap.bindings values in
     let strlist =
       Base.List.map
-        ~f:(fun (read_loc, write_locs) ->
+        ~f:(fun (read_loc, { def_loc = _; val_kind = _; write_locs; name = _; id = _ }) ->
           Printf.sprintf
             "%s => {\n    %s\n  }"
             (L.debug_to_string read_loc)
@@ -68,7 +97,7 @@ let print_values refinement_of_id =
 (* TODO: ocamlformat mangles the ppx syntax. *)
 [@@@ocamlformat "disable=true"]
 
-let print_ssa_test ?(custom_jsx = None) ?(react_runtime_automatic=false) contents =
+let print_ssa_test ?(custom_jsx = None) ?(react_runtime_automatic=false) ?lib ?exclude_syms contents =
   if react_runtime_automatic then (
     react_runtime := Options.ReactRuntimeAutomatic
   );
@@ -80,11 +109,33 @@ let print_ssa_test ?(custom_jsx = None) ?(react_runtime_automatic=false) content
       jsx_mode := Options.Jsx_pragma (str, aloc_ast)
 
   );
-  let aloc_ast = parse_with_alocs contents in 
-  let refined_reads, refinement_of_id = Name_resolver.program () aloc_ast in
+  let aloc_ast = parse_with_alocs contents in
+  let refined_reads, refinement_of_id = Name_resolver.program () ?lib ?exclude_syms aloc_ast in
   print_values refinement_of_id refined_reads;
   react_runtime := Options.ReactRuntimeClassic;
   jsx_mode := Options.Jsx_react
+
+let%expect_test "conj_refinement_empty" =
+  print_ssa_test {|
+function foo(e: Error) {
+  if (e instanceof Error && true) {}
+  else { e }
+}
+|};
+    [%expect {|
+      [
+        (2, 16) to (2, 21) => {
+          Global Error
+        };
+        (3, 6) to (3, 7) => {
+          (2, 13) to (2, 14): (`e`)
+        };
+        (3, 19) to (3, 24) => {
+          Global Error
+        };
+        (4, 9) to (4, 10) => {
+          (2, 13) to (2, 14): (`e`)
+        }] |}]
 
 let%expect_test "logical_expr" =
   print_ssa_test {|let x = null;
@@ -156,7 +207,7 @@ let%expect_test "logical_nc_no_key" =
         (1, 4) to (1, 5): (`x`)
       };
       (2, 22) to (2, 23) => {
-        {refinement = Truthy; writes = (1, 4) to (1, 5): (`x`)}
+        (1, 4) to (1, 5): (`x`)
       }] |}]
 
 let%expect_test "logical_nested_right" =
@@ -201,10 +252,76 @@ let%expect_test "logical_nested2" =
         {refinement = Truthy; writes = (1, 4) to (1, 5): (`x`)}
       };
       (2, 13) to (2, 14) => {
-        {refinement = Not (And (Truthy, Truthy)); writes = (1, 4) to (1, 5): (`x`)}
+        {refinement = Or (Not (Truthy), Not (Truthy)); writes = (1, 4) to (1, 5): (`x`)}
       };
       (2, 18) to (2, 19) => {
-        {refinement = Truthy; writes = {refinement = Not (And (Truthy, Truthy)); writes = (1, 4) to (1, 5): (`x`)}}
+        {refinement = Truthy; writes = {refinement = Or (Not (Truthy), Not (Truthy)); writes = (1, 4) to (1, 5): (`x`)}}
+      }] |}]
+
+let%expect_test "logical_assignment_and" =
+  print_ssa_test {|let x = null;
+x &&= x;|}; [%expect {|
+    [
+      (2, 0) to (2, 1) => {
+        (1, 4) to (1, 5): (`x`)
+      };
+      (2, 6) to (2, 7) => {
+        {refinement = Truthy; writes = (1, 4) to (1, 5): (`x`)}
+      }] |}]
+
+let%expect_test "logical_assignment_or" =
+  print_ssa_test {|let x = null;
+x ||= x;|}; [%expect {|
+    [
+      (2, 0) to (2, 1) => {
+        (1, 4) to (1, 5): (`x`)
+      };
+      (2, 6) to (2, 7) => {
+        {refinement = Not (Truthy); writes = (1, 4) to (1, 5): (`x`)}
+      }] |}]
+
+let%expect_test "logical_assignment_nullish" =
+  print_ssa_test {|let x = null;
+x ??= x;|}; [%expect {|
+    [
+      (2, 0) to (2, 1) => {
+        (1, 4) to (1, 5): (`x`)
+      };
+      (2, 6) to (2, 7) => {
+        {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
+      }] |}]
+
+let%expect_test "logical_assignment_and_throws" =
+  print_ssa_test {|let x = null;
+x &&= invariant(false);|}; [%expect {|
+    [
+      (2, 0) to (2, 1) => {
+        (1, 4) to (1, 5): (`x`)
+      };
+      (2, 6) to (2, 15) => {
+        Global invariant
+      }] |}]
+
+let%expect_test "logical_assignment_or_throws" =
+  print_ssa_test {|let x = null;
+x ||= invariant(false);|}; [%expect {|
+    [
+      (2, 0) to (2, 1) => {
+        (1, 4) to (1, 5): (`x`)
+      };
+      (2, 6) to (2, 15) => {
+        Global invariant
+      }] |}]
+
+let%expect_test "logical_assignment_nullish_throws" =
+  print_ssa_test {|let x = null;
+x ??= invariant(false);|}; [%expect {|
+    [
+      (2, 0) to (2, 1) => {
+        (1, 4) to (1, 5): (`x`)
+      };
+      (2, 6) to (2, 15) => {
+        Global invariant
       }] |}]
 
 let%expect_test "assignment_truthy" =
@@ -225,7 +342,7 @@ let%expect_test "eq_null" =
         (1, 4) to (1, 5): (`x`)
       };
       (2, 15) to (2, 16) => {
-        {refinement = Maybe; writes = (1, 4) to (1, 5): (`x`)}
+        {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
 
 let%expect_test "neq_null" =
@@ -264,6 +381,48 @@ let%expect_test "strict_neq_null" =
         {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
 
+let%expect_test "strict_eq_null_sentinel" =
+  print_ssa_test {|
+if (o.err === null) {
+  o
+} else {
+  o;
+}
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global o
+        };
+        (3, 2) to (3, 3) => {
+          {refinement = SentinelR err; writes = Global o}
+        };
+        (5, 2) to (5, 3) => {
+          {refinement = Not (SentinelR err); writes = Global o}
+        }]
+      |}]
+
+let%expect_test "strict_neq_null_sentinel" =
+  print_ssa_test {|
+if (o.err !== null) {
+  o
+} else {
+  o;
+}
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global o
+        };
+        (3, 2) to (3, 3) => {
+          {refinement = Not (SentinelR err); writes = Global o}
+        };
+        (5, 2) to (5, 3) => {
+          {refinement = SentinelR err; writes = Global o}
+        }]
+      |}]
+
 let%expect_test "eq_undefined" =
   print_ssa_test {|let x = undefined;
 (x == undefined) && x|};
@@ -279,7 +438,7 @@ let%expect_test "eq_undefined" =
         Global undefined
       };
       (2, 20) to (2, 21) => {
-        {refinement = Maybe; writes = (1, 4) to (1, 5): (`x`)}
+        {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
 
 let%expect_test "neq_undefined" =
@@ -315,7 +474,7 @@ let%expect_test "strict_eq_undefined" =
         Global undefined
       };
       (2, 21) to (2, 22) => {
-        {refinement = Undefined; writes = (1, 4) to (1, 5): (`x`)}
+        {refinement = Not (Not (Undefined)); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
 
 let%expect_test "strict_neq_undefined" =
@@ -335,6 +494,54 @@ let%expect_test "strict_neq_undefined" =
       (2, 21) to (2, 22) => {
         {refinement = Not (Undefined); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
+
+let%expect_test "strict_eq_undefined_sentinel" =
+  print_ssa_test {|
+if (o.err === undefined) {
+  o
+} else {
+  o;
+}
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global o
+        };
+        (2, 14) to (2, 23) => {
+          Global undefined
+        };
+        (3, 2) to (3, 3) => {
+          {refinement = Not (Not (SentinelR err)); writes = Global o}
+        };
+        (5, 2) to (5, 3) => {
+          {refinement = Not (SentinelR err); writes = Global o}
+        }]
+      |}]
+
+let%expect_test "strict_neq_undefined_sentinel" =
+  print_ssa_test {|
+if (o.err !== undefined) {
+  o
+} else {
+  o;
+}
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global o
+        };
+        (2, 14) to (2, 23) => {
+          Global undefined
+        };
+        (3, 2) to (3, 3) => {
+          {refinement = Not (SentinelR err); writes = Global o}
+        };
+        (5, 2) to (5, 3) => {
+          {refinement = Not (Not (SentinelR err)); writes = Global o}
+        }]
+      |}]
 
 let%expect_test "undefined_already_bound" =
   print_ssa_test {|let undefined = 3;
@@ -364,7 +571,7 @@ let%expect_test "eq_void" =
         (1, 4) to (1, 5): (`x`)
       };
       (2, 17) to (2, 18) => {
-        {refinement = Maybe; writes = (1, 4) to (1, 5): (`x`)}
+        {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
 
 let%expect_test "neq_void" =
@@ -394,7 +601,7 @@ let%expect_test "strict_eq_void" =
         (1, 4) to (1, 5): (`x`)
       };
       (2, 18) to (2, 19) => {
-        {refinement = Undefined; writes = (1, 4) to (1, 5): (`x`)}
+        {refinement = Not (Not (Undefined)); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
 
 let%expect_test "strict_neq_void" =
@@ -480,7 +687,7 @@ let%expect_test "unary_negation" =
         {refinement = Not (Truthy); writes = (1, 4) to (1, 5): (`x`)}
       };
       (4, 13) to (4, 14) => {
-        {refinement = Not (Or (Truthy, Truthy)); writes = (1, 4) to (1, 5): (`x`)}
+        {refinement = And (Not (Truthy), Not (Truthy)); writes = (1, 4) to (1, 5): (`x`)}
       }] |}]
 
 let%expect_test "typeof_bool" =
@@ -992,9 +1199,50 @@ let y = undefined;
           {refinement = SentinelR foo; writes = (1, 4) to (1, 5): (`x`)}
         }] |}]
 
+let%expect_test "refined_call_in_member_expressions" =
+  print_ssa_test {|let x = undefined;
+if (x.foo != null && x.foo.bar()) {}|};
+    [%expect {|
+      [
+        (1, 8) to (1, 17) => {
+          Global undefined
+        };
+        (2, 4) to (2, 5) => {
+          (1, 4) to (1, 5): (`x`)
+        };
+        (2, 21) to (2, 22) => {
+          (1, 4) to (1, 5): (`x`)
+        };
+        (2, 21) to (2, 26) => {
+          {refinement = Not (Maybe); writes = projection at (2, 4) to (2, 9)}
+        }]
+       |}]
+
+let%expect_test "refined_call_in_unrefinable_member_expressions" =
+  print_ssa_test {|let x = undefined;
+if (x.foo != null && x.foo.bar()[0] === BAZ) {}|};
+    [%expect {|
+      [
+        (1, 8) to (1, 17) => {
+          Global undefined
+        };
+        (2, 4) to (2, 5) => {
+          (1, 4) to (1, 5): (`x`)
+        };
+        (2, 21) to (2, 22) => {
+          (1, 4) to (1, 5): (`x`)
+        };
+        (2, 21) to (2, 26) => {
+          {refinement = Not (Maybe); writes = projection at (2, 4) to (2, 9)}
+        };
+        (2, 40) to (2, 43) => {
+          Global BAZ
+        }]
+       |}]
+
 let%expect_test "optional_chain_lit" =
   print_ssa_test {|let x = undefined;
-(x?.foo === 3) && x|};
+(x?.foo === 3) ? x : x|};
     [%expect{|
       [
         (1, 8) to (1, 17) => {
@@ -1003,13 +1251,34 @@ let%expect_test "optional_chain_lit" =
         (2, 1) to (2, 2) => {
           (1, 4) to (1, 5): (`x`)
         };
-        (2, 18) to (2, 19) => {
-          {refinement = And (SentinelR foo, Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
+        (2, 17) to (2, 18) => {
+          {refinement = And (And (Not (Maybe), PropExistsR (foo)), SentinelR foo); writes = (1, 4) to (1, 5): (`x`)}
+        };
+        (2, 21) to (2, 22) => {
+          {refinement = Or (Or (Not (Not (Maybe)), Not (PropExistsR (foo))), Not (SentinelR foo)); writes = (1, 4) to (1, 5): (`x`)}
+        }] |}]
+
+let%expect_test "optional_chain_not_lit" =
+  print_ssa_test {|let x = undefined;
+(x?.foo !== 3) ? x : x|};
+    [%expect{|
+      [
+        (1, 8) to (1, 17) => {
+          Global undefined
+        };
+        (2, 1) to (2, 2) => {
+          (1, 4) to (1, 5): (`x`)
+        };
+        (2, 17) to (2, 18) => {
+          {refinement = Or (Or (Not (Not (Maybe)), Not (PropExistsR (foo))), Not (SentinelR foo)); writes = (1, 4) to (1, 5): (`x`)}
+        };
+        (2, 21) to (2, 22) => {
+          {refinement = And (And (Not (Maybe), PropExistsR (foo)), SentinelR foo); writes = (1, 4) to (1, 5): (`x`)}
         }] |}]
 
 let%expect_test "optional_chain_member_base" =
   print_ssa_test {|let x = undefined;
-(x.foo?.bar === 3) && x|};
+(x.foo?.bar === 3) ? x : x|};
     [%expect {|
       [
         (1, 8) to (1, 17) => {
@@ -1018,13 +1287,16 @@ let%expect_test "optional_chain_member_base" =
         (2, 1) to (2, 2) => {
           (1, 4) to (1, 5): (`x`)
         };
-        (2, 22) to (2, 23) => {
+        (2, 21) to (2, 22) => {
+          (1, 4) to (1, 5): (`x`)
+        };
+        (2, 25) to (2, 26) => {
           (1, 4) to (1, 5): (`x`)
         }] |}]
 
 let%expect_test "optional_chain_with_call" =
   print_ssa_test {|let x = undefined;
-(x?.foo().bar === 3) && x|};
+(x?.foo().bar === 3) ? x : x|};
     [%expect {|
       [
         (1, 8) to (1, 17) => {
@@ -1033,13 +1305,16 @@ let%expect_test "optional_chain_with_call" =
         (2, 1) to (2, 2) => {
           (1, 4) to (1, 5): (`x`)
         };
-        (2, 24) to (2, 25) => {
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`x`)}
+        (2, 23) to (2, 24) => {
+          {refinement = And (Not (Maybe), PropExistsR (foo)); writes = (1, 4) to (1, 5): (`x`)}
+        };
+        (2, 27) to (2, 28) => {
+          (1, 4) to (1, 5): (`x`)
         }] |}]
 
 let%expect_test "optional_multiple_chains" =
   print_ssa_test {|let x = undefined;
-(x?.foo?.bar.baz?.qux === 3) && x|};
+(x?.foo?.bar.baz?.qux === 3) ? x : x|};
     [%expect {|
       [
         (1, 8) to (1, 17) => {
@@ -1048,13 +1323,16 @@ let%expect_test "optional_multiple_chains" =
         (2, 1) to (2, 2) => {
           (1, 4) to (1, 5): (`x`)
         };
-        (2, 32) to (2, 33) => {
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`x`)}
+        (2, 31) to (2, 32) => {
+          {refinement = And (Not (Maybe), PropExistsR (foo)); writes = (1, 4) to (1, 5): (`x`)}
+        };
+        (2, 35) to (2, 36) => {
+          (1, 4) to (1, 5): (`x`)
         }] |}]
 
 let%expect_test "optional_base_call" =
   print_ssa_test {|let x = undefined;
-(x?.().foo?.bar.baz?.qux === 3) && x|};
+(x?.().foo?.bar.baz?.qux === 3) ? x : x|};
     [%expect {|
       [
         (1, 8) to (1, 17) => {
@@ -1063,7 +1341,10 @@ let%expect_test "optional_base_call" =
         (2, 1) to (2, 2) => {
           (1, 4) to (1, 5): (`x`)
         };
-        (2, 35) to (2, 36) => {
+        (2, 34) to (2, 35) => {
+          (1, 4) to (1, 5): (`x`)
+        };
+        (2, 38) to (2, 39) => {
           (1, 4) to (1, 5): (`x`)
         }] |}]
 
@@ -1079,7 +1360,7 @@ x.foo && x|};
           (1, 4) to (1, 5): (`x`)
         };
         (2, 9) to (2, 10) => {
-          {refinement = SentinelR foo; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = PropExistsR (foo); writes = (1, 4) to (1, 5): (`x`)}
         }] |}]
 
 let%expect_test "optional_chain_standalone" =
@@ -1094,7 +1375,27 @@ x?.foo && x|};
           (1, 4) to (1, 5): (`x`)
         };
         (2, 10) to (2, 11) => {
-          {refinement = And (SentinelR foo, Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = And (Not (Maybe), PropExistsR (foo)); writes = (1, 4) to (1, 5): (`x`)}
+        }] |}]
+
+let%expect_test "no_sentinel_in_non_strict" =
+  print_ssa_test {|
+var x : {p:?string} = {p:"xxx"};
+if (x.p != null) {
+  alert("");
+  x.p;
+}
+|};
+    [%expect {|
+      [
+        (3, 4) to (3, 5) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (4, 2) to (4, 7) => {
+          Global alert
+        };
+        (5, 2) to (5, 3) => {
+          (2, 4) to (2, 5): (`x`)
         }] |}]
 
 let%expect_test "conditional_expression" =
@@ -1236,6 +1537,7 @@ try {
           Global invariant
         };
         (5, 2) to (5, 3) => {
+          (1, 4) to (1, 5): (`x`),
           (3, 24) to (3, 25): (`x`),
           {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`x`)}
         }] |}]
@@ -1300,10 +1602,10 @@ x;|};
           Global invariant
         };
         (2, 22) to (2, 23) => {
-          {refinement = And (Not (Maybe), Truthy); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`x`)}
         };
         (3, 0) to (3, 1) => {
-          {refinement = And (Not (Maybe), Truthy); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`x`)}
         }] |}]
 
 let%expect_test "if_else_statement" =
@@ -1353,7 +1655,45 @@ x;|};
           (1, 4) to (1, 5): (`x`)
         }] |}]
 
-let%expect_test "if_no_else_statement_with_assignment" =
+let%expect_test "if_no_else_statement_with_assignment_simple" =
+  print_ssa_test {|let x = 0;
+if (true) {
+  x = null;
+}
+x;|};
+    [%expect {|
+      [
+        (5, 0) to (5, 1) => {
+          (1, 4) to (1, 5): (`x`),
+          (3, 2) to (3, 3): (`x`)
+        }] |}]
+
+let%expect_test "if_no_else_statement_with_assignment_simple_with_annotation" =
+  print_ssa_test {|let x: number = 0;
+if (true) {
+  x = null;
+}
+x;|};
+    [%expect {|
+      [
+        (5, 0) to (5, 1) => {
+          (1, 4) to (1, 5): (`x`)
+        }] |}]
+
+let%expect_test "if_no_else_statement_with_assignment_uninitialized_with_annotation" =
+  print_ssa_test {|let x: number;
+if (true) {
+  x = 1;
+}
+x;|};
+    [%expect {|
+      [
+        (5, 0) to (5, 1) => {
+          (uninitialized),
+          (3, 2) to (3, 3): (`x`)
+        }] |}]
+
+let%expect_test "if_no_else_statement_with_assignment_with_refinements" =
   print_ssa_test {|let x = undefined;
 if (x !== null) {
   x = null;
@@ -1369,7 +1709,7 @@ x;|};
         };
         (5, 0) to (5, 1) => {
           (3, 2) to (3, 3): (`x`),
-          {refinement = Not (Not (Null)); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = Null; writes = (1, 4) to (1, 5): (`x`)}
         }] |}]
 
 let%expect_test "if_throw_else_statement" =
@@ -1535,6 +1875,21 @@ x;|};
           {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
         }] |}]
 
+let%expect_test "while_assign" =
+  print_ssa_test {|
+declare var x: string;
+while (x = x) { x }
+|};
+    [%expect {|
+      [
+        (3, 11) to (3, 12) => {
+          (2, 12) to (2, 13): (`x`)
+        };
+        (3, 16) to (3, 17) => {
+          {refinement = Truthy; writes = (3, 7) to (3, 8): (`x`)}
+        }]
+       |}]
+
 let%expect_test "while_throw" =
   print_ssa_test {|let x = undefined;
 while (x != null) {
@@ -1583,8 +1938,8 @@ x;|};
         };
         (9, 0) to (9, 1) => {
           (2, 4) to (2, 5): (`y`),
-          {refinement = Maybe; writes = (2, 4) to (2, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (2, 4) to (2, 5): (`y`)}
         };
         (10, 0) to (10, 1) => {
           (1, 4) to (1, 5): (`x`),
@@ -1625,6 +1980,20 @@ x;|};
         (10, 0) to (10, 1) => {
           {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`),(5, 4) to (5, 5): (`x`)}
         }] |}]
+
+let%expect_test "while_with_var_write" =
+  print_ssa_test {|
+while (true) {
+  var a = function() {}
+}
+a()|};
+  [%expect {|
+    [
+      (5, 0) to (5, 1) => {
+        (uninitialized),
+        (3, 6) to (3, 7): (`a`)
+      }]
+      |}]
 
 let%expect_test "while_continue" =
   print_ssa_test {|let x = undefined;
@@ -1674,8 +2043,8 @@ x;|};
         };
         (9, 0) to (9, 1) => {
           (2, 4) to (2, 5): (`y`),
-          {refinement = Maybe; writes = (2, 4) to (2, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (2, 4) to (2, 5): (`y`)}
         };
         (10, 0) to (10, 1) => {
           {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
@@ -1758,8 +2127,8 @@ x;|};
           (1, 4) to (1, 5): (`x`)
         };
         (9, 0) to (9, 1) => {
-          {refinement = Maybe; writes = (2, 4) to (2, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (2, 4) to (2, 5): (`y`)}
         };
         (10, 0) to (10, 1) => {
           (1, 4) to (1, 5): (`x`)
@@ -1848,8 +2217,8 @@ x;|};
           (1, 4) to (1, 5): (`x`)
         };
         (9, 0) to (9, 1) => {
-          {refinement = Maybe; writes = (2, 4) to (2, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (2, 4) to (2, 5): (`y`)}
         };
         (10, 0) to (10, 1) => {
           {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
@@ -1952,8 +2321,8 @@ x;|};
         };
         (9, 0) to (9, 1) => {
           (2, 4) to (2, 5): (`y`),
-          {refinement = Maybe; writes = (2, 4) to (2, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (2, 4) to (2, 5): (`y`)}
         };
         (10, 0) to (10, 1) => {
           (1, 4) to (1, 5): (`x`),
@@ -2043,8 +2412,8 @@ x;|};
         };
         (9, 0) to (9, 1) => {
           (2, 4) to (2, 5): (`y`),
-          {refinement = Maybe; writes = (2, 4) to (2, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (2, 4) to (2, 5): (`y`)}
         };
         (10, 0) to (10, 1) => {
           {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`x`)}
@@ -2156,8 +2525,8 @@ y;|};
         };
         (8, 0) to (8, 1) => {
           (1, 4) to (1, 5): (`y`),
-          {refinement = Maybe; writes = (1, 4) to (1, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`y`)}
         }] |}]
 
 let%expect_test "for_with_runtime_writes" =
@@ -2236,8 +2605,8 @@ y;|};
         };
         (8, 0) to (8, 1) => {
           (1, 4) to (1, 5): (`y`),
-          {refinement = Maybe; writes = (1, 4) to (1, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`y`)}
         }] |}]
 
 let%expect_test "no_havoc_before_write_seen" =
@@ -2297,6 +2666,68 @@ let%expect_test "switch_weird_decl" =
     [
       (1, 19) to (1, 20) => {
         (undeclared)
+      }] |}]
+
+let%expect_test "switch_shadow" =
+  print_ssa_test {|function switch_scope(x) {
+  switch (x) {
+    default:
+      let x;
+      x = ""; // doesn't refine outer x
+      x
+  }
+  x
+}|};
+  [%expect {|
+    [
+      (2, 10) to (2, 11) => {
+        (1, 22) to (1, 23): (`x`)
+      };
+      (6, 6) to (6, 7) => {
+        (5, 6) to (5, 7): (`x`)
+      };
+      (8, 2) to (8, 3) => {
+        (1, 22) to (1, 23): (`x`)
+      }] |}]
+
+let%expect_test "switch_nested_block_shadow" =
+  print_ssa_test {|function switch_scope() {
+  switch ('foo') {
+    case 'foo': {
+      const bar = 3;
+      break;
+    }
+  }
+  bar;
+  const {bar} = {};
+  bar;
+}|};
+  [%expect {|
+    [
+      (8, 2) to (8, 5) => {
+        (undeclared)
+      };
+      (10, 2) to (10, 5) => {
+        (9, 9) to (9, 12): (`bar`)
+      }] |}]
+
+let%expect_test "for_nested_block_shadow" =
+  print_ssa_test {|function for_scope() {
+  for (;;) {
+    const bar = 3;
+    break;
+  }
+  bar;
+  const {bar} = {};
+  bar;
+}|};
+  [%expect {|
+    [
+      (6, 2) to (6, 5) => {
+        (undeclared)
+      };
+      (8, 2) to (8, 5) => {
+        (7, 9) to (7, 12): (`bar`)
       }] |}]
 
 let%expect_test "for_in" =
@@ -2416,8 +2847,8 @@ y;|};
         };
         (8, 0) to (8, 1) => {
           (1, 4) to (1, 5): (`y`),
-          {refinement = Maybe; writes = (1, 4) to (1, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`y`)}
         }] |}]
 
 let%expect_test "for_in_with_runtime_writes" =
@@ -2490,8 +2921,8 @@ y;|};
         };
         (8, 0) to (8, 1) => {
           (1, 4) to (1, 5): (`y`),
-          {refinement = Maybe; writes = (1, 4) to (1, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`y`)}
         }] |}]
 
 let%expect_test "for_in_reassign_right" =
@@ -2627,8 +3058,8 @@ y;|};
         };
         (8, 0) to (8, 1) => {
           (1, 4) to (1, 5): (`y`),
-          {refinement = Maybe; writes = (1, 4) to (1, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`y`)}
         }] |}]
 
 let%expect_test "for_of_with_runtime_writes" =
@@ -2701,8 +3132,8 @@ y;|};
         };
         (8, 0) to (8, 1) => {
           (1, 4) to (1, 5): (`y`),
-          {refinement = Maybe; writes = (1, 4) to (1, 5): (`y`)},
-          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)}
+          {refinement = Not (Maybe); writes = (1, 4) to (1, 5): (`y`)},
+          {refinement = Not (Not (Maybe)); writes = (1, 4) to (1, 5): (`y`)}
         }] |}]
 
 let%expect_test "for_of_reassign_right" =
@@ -2901,20 +3332,43 @@ x;
           {refinement = Null; writes = (1, 4) to (1, 5): (`x`)}
         };
         (7, 4) to (7, 5) => {
-          {refinement = 3; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = 3; writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}
         };
         (10, 4) to (10, 5) => {
-          {refinement = false; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = false; writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}
         };
         (13, 4) to (13, 5) => {
-          {refinement = And (And (Not (false), Not (3)), Not (Null)); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = Not (false); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}
         };
         (16, 0) to (16, 1) => {
           {refinement = Null; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = 3; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = false; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = And (And (Not (false), Not (3)), Not (Null)); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = 3; writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}},
+          {refinement = false; writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}},
+          {refinement = Not (false); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}
         }]|}]
+
+let%expect_test "switch_prop_return_every_case" =
+  print_ssa_test {|function foo() {
+let x = undefined;
+switch (x) {
+  case 1:
+    return;
+  case 2:
+    return;
+  default:
+    return;
+};
+}
+|};
+    [%expect {|
+      [
+        (2, 8) to (2, 17) => {
+          Global undefined
+        };
+        (3, 8) to (3, 9) => {
+          (2, 4) to (2, 5): (`x`)
+        }]
+      |}]
 
 let%expect_test "switch_with_fallthroughs" =
   print_ssa_test {|let x = undefined;
@@ -2930,7 +3384,7 @@ switch (x) {
   default: {
     x;
   }
-};
+}
 x;
 |};
     [%expect {|
@@ -2946,23 +3400,42 @@ x;
         };
         (6, 4) to (6, 5) => {
           {refinement = Null; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = 3; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = 3; writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}
         };
         (10, 4) to (10, 5) => {
-          {refinement = true; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = false; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = true; writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}},
+          {refinement = false; writes = {refinement = Not (true); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}}
         };
         (12, 4) to (12, 5) => {
-          {refinement = true; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = false; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = And (And (And (Not (false), Not (true)), Not (3)), Not (Null)); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = true; writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}},
+          {refinement = false; writes = {refinement = Not (true); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}},
+          {refinement = Not (false); writes = {refinement = Not (true); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}}
         };
         (15, 0) to (15, 1) => {
           {refinement = Null; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = 3; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = true; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = false; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = And (And (And (Not (false), Not (true)), Not (3)), Not (Null)); writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = 3; writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}},
+          {refinement = true; writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}},
+          {refinement = false; writes = {refinement = Not (true); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}},
+          {refinement = Not (false); writes = {refinement = Not (true); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}}
+        }] |}]
+
+let%expect_test "switch_merge_all_breaks" =
+  print_ssa_test {|let x;
+switch (1) {
+  case 1:
+    x = 1;
+    break;
+  default:
+    x = 2;
+    break;
+};
+x;
+|};
+    [%expect {|
+      [
+        (10, 0) to (10, 1) => {
+          (4, 4) to (4, 5): (`x`),
+          (7, 4) to (7, 5): (`x`)
         }] |}]
 
 let%expect_test "switch_throw_in_default" =
@@ -2996,17 +3469,43 @@ x;
         };
         (6, 4) to (6, 5) => {
           {refinement = Null; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = 3; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = 3; writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}
         };
         (10, 4) to (10, 5) => {
-          {refinement = true; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = false; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = true; writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}},
+          {refinement = false; writes = {refinement = Not (true); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}}
         };
         (16, 0) to (16, 1) => {
           {refinement = Null; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = 3; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = true; writes = (1, 4) to (1, 5): (`x`)},
-          {refinement = false; writes = (1, 4) to (1, 5): (`x`)}
+          {refinement = 3; writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}},
+          {refinement = true; writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}},
+          {refinement = false; writes = {refinement = Not (true); writes = {refinement = Not (3); writes = {refinement = Not (Null); writes = (1, 4) to (1, 5): (`x`)}}}}
+        }] |}]
+
+let%expect_test "arguments_eval_read" =
+  print_ssa_test {|
+arguments;
+eval;
+|};
+    [%expect {|
+      [
+        (2, 0) to (2, 9) => {
+          ModuleScoped arguments
+        };
+        (3, 0) to (3, 4) => {
+          ModuleScoped eval
+        }] |}]
+
+let%expect_test "arguments_shadowed" =
+  print_ssa_test {|
+function foo(arguments) {
+  arguments;
+}
+|};
+    [%expect {|
+      [
+        (3, 2) to (3, 11) => {
+          (2, 13) to (2, 22): (`arguments`)
         }] |}]
 
 let%expect_test "global_refinement" =
@@ -3151,6 +3650,101 @@ if (x != null && y != null) {
           {refinement = Not (Maybe); writes = (4, 4) to (4, 5): (`y`)}
         }] |}]
 
+let%expect_test "provider_closure_havoc_1" =
+  print_ssa_test {|
+var x = null;
+function havoc() { x = 21 }
+
+if (typeof x === 'number') {
+  x;
+  havoc();
+  x;
+}
+|};
+    [%expect {|
+      [
+        (5, 11) to (5, 12) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (6, 2) to (6, 3) => {
+          {refinement = number; writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (7, 2) to (7, 7) => {
+          (3, 9) to (3, 14): (`havoc`)
+        };
+        (8, 2) to (8, 3) => {
+          (3, 19) to (3, 20): (`x`),
+          {refinement = number; writes = (2, 4) to (2, 5): (`x`)}
+        }]
+      |}]
+
+let%expect_test "provider_closure_havoc_2" =
+  print_ssa_test {|
+var y = null;
+function havoc() { y = 31 }
+function havoc2() { y = 42 } // a non provider write, so no special treatment.
+
+if (typeof y === 'number') {
+  y;
+  havoc();
+  y; // should be fully havoced
+}
+|};
+    [%expect {|
+      [
+        (6, 11) to (6, 12) => {
+          (2, 4) to (2, 5): (`y`)
+        };
+        (7, 2) to (7, 3) => {
+          {refinement = number; writes = (2, 4) to (2, 5): (`y`)}
+        };
+        (8, 2) to (8, 7) => {
+          (3, 9) to (3, 14): (`havoc`)
+        };
+        (9, 2) to (9, 3) => {
+          (2, 4) to (2, 5): (`y`),
+          (3, 19) to (3, 20): (`y`)
+        }]
+      |}]
+
+let%expect_test "provider_closure_havoc_3" =
+  print_ssa_test {|
+var z = null;
+function havocz() {
+  z = 42;
+}
+
+havocz();
+z;
+
+if (typeof z === 'number'){
+  havocz();
+  z;
+}
+|};
+    [%expect {|
+      [
+        (7, 0) to (7, 6) => {
+          (3, 9) to (3, 15): (`havocz`)
+        };
+        (8, 0) to (8, 1) => {
+          (2, 4) to (2, 5): (`z`),
+          (4, 2) to (4, 3): (`z`)
+        };
+        (10, 11) to (10, 12) => {
+          (2, 4) to (2, 5): (`z`),
+          (4, 2) to (4, 3): (`z`)
+        };
+        (11, 2) to (11, 8) => {
+          (3, 9) to (3, 15): (`havocz`)
+        };
+        (12, 2) to (12, 3) => {
+          (4, 2) to (4, 3): (`z`),
+          {refinement = number; writes = (2, 4) to (2, 5): (`z`),(4, 2) to (4, 3): (`z`)}
+        }]
+
+      |}]
+
 let%expect_test "predicate_function_outside_predicate_position" =
   print_ssa_test {|
 let x = null;
@@ -3210,10 +3804,10 @@ if (y.f(x, y)) {
           (4, 4) to (4, 5): (`y`)
         };
         (6, 2) to (6, 3) => {
-          {refinement = LatentR (index = 0); writes = (2, 4) to (2, 5): (`x`)}
+          {refinement = LatentR (index = 1); writes = (2, 4) to (2, 5): (`x`)}
         };
         (7, 2) to (7, 3) => {
-          {refinement = LatentR (index = 1); writes = (4, 4) to (4, 5): (`y`)}
+          {refinement = LatentR (index = 2); writes = (4, 4) to (4, 5): (`y`)}
         };
         (9, 4) to (9, 5) => {
           (4, 4) to (4, 5): (`y`)
@@ -3265,6 +3859,63 @@ if (x.foo === 3) {
           {refinement = 4; writes = {refinement = 3; writes = projection at (3, 4) to (3, 9)}}
         }] |}]
 
+let%expect_test "heap_refinement_this_basic" =
+  print_ssa_test {|
+if (this.foo === 3) {
+  this.foo;
+}
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 8) => {
+          This(global)
+        };
+        (3, 2) to (3, 6) => {
+          {refinement = SentinelR foo; writes = This(global)}
+        };
+        (3, 2) to (3, 10) => {
+          {refinement = 3; writes = projection at (2, 4) to (2, 12)}
+        }]
+     |}]
+
+let%expect_test "heap_refinement_super" =
+  print_ssa_test {|
+class A {
+  static foo() {
+    if (super.baz === 3) {
+      super.baz;
+    }
+  }
+  bar() {
+    if (super.baz === 3) {
+      super.baz;
+    }
+  }
+}
+
+|};
+    [%expect {|
+      [
+        (4, 8) to (4, 13) => {
+          Super(static)
+        };
+        (5, 6) to (5, 11) => {
+          {refinement = SentinelR baz; writes = Super(static)}
+        };
+        (5, 6) to (5, 15) => {
+          {refinement = 3; writes = projection at (4, 8) to (4, 17)}
+        };
+        (9, 8) to (9, 13) => {
+          Super(instance)
+        };
+        (10, 6) to (10, 11) => {
+          {refinement = SentinelR baz; writes = Super(instance)}
+        };
+        (10, 6) to (10, 15) => {
+          {refinement = 3; writes = projection at (9, 8) to (9, 17)}
+        }]
+     |}]
+
 let%expect_test "heap_refinement_basic" =
   print_ssa_test {|
 let x = {};
@@ -3297,6 +3948,100 @@ if (x.foo === 3) {
         };
         (6, 4) to (6, 9) => {
           {refinement = 4; writes = {refinement = 3; writes = projection at (3, 4) to (3, 9)}}
+        }] |}]
+
+let%expect_test "heap_refinement_destrucure" =
+  print_ssa_test {|
+let x = {};
+if (x.foo === 3) {
+  const { foo } = x;
+  foo;
+}
+|};
+    [%expect {|
+      [
+        (3, 4) to (3, 5) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (4, 10) to (4, 13) => {
+          {refinement = 3; writes = projection at (3, 4) to (3, 9)}
+        };
+        (4, 18) to (4, 19) => {
+          {refinement = SentinelR foo; writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (5, 2) to (5, 5) => {
+          {refinement = 3; writes = (4, 10) to (4, 13): (`foo`)}
+        }] |}]
+
+let%expect_test "heap_refinement_from_assign_destrucure" =
+  print_ssa_test {|
+let x = {};
+x.foo = 3;
+const { foo } = x;
+foo;
+|};
+    [%expect {|
+      [
+        (3, 0) to (3, 1) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (4, 8) to (4, 11) => {
+          (3, 0) to (3, 5): (some property)
+        };
+        (4, 16) to (4, 17) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (5, 0) to (5, 3) => {
+          (4, 8) to (4, 11): (`foo`)
+        }]
+      |}]
+
+let%expect_test "heap_refinement_deep_destrucure" =
+  print_ssa_test {|
+let x = {};
+if (x.bar.baz.hello.world === 4) {
+  const { bar: { baz: { hello: {world: hi} } } } = x;
+  hi;
+}
+|};
+    [%expect {|
+      [
+        (3, 4) to (3, 5) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (4, 24) to (4, 29) => {
+          {refinement = SentinelR world; writes = projection at (3, 4) to (3, 19)}
+        };
+        (4, 32) to (4, 37) => {
+          {refinement = 4; writes = projection at (3, 4) to (3, 25)}
+        };
+        (4, 51) to (4, 52) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (5, 2) to (5, 4) => {
+          {refinement = 4; writes = (4, 39) to (4, 41): (`hi`)}
+        }] |}]
+
+let%expect_test "heap_refinement_from_assign_deep_destrucure" =
+  print_ssa_test {|
+let x = {};
+x.bar.baz.hello.world = 4;
+const { bar: { baz: { hello: {world: hi} } } } = x;
+hi;
+|};
+    [%expect {|
+      [
+        (3, 0) to (3, 1) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (4, 30) to (4, 35) => {
+          (3, 0) to (3, 21): (some property)
+        };
+        (4, 49) to (4, 50) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (5, 0) to (5, 2) => {
+          (4, 37) to (4, 39): (`hi`)
         }] |}]
 
 let%expect_test "heap_refinement_merge_branches" =
@@ -3332,6 +4077,58 @@ x.foo; // 3 | 4
           {refinement = 3; writes = projection at (5, 12) to (5, 17)},
           {refinement = 4; writes = projection at (7, 12) to (7, 17)}
         }] |}]
+
+let%expect_test "heap_refinement_normalize_from_and" =
+  print_ssa_test {|
+let x = {};
+if (x.foo === 3 && x.foo === 3) {
+  x.foo; // 3
+}
+|};
+    [%expect {|
+      [
+        (3, 4) to (3, 5) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (3, 19) to (3, 20) => {
+          {refinement = SentinelR foo; writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (3, 19) to (3, 24) => {
+          {refinement = 3; writes = projection at (3, 4) to (3, 9)}
+        };
+        (4, 2) to (4, 3) => {
+          {refinement = And (SentinelR foo, SentinelR foo); writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (4, 2) to (4, 7) => {
+          {refinement = And (3, 3); writes = projection at (3, 4) to (3, 9)}
+        }]
+       |}]
+
+let%expect_test "heap_refinement_normalize_from_or" =
+  print_ssa_test {|
+let x = {};
+if (x.foo === 3 || x.foo === 4) {
+  x.foo; // 3 | 4
+}
+|};
+    [%expect {|
+      [
+        (3, 4) to (3, 5) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (3, 19) to (3, 20) => {
+          {refinement = Not (SentinelR foo); writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (3, 19) to (3, 24) => {
+          {refinement = Not (3); writes = projection at (3, 4) to (3, 9)}
+        };
+        (4, 2) to (4, 3) => {
+          {refinement = Or (SentinelR foo, SentinelR foo); writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (4, 2) to (4, 7) => {
+          {refinement = Or (3, 4); writes = projection at (3, 4) to (3, 9)}
+        }]
+       |}]
 
 let%expect_test "heap_refinement_one_branch" =
   print_ssa_test {|
@@ -3391,7 +4188,7 @@ while (x.foo === 3) {
   x.foo;
   break;
 }
-x.foo; // No heap refinement here from guard, but union of === 4 and projection 
+x.foo;
 |};
     [%expect {|
       [
@@ -3416,10 +4213,6 @@ x.foo; // No heap refinement here from guard, but union of === 4 and projection
         (9, 0) to (9, 1) => {
           (3, 4) to (3, 5): (`x`),
           {refinement = SentinelR foo; writes = {refinement = SentinelR foo; writes = (3, 4) to (3, 5): (`x`)}}
-        };
-        (9, 0) to (9, 5) => {
-          projection at (4, 7) to (4, 12),
-          {refinement = 4; writes = {refinement = 3; writes = projection at (4, 7) to (4, 12)}}
         }] |}]
 
 let%expect_test "heap_refinement_while_loop_negated" =
@@ -3457,7 +4250,7 @@ while (x.foo === 3) {
   } else { throw 'error'}
   x.foo;
 }
-x.foo; // x.foo === 4 refinement should not be present
+x.foo;
 |};
     [%expect {|
       [
@@ -3479,11 +4272,14 @@ x.foo; // x.foo === 4 refinement should not be present
         (7, 2) to (7, 3) => {
           {refinement = SentinelR foo; writes = {refinement = SentinelR foo; writes = (2, 4) to (2, 5): (`x`)}}
         };
+        (7, 2) to (7, 7) => {
+          {refinement = 4; writes = {refinement = 3; writes = projection at (3, 7) to (3, 12)}}
+        };
         (9, 0) to (9, 1) => {
           {refinement = Not (SentinelR foo); writes = (2, 4) to (2, 5): (`x`),{refinement = SentinelR foo; writes = (2, 4) to (2, 5): (`x`)}}
         };
         (9, 0) to (9, 5) => {
-          {refinement = Not (3); writes = projection at (3, 7) to (3, 12)}
+          {refinement = Not (3); writes = projection at (3, 7) to (3, 12),{refinement = 4; writes = projection at (3, 7) to (3, 12)}}
         }] |}]
 
 let%expect_test "heap_refinement_write" =
@@ -3704,6 +4500,33 @@ if (global != null) {
           Global global
         }] |}]
 
+let%expect_test "this_in_object" =
+  print_ssa_test {|
+({
+  foo() {
+    this;
+  },
+  get bar() {
+    this;
+  },
+  set baz(f) {
+    this;
+  }
+});
+|};
+    [%expect {|
+      [
+        (4, 4) to (4, 8) => {
+          This(illegal)
+        };
+        (7, 4) to (7, 8) => {
+          This(illegal)
+        };
+        (10, 4) to (10, 8) => {
+          This(illegal)
+        }]
+     |}]
+
 let%expect_test "type_alias" =
   print_ssa_test {|
 type t = number;
@@ -3764,6 +4587,20 @@ var C: React.ComponentType;
         };
         (4, 7) to (4, 12) => {
           (2, 12) to (2, 17): (`React`)
+        }] |}]
+
+let%expect_test "new_type_arg" =
+  print_ssa_test {|
+type A = number;
+new Set<A>();
+|};
+    [%expect {|
+      [
+        (3, 4) to (3, 7) => {
+          Global Set
+        };
+        (3, 8) to (3, 9) => {
+          (2, 5) to (2, 6): (`A`)
         }] |}]
 
 let%expect_test "class_as_type" =
@@ -4217,7 +5054,7 @@ w;
           (4, 14) to (4, 15): (`S`)
         };
         (2, 11) to (2, 12) => {
-          (uninitialized)
+          (undeclared)
         };
         (3, 7) to (3, 8) => {
           (4, 40) to (4, 41): (`W`)
@@ -4254,19 +5091,19 @@ import typeof * as NST from ''
     [%expect {|
       [
         (2, 1) to (2, 3) => {
-          (uninitialized)
+          (undeclared)
         };
         (2, 5) to (2, 8) => {
           (12, 19) to (12, 22): (`NST`)
         };
         (3, 1) to (3, 3) => {
-          (uninitialized)
+          (undeclared)
         };
         (3, 5) to (3, 7) => {
           (8, 14) to (8, 16): (`ns`)
         };
         (4, 1) to (4, 3) => {
-          (uninitialized)
+          (undeclared)
         };
         (4, 5) to (4, 7) => {
           (9, 12) to (9, 14): (`ms`)
@@ -4337,13 +5174,13 @@ x.a;
         (2, 4) to (2, 5): (`x`)
       };
       (4, 0) to (4, 3) => {
-        (3, 2) to (3, 5): (some property)
+        number
       };
       (5, 0) to (5, 1) => {
         (2, 4) to (2, 5): (`x`)
       };
       (5, 0) to (5, 3) => {
-        (4, 0) to (4, 3): (some property)
+        number
       }] |}]
 
 let%expect_test "op_assign_heap" =
@@ -4378,10 +5215,10 @@ class C {
   [%expect {|
     [
       (2, 1) to (2, 2) => {
-        (uninitialized class) (7, 6) to (7, 7): (`C`)
+        (undeclared)
       };
       (4, 15) to (4, 16) => {
-        (uninitialized class) (7, 6) to (7, 7): (`C`)
+        (7, 6) to (7, 7): (`C`)
       };
       (5, 0) to (5, 1) => {
         (4, 12) to (4, 13): (`c`)
@@ -4399,7 +5236,7 @@ class D extends C {
   [%expect {|
     [
       (3, 7) to (3, 8) => {
-        (uninitialized class) (5, 6) to (5, 7): (`D`)
+        (5, 6) to (5, 7): (`D`)
       };
       (5, 16) to (5, 17) => {
         (2, 6) to (2, 7): (`C`)
@@ -4416,7 +5253,7 @@ C;
   [%expect {|
     [
       (2, 0) to (2, 1) => {
-        (uninitialized class) (3, 6) to (3, 7): (`C`)
+        (undeclared)
       };
       (4, 5) to (4, 6) => {
         (3, 6) to (3, 7): (`C`)
@@ -4460,8 +5297,7 @@ class C {
         (3, 9) to (3, 14): (`havoc`)
       };
       (8, 0) to (8, 1) => {
-        (uninitialized class) (10, 6) to (10, 7): (`C`),
-        (10, 6) to (10, 7): (`C`)
+        (undeclared)
       }] |}]
 
 let%expect_test "deps_recur_broken_init" =
@@ -4493,7 +5329,7 @@ class D extends C {
   [%expect {|
     [
       (3, 7) to (3, 8) => {
-        (uninitialized class) (5, 6) to (5, 7): (`D`)
+        (5, 6) to (5, 7): (`D`)
       };
       (5, 16) to (5, 17) => {
         (2, 6) to (2, 7): (`C`)
@@ -4551,6 +5387,9 @@ throw new Error();
         };
         (4, 0) to (4, 13) => {
           unreachable
+        };
+        (4, 1) to (4, 10) => {
+          unreachable
         }] |}]
 
 let%expect_test "custom_jsx_pragma" =
@@ -4575,6 +5414,21 @@ function time_to_create_some_elements_bro() {
         (5, 3) to (5, 16) => {
           Global SecondElement
         }] |}]
+
+let%expect_test "jsx_pragma_member_expr" =
+  print_ssa_test ~custom_jsx:(Some "Test.f") {|
+function Component() {}
+<Component />
+|};
+    [%expect {|
+      [
+        (1, 0) to (1, 4) => {
+          Global Test
+        };
+        (3, 1) to (3, 10) => {
+          (2, 9) to (2, 18): (`Component`)
+        }]
+       |}]
 
 let%expect_test "automatic_react_runtime" =
   print_ssa_test ~react_runtime_automatic:true {|
@@ -4627,6 +5481,9 @@ throw new Error();
         };
         (4, 0) to (4, 13) => {
           unreachable
+        };
+        (4, 1) to (4, 10) => {
+          unreachable
         }] |}]
 
 let%expect_test "switch_reread_discriminant" =
@@ -4644,8 +5501,17 @@ switch (y.x) { // Does not report a Projection
         (3, 8) to (3, 9) => {
           (2, 4) to (2, 5): (`y`)
         };
-        (7, 7) to (7, 8) => {
+        (4, 4) to (4, 22) => {
           (2, 4) to (2, 5): (`y`)
+        };
+        (5, 4) to (5, 22) => {
+          {refinement = Not (SentinelR x); writes = (2, 4) to (2, 5): (`y`)}
+        };
+        (7, 7) to (7, 8) => {
+          {refinement = Not (SentinelR x); writes = {refinement = Not (SentinelR x); writes = (2, 4) to (2, 5): (`y`)}}
+        };
+        (7, 7) to (7, 10) => {
+          {refinement = Not (TWO); writes = {refinement = Not (ONE); writes = projection at (3, 8) to (3, 11)}}
         }] |}]
 
 let%expect_test "no_refinement_write_on_indexed" =
@@ -4681,7 +5547,7 @@ switch (y) {
     [%expect {|
       [
         (3, 0) to (6, 1) => {
-          {refinement = And (Not (TWO), Not (ONE)); writes = (2, 4) to (2, 5): (`y`)}
+          {refinement = Not (TWO); writes = {refinement = Not (ONE); writes = (2, 4) to (2, 5): (`y`)}}
         };
         (3, 8) to (3, 9) => {
           (2, 4) to (2, 5): (`y`)
@@ -4700,10 +5566,16 @@ let obj = {};
     [%expect {|
       [
         (3, 2) to (8, 3) => {
-          {refinement = And (Not (b), Not (a)); writes = projection at (3, 10) to (3, 15)}
+          {refinement = Not (b); writes = {refinement = Not (a); writes = projection at (3, 10) to (3, 15)}}
         };
         (3, 10) to (3, 13) => {
           (2, 4) to (2, 7): (`obj`)
+        };
+        (4, 4) to (5, 14) => {
+          (2, 4) to (2, 7): (`obj`)
+        };
+        (6, 4) to (7, 14) => {
+          {refinement = Not (SentinelR k); writes = (2, 4) to (2, 7): (`obj`)}
         }] |}]
 
 let%expect_test "switch_exhaustive_fallthrough_return" =
@@ -4718,10 +5590,16 @@ let obj = {};
     [%expect {|
       [
         (3, 2) to (7, 3) => {
-          {refinement = And (Not (b), Not (a)); writes = projection at (3, 10) to (3, 15)}
+          {refinement = Not (b); writes = {refinement = Not (a); writes = projection at (3, 10) to (3, 15)}}
         };
         (3, 10) to (3, 13) => {
           (2, 4) to (2, 7): (`obj`)
+        };
+        (4, 4) to (4, 13) => {
+          (2, 4) to (2, 7): (`obj`)
+        };
+        (5, 4) to (6, 14) => {
+          {refinement = Not (SentinelR k); writes = (2, 4) to (2, 7): (`obj`)}
         }] |}]
 
 let%expect_test "reference_before_declaration" =
@@ -4729,14 +5607,20 @@ let%expect_test "reference_before_declaration" =
   _const;
   _let;
   _var;
-  _func;
+  _func1;
+  _func2;
+  _func3;
+  _func4;
   _class;
   E;
 
   const _const = 3;
   let _let = 3;
   var _var = 3;
-  function _func() {}
+  function _func1() {}
+  export function _func2() {}
+  export default function _func3() {}
+  declare export function _func4(): void
 class _class {}
   enum E { A }
 |};
@@ -4751,13 +5635,22 @@ class _class {}
         (4, 2) to (4, 6) => {
           (uninitialized)
         };
-        (5, 2) to (5, 7) => {
-          (12, 11) to (12, 16): (`_func`)
+        (5, 2) to (5, 8) => {
+          (15, 11) to (15, 17): (`_func1`)
         };
         (6, 2) to (6, 8) => {
-          (uninitialized class) (13, 6) to (13, 12): (`_class`)
+          (16, 18) to (16, 24): (`_func2`)
         };
-        (7, 2) to (7, 3) => {
+        (7, 2) to (7, 8) => {
+          (17, 26) to (17, 32): (`_func3`)
+        };
+        (8, 2) to (8, 8) => {
+          declared function (18, 26) to (18, 32)
+        };
+        (9, 2) to (9, 8) => {
+          (undeclared)
+        };
+        (10, 2) to (10, 3) => {
           (undeclared)
         }] |}]
 
@@ -4828,3 +5721,1145 @@ x = 3;
         (2, 15) to (2, 16) => {
           (4, 0) to (4, 1): (`x`)
         }] |}]
+
+let%expect_test "default_switch_refinement" =
+  print_ssa_test {|
+type Enum = 'ONE' | 'TWO';
+type Selection = { x: 'ONE' } | { x: 'TWO' } | { x: 'NONE' }
+
+type Rule = {
+  x: Enum,
+  y: Selection,
+}
+
+function foo(r: Rule) {
+  const x = r.x;
+  const y = r.y;
+  if (y.x === x) {
+    switch (y.x) {
+      case 'ONE': break;
+      case 'TWO': break;
+      default: (y.x: empty);
+    }
+  }
+}
+|};
+    [%expect {|
+      [
+        (6, 5) to (6, 9) => {
+          (2, 5) to (2, 9): (`Enum`)
+        };
+        (7, 5) to (7, 14) => {
+          (3, 5) to (3, 14): (`Selection`)
+        };
+        (10, 16) to (10, 20) => {
+          (5, 5) to (5, 9): (`Rule`)
+        };
+        (11, 12) to (11, 13) => {
+          (10, 13) to (10, 14): (`r`)
+        };
+        (12, 12) to (12, 13) => {
+          (10, 13) to (10, 14): (`r`)
+        };
+        (13, 6) to (13, 7) => {
+          (12, 8) to (12, 9): (`y`)
+        };
+        (13, 14) to (13, 15) => {
+          (11, 8) to (11, 9): (`x`)
+        };
+        (14, 12) to (14, 13) => {
+          {refinement = SentinelR x; writes = (12, 8) to (12, 9): (`y`)}
+        };
+        (15, 6) to (15, 24) => {
+          {refinement = SentinelR x; writes = (12, 8) to (12, 9): (`y`)}
+        };
+        (16, 6) to (16, 24) => {
+          {refinement = Not (SentinelR x); writes = {refinement = SentinelR x; writes = (12, 8) to (12, 9): (`y`)}}
+        };
+        (17, 16) to (17, 17) => {
+          {refinement = Not (SentinelR x); writes = {refinement = Not (SentinelR x); writes = {refinement = SentinelR x; writes = (12, 8) to (12, 9): (`y`)}}}
+        };
+        (17, 16) to (17, 19) => {
+          {refinement = Not (TWO); writes = {refinement = Not (ONE); writes = projection at (14, 12) to (14, 15)}}
+        }] |}]
+
+let%expect_test "prop_exists" =
+  print_ssa_test {|
+const x = {foo: 3};
+
+if (x.foo) {
+  x;
+  x.foo;
+}
+|};
+    [%expect {|
+[
+  (4, 4) to (4, 5) => {
+    (2, 6) to (2, 7): (`x`)
+  };
+  (5, 2) to (5, 3) => {
+    {refinement = PropExistsR (foo); writes = (2, 6) to (2, 7): (`x`)}
+  };
+  (6, 2) to (6, 3) => {
+    {refinement = PropExistsR (foo); writes = (2, 6) to (2, 7): (`x`)}
+  };
+  (6, 2) to (6, 7) => {
+    {refinement = Truthy; writes = projection at (4, 4) to (4, 9)}
+  }] |}]
+
+let%expect_test "try_catch_env_merging" =
+  print_ssa_test {|
+function maz2() {
+  let x: number[] = [];
+  try {
+    throw new Error(`just capturing a stack trace`);
+  } catch (e) {
+    var a: string = x[0];
+  }
+  var c: string = x[0]; // reachable
+}
+|};
+    [%expect {|
+      [
+        (5, 14) to (5, 19) => {
+          Global Error
+        };
+        (7, 20) to (7, 21) => {
+          (3, 6) to (3, 7): (`x`)
+        };
+        (9, 18) to (9, 19) => {
+          (3, 6) to (3, 7): (`x`)
+        }] |}]
+
+let%expect_test "try_catch_catch_throws" =
+  print_ssa_test {|
+function bar(response) {
+    var payload;
+    try {
+        payload = JSON.parse(response);
+    } catch (e) {
+        throw new Error('...');
+    }
+    // here via [try] only.
+    if (payload.error) {    // ok
+        // ...
+    }
+}
+|};
+    [%expect {|
+      [
+        (5, 18) to (5, 22) => {
+          Global JSON
+        };
+        (5, 29) to (5, 37) => {
+          (2, 13) to (2, 21): (`response`)
+        };
+        (7, 18) to (7, 23) => {
+          Global Error
+        };
+        (10, 8) to (10, 15) => {
+          (5, 8) to (5, 15): (`payload`)
+        }] |}]
+
+let%expect_test "try_catch_throw_in_both_then_finally" =
+  print_ssa_test {|
+function bar(response) {
+    var payload;
+    try {
+      throw new Error();
+    } catch (e) {
+      throw new Error();
+    } finally {
+      payload = 3;
+    }
+    payload; // Dead
+}
+|};
+    [%expect {|
+      [
+        (5, 16) to (5, 21) => {
+          Global Error
+        };
+        (7, 16) to (7, 21) => {
+          Global Error
+        };
+        (11, 4) to (11, 11) => {
+          unreachable
+        }] |}]
+
+let%expect_test "try_throw_catch_finally" =
+  print_ssa_test {|
+function bar(response) {
+    var payload;
+    try {
+      throw new Error();
+    } catch (e) {
+      payload = 4;
+    } finally {
+      payload;
+    }
+    payload;
+}
+|};
+    [%expect {|
+      [
+        (5, 16) to (5, 21) => {
+          Global Error
+        };
+        (9, 6) to (9, 13) => {
+          (uninitialized),
+          (7, 6) to (7, 13): (`payload`)
+        };
+        (11, 4) to (11, 11) => {
+          (7, 6) to (7, 13): (`payload`)
+        }] |}]
+
+let%expect_test "try_catch_throw_finally" =
+  print_ssa_test {|
+function bar(response) {
+    let payload;
+    try {
+      payload = 3;
+    } catch (e) {
+      payload = 4;
+      throw new Error();
+    } finally {
+      payload;
+    }
+    payload; // = 3
+}
+|};
+    [%expect {|
+      [
+        (8, 16) to (8, 21) => {
+          Global Error
+        };
+        (10, 6) to (10, 13) => {
+          (uninitialized),
+          (5, 6) to (5, 13): (`payload`),
+          (7, 6) to (7, 13): (`payload`)
+        };
+        (12, 4) to (12, 11) => {
+          (5, 6) to (5, 13): (`payload`)
+        }] |}]
+
+let%expect_test "try_catch_finally_throw" =
+  print_ssa_test {|
+function bar(response) {
+    let payload;
+    try {
+      payload = 3;
+    } catch (e) {
+      payload = 4;
+    } finally {
+      payload = 5;
+      throw new Error();
+    }
+    payload; // Dead
+}
+|};
+    [%expect {|
+      [
+        (10, 16) to (10, 21) => {
+          Global Error
+        };
+        (12, 4) to (12, 11) => {
+          unreachable
+        }] |}]
+
+let%expect_test "try_throw_catch_throw_finally_throw" =
+  print_ssa_test {|
+function bar(response) {
+    let payload;
+    try {
+      payload = 3;
+      throw new Error()
+    } catch (e) {
+      payload = 4;
+      throw new Error()
+    } finally {
+      payload = 5;
+      throw new Error();
+    }
+    payload; // Dead
+}
+|};
+    [%expect {|
+      [
+        (6, 16) to (6, 21) => {
+          Global Error
+        };
+        (9, 16) to (9, 21) => {
+          Global Error
+        };
+        (12, 16) to (12, 21) => {
+          Global Error
+        };
+        (14, 4) to (14, 11) => {
+          unreachable
+        }] |}]
+
+let%expect_test "try_throw_catch_throw_finally" =
+  print_ssa_test {|
+function bar(response) {
+    let payload;
+    try {
+      try {
+        payload = 3;
+        throw new Error()
+      } catch (e) {
+        payload = 4;
+        throw new Error()
+      } finally {
+        payload = 5;
+      }
+      payload; // Dead
+    } catch (e) {
+      payload; // = 5 | uninitialized
+    }
+}
+|};
+    [%expect {|
+      [
+        (7, 18) to (7, 23) => {
+          Global Error
+        };
+        (10, 18) to (10, 23) => {
+          Global Error
+        };
+        (14, 6) to (14, 13) => {
+          unreachable
+        };
+        (16, 6) to (16, 13) => {
+          (uninitialized),
+          (12, 8) to (12, 15): (`payload`)
+        }] |}]
+
+let%expect_test "exports_special" =
+  print_ssa_test {|
+exports.foo = 1;
+|};
+    [%expect {|
+      [
+        (2, 0) to (2, 7) => {
+          Exports
+        }] |}]
+
+let%expect_test "module_dot_export_special" =
+  print_ssa_test {|
+module.exports;
+|};
+    [%expect {|
+      [
+        (2, 0) to (2, 6) => {
+          Global module
+        };
+        (2, 0) to (2, 14) => {
+          Exports
+        }] |}]
+
+let%expect_test "exports_as_global" =
+  print_ssa_test ~lib:true {|
+exports.foo = 1;
+|};
+    [%expect {|
+      [
+        (2, 0) to (2, 7) => {
+          Global exports
+        }] |}]
+
+let%expect_test "module_dot_export_as_global" =
+  print_ssa_test ~lib:true {|
+module.exports;
+|};
+    [%expect {|
+      [
+        (2, 0) to (2, 6) => {
+          Global module
+        }] |}]
+
+let%expect_test "import_havoc" =
+  print_ssa_test {|
+import {func} from './a';
+
+function f() {
+  func();
+}
+|};
+    [%expect {|
+      [
+        (5, 2) to (5, 6) => {
+          (2, 8) to (2, 12): (`func`)
+        }] |}]
+
+let%expect_test "test27" =
+  print_ssa_test {|
+if (!x.a) { x.c; } else { x.b; }
+|};
+    [%expect {|
+      [
+        (2, 5) to (2, 6) => {
+          Global x
+        };
+        (2, 12) to (2, 13) => {
+          {refinement = Not (PropExistsR (a)); writes = Global x}
+        };
+        (2, 26) to (2, 27) => {
+          {refinement = PropExistsR (a); writes = Global x}
+        }] |}]
+
+let%expect_test "conjunct" =
+  print_ssa_test {|
+if (x.a && x.b)
+  { x.a; x.b }
+else
+  { x.a; x.b }
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global x
+        };
+        (2, 11) to (2, 12) => {
+          {refinement = PropExistsR (a); writes = Global x}
+        };
+        (3, 4) to (3, 5) => {
+          {refinement = And (PropExistsR (a), PropExistsR (b)); writes = Global x}
+        };
+        (3, 4) to (3, 7) => {
+          {refinement = Truthy; writes = projection at (2, 4) to (2, 7)}
+        };
+        (3, 9) to (3, 10) => {
+          {refinement = And (PropExistsR (a), PropExistsR (b)); writes = Global x}
+        };
+        (3, 9) to (3, 12) => {
+          {refinement = Truthy; writes = projection at (2, 11) to (2, 14)}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = Or (Not (PropExistsR (a)), Not (PropExistsR (b))); writes = Global x}
+        };
+        (5, 9) to (5, 10) => {
+          {refinement = Or (Not (PropExistsR (a)), Not (PropExistsR (b))); writes = Global x}
+        }] |}]
+
+let%expect_test "disjunct" =
+  print_ssa_test {|
+if (x.a || x.b)
+  { x.a; x.b }
+else
+  { x.a; x.b }
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global x
+        };
+        (2, 11) to (2, 12) => {
+          {refinement = Not (PropExistsR (a)); writes = Global x}
+        };
+        (3, 4) to (3, 5) => {
+          {refinement = Or (PropExistsR (a), PropExistsR (b)); writes = Global x}
+        };
+        (3, 9) to (3, 10) => {
+          {refinement = Or (PropExistsR (a), PropExistsR (b)); writes = Global x}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = And (Not (PropExistsR (a)), Not (PropExistsR (b))); writes = Global x}
+        };
+        (5, 4) to (5, 7) => {
+          {refinement = Not (Truthy); writes = projection at (2, 4) to (2, 7)}
+        };
+        (5, 9) to (5, 10) => {
+          {refinement = And (Not (PropExistsR (a)), Not (PropExistsR (b))); writes = Global x}
+        };
+        (5, 9) to (5, 12) => {
+          {refinement = Not (Truthy); writes = projection at (2, 11) to (2, 14)}
+        }] |}]
+
+let%expect_test "complex" =
+  print_ssa_test {|
+if ((x.a || x.b) && x.c)
+  { x.a; x.b; x.c }
+else
+  { x.a; x.b; x.c }
+|};
+    [%expect {|
+      [
+        (2, 5) to (2, 6) => {
+          Global x
+        };
+        (2, 12) to (2, 13) => {
+          {refinement = Not (PropExistsR (a)); writes = Global x}
+        };
+        (2, 20) to (2, 21) => {
+          {refinement = Or (PropExistsR (a), PropExistsR (b)); writes = Global x}
+        };
+        (3, 4) to (3, 5) => {
+          {refinement = And (Or (PropExistsR (a), PropExistsR (b)), PropExistsR (c)); writes = Global x}
+        };
+        (3, 9) to (3, 10) => {
+          {refinement = And (Or (PropExistsR (a), PropExistsR (b)), PropExistsR (c)); writes = Global x}
+        };
+        (3, 14) to (3, 15) => {
+          {refinement = And (Or (PropExistsR (a), PropExistsR (b)), PropExistsR (c)); writes = Global x}
+        };
+        (3, 14) to (3, 17) => {
+          {refinement = Truthy; writes = projection at (2, 20) to (2, 23)}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = Or (And (Not (PropExistsR (a)), Not (PropExistsR (b))), Not (PropExistsR (c))); writes = Global x}
+        };
+        (5, 9) to (5, 10) => {
+          {refinement = Or (And (Not (PropExistsR (a)), Not (PropExistsR (b))), Not (PropExistsR (c))); writes = Global x}
+        };
+        (5, 14) to (5, 15) => {
+          {refinement = Or (And (Not (PropExistsR (a)), Not (PropExistsR (b))), Not (PropExistsR (c))); writes = Global x}
+        }] |}]
+
+let%expect_test "changeset" =
+  print_ssa_test {|
+if (x && x.a)
+  { x.a; }
+else
+  { x.a; }
+x.a;
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global x
+        };
+        (2, 9) to (2, 10) => {
+          {refinement = Truthy; writes = Global x}
+        };
+        (3, 4) to (3, 5) => {
+          {refinement = And (Truthy, PropExistsR (a)); writes = Global x}
+        };
+        (3, 4) to (3, 7) => {
+          {refinement = Truthy; writes = projection at (2, 9) to (2, 12)}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = Or (Not (Truthy), Not (PropExistsR (a))); writes = Global x}
+        };
+        (6, 0) to (6, 1) => {
+          Global x
+        }] |}]
+
+let%expect_test "no_changeset" =
+  print_ssa_test {|
+if (x.a)
+  { x.a; }
+else
+  { x.a; }
+x.a;
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global x
+        };
+        (3, 4) to (3, 5) => {
+          {refinement = PropExistsR (a); writes = Global x}
+        };
+        (3, 4) to (3, 7) => {
+          {refinement = Truthy; writes = projection at (2, 4) to (2, 7)}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = Not (PropExistsR (a)); writes = Global x}
+        };
+        (5, 4) to (5, 7) => {
+          {refinement = Not (Truthy); writes = projection at (2, 4) to (2, 7)}
+        };
+        (6, 0) to (6, 1) => {
+          Global x
+        }] |}]
+
+let%expect_test "changeset_update" =
+  print_ssa_test {|
+if (x.a)
+  { x.a = 42 }
+x.a;
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global x
+        };
+        (3, 4) to (3, 5) => {
+          {refinement = PropExistsR (a); writes = Global x}
+        };
+        (4, 0) to (4, 1) => {
+          Global x
+        };
+        (4, 0) to (4, 3) => {
+          (3, 4) to (3, 7): (some property),
+          {refinement = Not (Truthy); writes = projection at (2, 4) to (2, 7)}
+        }] |}]
+
+let%expect_test "changeset_pre_exist" =
+  print_ssa_test {|
+if(x && x.a) {
+  if(x && x.a) {}
+  else {
+    x.a;
+  }
+  x.a;
+}
+|};
+    [%expect {|
+      [
+        (2, 3) to (2, 4) => {
+          Global x
+        };
+        (2, 8) to (2, 9) => {
+          {refinement = Truthy; writes = Global x}
+        };
+        (3, 5) to (3, 6) => {
+          {refinement = And (Truthy, PropExistsR (a)); writes = Global x}
+        };
+        (3, 10) to (3, 11) => {
+          {refinement = Truthy; writes = {refinement = And (Truthy, PropExistsR (a)); writes = Global x}}
+        };
+        (3, 10) to (3, 13) => {
+          {refinement = Truthy; writes = projection at (2, 8) to (2, 11)}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = Or (Not (Truthy), Not (PropExistsR (a))); writes = {refinement = And (Truthy, PropExistsR (a)); writes = Global x}}
+        };
+        (5, 4) to (5, 7) => {
+          {refinement = Truthy; writes = projection at (2, 8) to (2, 11)}
+        };
+        (7, 2) to (7, 3) => {
+          {refinement = And (Truthy, PropExistsR (a)); writes = Global x}
+        };
+        (7, 2) to (7, 5) => {
+          {refinement = Truthy; writes = projection at (2, 8) to (2, 11)}
+        }] |}]
+
+let%expect_test "optional_refi" =
+  print_ssa_test {|
+var x: ?Array<number> = null;
+x?.[x[0]];
+if(x?.[x[0]]) { x; }
+|};
+    [%expect {|
+      [
+        (2, 8) to (2, 13) => {
+          Global Array
+        };
+        (3, 0) to (3, 1) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (3, 4) to (3, 5) => {
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (4, 3) to (4, 4) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (4, 7) to (4, 8) => {
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`x`)}
+        };
+        (4, 16) to (4, 17) => {
+          {refinement = Not (Maybe); writes = (2, 4) to (2, 5): (`x`)}
+        }] |}]
+
+let%expect_test "optional_refi2" =
+  print_ssa_test {|
+declare var x: ?{y: {f: (mixed) => void, z?: {w: mixed => void}}};
+x?.y.f(x);
+x?.y.z?.w(x.y.z);
+(x?.y).f(x);
+|};
+    [%expect {|
+      [
+        (3, 0) to (3, 1) => {
+          (2, 12) to (2, 13): (`x`)
+        };
+        (3, 7) to (3, 8) => {
+          {refinement = And (Not (Maybe), PropExistsR (y)); writes = (2, 12) to (2, 13): (`x`)}
+        };
+        (4, 0) to (4, 1) => {
+          (2, 12) to (2, 13): (`x`)
+        };
+        (4, 10) to (4, 11) => {
+          {refinement = And (Not (Maybe), PropExistsR (y)); writes = (2, 12) to (2, 13): (`x`)}
+        };
+        (4, 10) to (4, 13) => {
+          {refinement = PropExistsR (z); writes = projection at (4, 0) to (4, 4)}
+        };
+        (4, 10) to (4, 15) => {
+          {refinement = And (Not (Maybe), PropExistsR (w)); writes = projection at (4, 0) to (4, 6)}
+        };
+        (5, 1) to (5, 2) => {
+          (2, 12) to (2, 13): (`x`)
+        };
+        (5, 9) to (5, 10) => {
+          (2, 12) to (2, 13): (`x`)
+        }] |}]
+
+let%expect_test "optional_refi3" =
+  print_ssa_test {|
+declare var x: mixed;
+if (x?.a === 42) {
+  x;
+  x.a;
+} else {
+  x;
+  x.a;
+}
+x;
+x.a;
+|};
+    [%expect {|
+      [
+        (3, 4) to (3, 5) => {
+          (2, 12) to (2, 13): (`x`)
+        };
+        (4, 2) to (4, 3) => {
+          {refinement = And (And (Not (Maybe), PropExistsR (a)), SentinelR a); writes = (2, 12) to (2, 13): (`x`)}
+        };
+        (5, 2) to (5, 3) => {
+          {refinement = And (And (Not (Maybe), PropExistsR (a)), SentinelR a); writes = (2, 12) to (2, 13): (`x`)}
+        };
+        (5, 2) to (5, 5) => {
+          {refinement = 42; writes = projection at (3, 4) to (3, 8)}
+        };
+        (7, 2) to (7, 3) => {
+          {refinement = Or (Or (Not (Not (Maybe)), Not (PropExistsR (a))), Not (SentinelR a)); writes = (2, 12) to (2, 13): (`x`)}
+        };
+        (8, 2) to (8, 3) => {
+          {refinement = Or (Or (Not (Not (Maybe)), Not (PropExistsR (a))), Not (SentinelR a)); writes = (2, 12) to (2, 13): (`x`)}
+        };
+        (10, 0) to (10, 1) => {
+          (2, 12) to (2, 13): (`x`)
+        };
+        (11, 0) to (11, 1) => {
+          (2, 12) to (2, 13): (`x`)
+        }] |}]
+
+let%expect_test "dead_code_inc" =
+  print_ssa_test {|
+function f() {
+    return;
+    x += y;
+}
+|};
+    [%expect {|
+      [
+        (4, 4) to (4, 5) => {
+          unreachable
+        };
+        (4, 9) to (4, 10) => {
+          unreachable
+        }] |}]
+
+let%expect_test "instanceof_mem" =
+  print_ssa_test {|
+if (x instanceof A.B) {
+  x;
+}
+|};
+    [%expect {|
+      [
+        (2, 4) to (2, 5) => {
+          Global x
+        };
+        (2, 17) to (2, 18) => {
+          Global A
+        };
+        (3, 2) to (3, 3) => {
+          {refinement = instanceof; writes = Global x}
+        }] |}]
+
+let%expect_test "instanceof_mem" =
+  print_ssa_test {|
+function test() {
+  try {
+    return;
+  } catch {}
+  for (let i = 0; ; i++) { }
+}
+
+|};
+    [%expect {|
+      [
+        (6, 20) to (6, 21) => {
+          (6, 11) to (6, 12): (`i`)
+        }] |}]
+
+let%expect_test "gen_next" =
+  print_ssa_test {|
+function *f() {
+  yield;
+}
+|};
+    [%expect {|
+      [
+        (3, 2) to (3, 7) => {
+          (2, 13) to (2, 13): (next)
+        }] |}]
+
+let%expect_test "emp_array" =
+  print_ssa_test {|
+var x = [];
+x;
+function f() {
+  x;
+}
+|};
+    [%expect {|
+      [
+        (3, 0) to (3, 1) => {
+          (empty array) (2, 4) to (2, 5): (`x`)
+        };
+        (5, 2) to (5, 3) => {
+          (empty array) (2, 4) to (2, 5): (`x`)
+        }] |}]
+
+let%expect_test "emp_array2" =
+  print_ssa_test {|
+var x = [];
+x = [10];
+x;
+function f() {
+  x;
+}
+|};
+    [%expect {|
+      [
+        (4, 0) to (4, 1) => {
+          (3, 0) to (3, 1): (`x`)
+        };
+        (6, 2) to (6, 3) => {
+          (3, 0) to (3, 1): (`x`),
+          (empty array) (2, 4) to (2, 5): (`x`)
+        }] |}]
+
+let%expect_test "decmod" =
+  print_ssa_test {|
+declare module F { }
+|};
+    [%expect {|
+      [
+        (2, 15) to (2, 16) => {
+          (2, 15) to (2, 16): (module `F`)
+        }] |}]
+
+let%expect_test "delete_member" =
+  print_ssa_test {|
+delete foo.bar;
+foo.bar;
+invalidation();
+foo.bar;
+foo.bar = 3;
+foo.bar;
+|};
+    [%expect {|
+      [
+        (2, 7) to (2, 10) => {
+          Global foo
+        };
+        (3, 0) to (3, 3) => {
+          Global foo
+        };
+        (3, 0) to (3, 7) => {
+          undefined
+        };
+        (4, 0) to (4, 12) => {
+          Global invalidation
+        };
+        (5, 0) to (5, 3) => {
+          Global foo
+        };
+        (6, 0) to (6, 3) => {
+          Global foo
+        };
+        (7, 0) to (7, 3) => {
+          Global foo
+        };
+        (7, 0) to (7, 7) => {
+          (6, 0) to (6, 7): (some property)
+        }] |}]
+
+let%expect_test "exclude_syms" =
+  let exclude_syms =
+    NameUtils.Set.empty
+    |> NameUtils.Set.add (Reason.OrdinaryName "foo")
+    |> NameUtils.Set.add (Reason.OrdinaryName "Bar")
+  in
+  (* Ensure that defs and writes on excluded names have no effect. *)
+  print_ssa_test ~exclude_syms {|
+let foo1 = 0
+foo1
+
+let foo = 0
+foo
+foo = 1
+foo
+foo++
+foo
+delete foo
+foo
+type Bar = string;
+declare var b1: Bar;
+declare var b2: {bar: Bar};
+|};
+    [%expect {|
+      [
+        (3, 0) to (3, 4) => {
+          (2, 4) to (2, 8): (`foo1`)
+        };
+        (6, 0) to (6, 3) => {
+          Global foo
+        };
+        (8, 0) to (8, 3) => {
+          Global foo
+        };
+        (9, 0) to (9, 3) => {
+          Global foo
+        };
+        (10, 0) to (10, 3) => {
+          Global foo
+        };
+        (11, 7) to (11, 10) => {
+          Global foo
+        };
+        (12, 0) to (12, 3) => {
+          Global foo
+        };
+        (14, 16) to (14, 19) => {
+          Global Bar
+        };
+        (15, 22) to (15, 25) => {
+          Global Bar
+        }] |}]
+
+let%expect_test "annot_this" =
+  print_ssa_test {|
+function f(this: number) {
+  this;
+}
+|};
+    [%expect {|
+      [
+        (3, 2) to (3, 6) => {
+          (2, 11) to (2, 23): (this)
+        }] |}]
+
+let%expect_test "decl_enum" =
+  print_ssa_test {|
+type Props = X
+var y = X;
+export enum X {
+  AGE,
+}
+|};
+    [%expect {|
+      [
+        (2, 13) to (2, 14) => {
+          (undeclared)
+        };
+        (3, 8) to (3, 9) => {
+          (undeclared)
+        }] |}]
+
+let%expect_test "logic_op_assign_repeat" =
+  print_ssa_test {|
+function member_op_assignment_refinement_ok(o: {p: ?number}) {
+  o.p &&= 3;
+  o.p &&= 3;
+  o.p &&= 3;
+}
+|};
+    [%expect {|
+      [
+        (3, 2) to (3, 3) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (4, 2) to (4, 3) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (4, 2) to (4, 5) => {
+          (3, 2) to (3, 5): (some property)
+        };
+        (5, 2) to (5, 3) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (5, 2) to (5, 5) => {
+          (4, 2) to (4, 5): (some property)
+        }]
+        |}]
+
+let%expect_test "logic_op_assign_repeat_existing_refi" =
+  print_ssa_test {|
+function member_op_assignment_refinement_ok(o: {p: ?number}) {
+  if (o.p === 0) {
+    o.p ??= 3;
+    o.p &&= (o.p && 3);
+    o.p ||= (o.p && 3);
+  }
+}
+|};
+    [%expect {|
+      [
+        (3, 6) to (3, 7) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (4, 4) to (4, 5) => {
+          {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}
+        };
+        (4, 4) to (4, 7) => {
+          {refinement = 0; writes = projection at (3, 6) to (3, 9)}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}
+        };
+        (5, 4) to (5, 7) => {
+          (4, 4) to (4, 7): (some property)
+        };
+        (5, 13) to (5, 14) => {
+          {refinement = PropExistsR (p); writes = {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}}
+        };
+        (5, 13) to (5, 16) => {
+          {refinement = Truthy; writes = (4, 4) to (4, 7): (some property)}
+        };
+        (6, 4) to (6, 5) => {
+          {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}
+        };
+        (6, 4) to (6, 7) => {
+          (5, 4) to (5, 7): (some property)
+        };
+        (6, 13) to (6, 14) => {
+          {refinement = Not (PropExistsR (p)); writes = {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}}
+        };
+        (6, 13) to (6, 16) => {
+          {refinement = Not (Truthy); writes = (5, 4) to (5, 7): (some property)}
+        }]
+        |}]
+
+let%expect_test "logic_op_assign_repeat" =
+  print_ssa_test {|
+function member_op_assignment_refinement_ok(o: {p: ?number}) {
+  o.p &&= 3;
+  o.p &&= 3;
+  o.p &&= 3;
+}
+|};
+    [%expect {|
+      [
+        (3, 2) to (3, 3) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (4, 2) to (4, 3) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (4, 2) to (4, 5) => {
+          (3, 2) to (3, 5): (some property)
+        };
+        (5, 2) to (5, 3) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (5, 2) to (5, 5) => {
+          (4, 2) to (4, 5): (some property)
+        }]
+        |}]
+
+let%expect_test "logic_op_assign_repeat_existing_refi" =
+  print_ssa_test {|
+function member_op_assignment_refinement_ok(o: {p: ?number}) {
+  if (o.p === 0) {
+    o.p ??= 3;
+    o.p &&= (o.p && 3);
+    o.p ||= (o.p && 3);
+  }
+}
+|};
+    [%expect {|
+      [
+        (3, 6) to (3, 7) => {
+          (2, 44) to (2, 45): (`o`)
+        };
+        (4, 4) to (4, 5) => {
+          {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}
+        };
+        (4, 4) to (4, 7) => {
+          {refinement = 0; writes = projection at (3, 6) to (3, 9)}
+        };
+        (5, 4) to (5, 5) => {
+          {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}
+        };
+        (5, 4) to (5, 7) => {
+          (4, 4) to (4, 7): (some property)
+        };
+        (5, 13) to (5, 14) => {
+          {refinement = PropExistsR (p); writes = {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}}
+        };
+        (5, 13) to (5, 16) => {
+          {refinement = Truthy; writes = (4, 4) to (4, 7): (some property)}
+        };
+        (6, 4) to (6, 5) => {
+          {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}
+        };
+        (6, 4) to (6, 7) => {
+          (5, 4) to (5, 7): (some property)
+        };
+        (6, 13) to (6, 14) => {
+          {refinement = Not (PropExistsR (p)); writes = {refinement = SentinelR p; writes = (2, 44) to (2, 45): (`o`)}}
+        };
+        (6, 13) to (6, 16) => {
+          {refinement = Not (Truthy); writes = (5, 4) to (5, 7): (some property)}
+        }]
+        |}]
+
+let%expect_test "vals" =
+  print_ssa_test {|
+declare var values: mixed;
+
+if (values.bxxxx === values.axxxx) {
+  values;
+  values.axxxx;
+  values.bxxxx;
+}
+|};
+    [%expect {|
+      [
+        (4, 4) to (4, 10) => {
+          (2, 12) to (2, 18): (`values`)
+        };
+        (4, 21) to (4, 27) => {
+          (2, 12) to (2, 18): (`values`)
+        };
+        (5, 2) to (5, 8) => {
+          {refinement = SentinelR bxxxx; writes = (2, 12) to (2, 18): (`values`)}
+        };
+        (6, 2) to (6, 8) => {
+          {refinement = SentinelR bxxxx; writes = (2, 12) to (2, 18): (`values`)}
+        };
+        (7, 2) to (7, 8) => {
+          {refinement = SentinelR bxxxx; writes = (2, 12) to (2, 18): (`values`)}
+        }]
+        |}]
+
+let%expect_test "destruct_default" =
+  print_ssa_test {|
+let x = 42;
+let y;
+
+({x = x, y = x} = {});
+([x = x, y = x] = []);
+|};
+    [%expect {|
+      [
+        (5, 6) to (5, 7) => {
+          (2, 4) to (2, 5): (`x`)
+        };
+        (5, 13) to (5, 14) => {
+          (5, 2) to (5, 3): (`x`)
+        };
+        (6, 6) to (6, 7) => {
+          (5, 2) to (5, 3): (`x`)
+        };
+        (6, 13) to (6, 14) => {
+          (6, 2) to (6, 3): (`x`)
+        }]
+        |}]

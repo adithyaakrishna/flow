@@ -8,12 +8,12 @@ Object.is(NaN, NaN);
 Object.is({}, {});
 
 var emptyObject = {};
-var emptyArray = [];
+var emptyArray: string[] = [];
 Object.is(emptyObject, emptyObject);
 Object.is(emptyArray, emptyArray);
 Object.is(emptyObject, emptyArray);
 
-var squared = x => x * x;
+var squared = (x: number) => x * x;
 Object.is(squared, squared);
 
 var a: boolean = Object.is('a', 'a');

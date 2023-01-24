@@ -10,7 +10,7 @@ var obj;
 ({n: obj.x} = {n:3});
 [obj.x] = ['foo'];
 
-function foo({p, z:[r]}) {
+function foo({p, z:[r]}: {|p: number, z: Array<number>|}) {
     a = p;
     b = z;
     c = r;
@@ -19,7 +19,7 @@ foo({p:0, z:[1,2]});
 
 [a,,b,...c] = [0,1,true,3];
 
-function bar({x, ...z}) {
+function bar({x, ...z}: {|x: string, y: number|}) {
     var o:{x: string; y: number;} = z;
 }
 bar({x:"",y:0});
@@ -67,5 +67,5 @@ var bp2_err: string = others.baseprop2; // Error: number ~> string
 
 var cp1: number = childprop1;
 var cp1_err: string = childprop1; // Error: number ~> string
-var cp2: number = others.childprop1;
+var cp2: number = others.childprop1; // Error: `childprop1` is not in `others` as it was separately destructured
 var cp2_err: string = others.childprop2; // Error: number ~> string

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,7 +7,6 @@
 
 type error_code =
   | AmbiguousObjectType
-  | BigIntUnsupported
   | CannotDelete
   | CannotImplement
   | CannotInferType
@@ -23,12 +22,14 @@ type error_code =
   | ClassObject
   | DefaultImportAccess
   | DeprecatedType
-  | DeprecatedUtility
+  | DuplicateClassMember
   | DuplicateEnumInit
   | DuplicateFlowDecl
   | DuplicateJsxDecl
+  | DuplicateJsxRuntimeDecl
   | DuplicateModule
   | DuplicateProvideModuleDecl
+  | EmptyArrayNoAnnot
   | EnumValueAsType
   | EscapedGeneric
   | ExponentialSpread
@@ -60,14 +61,18 @@ type error_code =
   | IncompatibleUse
   | IncompatibleVariance
   | InvalidCallUtil
+  | InvalidCatchParameterAnnotation
   | InvalidCharsetTypeArg
   | InvalidCompare
   | InvalidComputedProp
+  | InvalidConstructor
+  | InvalidConstructorDefinition
   | InvalidEnumAccess
   | InvalidExact
   | InvalidExhaustiveCheck
   | InvalidExport
   | InvalidExportsTypeArg
+  | InvalidExtends
   | InvalidFlowModeDecl
   | InvalidGraphQL
   | InvalidExportedAnnotation
@@ -78,6 +83,7 @@ type error_code =
   | InvalidInLhs
   | InvalidInRhs
   | InvalidJsxDecl
+  | InvalidJsxRuntimeDecl
   | InvalidLhs
   | InvalidModule
   | InvalidObjMap
@@ -87,7 +93,6 @@ type error_code =
   | InvalidPropertyTypeArg
   | InvalidPropType
   | InvalidReactConfig
-  | InvalidReactCreateClass
   | InvalidRefineTypeArg
   | InvalidTrustedTypeArg
   | InvalidTupleArity
@@ -106,7 +111,6 @@ type error_code =
   | MissingExport
   | MissingTypeArg
   | MixedImportAndRequire
-  | ToplevelLibraryImport
   | ModuleTypeConflict
   | NameAlreadyBound
   | NonConstVarExport
@@ -132,10 +136,13 @@ type error_code =
   | SketchyNullMixed
   | SketchyNullNumber
   | SketchyNullString
+  | SketchyNullBigInt
   | SketchyNumberAnd
   | Speculation
   | SpeculationAmbiguous
+  | TSSyntax
   | ThisInExportedFunction
+  | ToplevelLibraryImport
   | TypeAsValue
   | UnclearAddition
   | UnclearType
@@ -145,24 +152,29 @@ type error_code =
   | UnnecessaryOptionalChain
   | UnreachableCode
   | UnsafeAddition
+  | UnsafeArith
   | UnsafeGettersSetters
   | UnsupportedSyntax
   | UntypedImport
   | UntypedTypeImport
   | ValueAsType
   | InvalidDeclaration
+  | DefinitionCycle
+  | RecursiveDefinition
+  | LogicalAssignmentOperatorsNotSupported
+  | UnusedPromiseInAsyncScope
+  | BigIntRShift3
+  | BigIntNumCoerce
 
 let code_of_lint : Lints.lint_kind -> error_code = function
   | Lints.UntypedTypeImport -> UntypedTypeImport
   | Lints.UntypedImport -> UntypedImport
   | Lints.NonstrictImport -> NonstrictImport
   | Lints.UnclearType -> UnclearType
-  | Lints.DeprecatedType -> DeprecatedType
-  | Lints.DeprecatedUtility -> DeprecatedUtility
+  | Lints.DeprecatedType _ -> DeprecatedType
   | Lints.UnsafeGettersSetters -> UnsafeGettersSetters
   | Lints.UnnecessaryOptionalChain -> UnnecessaryOptionalChain
   | Lints.UnnecessaryInvariant -> UnnecessaryInvariant
-  | Lints.SignatureVerificationFailure -> SignatureVerificationFailure
   | Lints.ImplicitInexactObject -> ImplicitInexactObject
   | Lints.UninitializedInstanceProperty -> UninitializedInstanceProperty
   | Lints.AmbiguousObjectType -> AmbiguousObjectType
@@ -171,6 +183,7 @@ let code_of_lint : Lints.lint_kind -> error_code = function
   | Lints.SketchyNull (Lints.SketchyNullBool | Lints.SketchyNullEnumBool) -> SketchyNullBool
   | Lints.SketchyNull (Lints.SketchyNullString | Lints.SketchyNullEnumString) -> SketchyNullString
   | Lints.SketchyNull (Lints.SketchyNullNumber | Lints.SketchyNullEnumNumber) -> SketchyNullNumber
+  | Lints.SketchyNull (Lints.SketchyNullBigInt | Lints.SketchyNullEnumBigInt) -> SketchyNullBigInt
   | Lints.SketchyNull Lints.SketchyNullMixed -> SketchyNullMixed
   | Lints.DefaultImportAccess -> DefaultImportAccess
   | Lints.InvalidImportStarUse -> InvalidImportStarUse
@@ -178,10 +191,10 @@ let code_of_lint : Lints.lint_kind -> error_code = function
   | Lints.ThisInExportedFunction -> ThisInExportedFunction
   | Lints.MixedImportAndRequire -> MixedImportAndRequire
   | Lints.ExportRenamedDefault -> ExportRenamedDefault
+  | Lints.UnusedPromiseInAsyncScope -> UnusedPromiseInAsyncScope
 
 let string_of_code : error_code -> string = function
   | AmbiguousObjectType -> "ambiguous-object-type"
-  | BigIntUnsupported -> "bigint-unsupported"
   | CannotDelete -> "cannot-delete"
   | CannotImplement -> "cannot-implement"
   | CannotInferType -> "cannot-infer-type"
@@ -197,10 +210,12 @@ let string_of_code : error_code -> string = function
   | ClassObject -> "class-object-subtyping"
   | DefaultImportAccess -> "default-import-access"
   | DeprecatedType -> "deprecated-type"
-  | DeprecatedUtility -> "deprecated-utility"
+  | DuplicateClassMember -> "duplicate-class-member"
+  | EmptyArrayNoAnnot -> "missing-empty-array-annot"
   | DuplicateEnumInit -> "duplicate-enum-init"
   | DuplicateFlowDecl -> "duplicate-flow-decl"
   | DuplicateJsxDecl -> "duplicate-jsx-decl"
+  | DuplicateJsxRuntimeDecl -> "duplicate-jsx-runtime-decl"
   | DuplicateModule -> "duplicate-module"
   | DuplicateProvideModuleDecl -> "duplicate-provide-module-decl"
   | EnumValueAsType -> "enum-value-as-type"
@@ -234,9 +249,12 @@ let string_of_code : error_code -> string = function
   | IncompatibleUse -> "incompatible-use"
   | IncompatibleVariance -> "incompatible-variance"
   | InvalidCallUtil -> "invalid-call-util"
+  | InvalidCatchParameterAnnotation -> "invalid-catch-parameter-annotation"
   | InvalidCharsetTypeArg -> "invalid-charset-type-arg"
   | InvalidCompare -> "invalid-compare"
   | InvalidComputedProp -> "invalid-computed-prop"
+  | InvalidConstructor -> "invalid-constructor"
+  | InvalidConstructorDefinition -> "invalid-constructor-definition"
   | InvalidEnumAccess -> "invalid-enum-access"
   | InvalidExact -> "invalid-exact"
   | InvalidExhaustiveCheck -> "invalid-exhaustive-check"
@@ -246,12 +264,14 @@ let string_of_code : error_code -> string = function
   | InvalidGraphQL -> "invalid-graphql"
   | InvalidExportedAnnotation -> "invalid-exported-annotation"
   | InvalidExportedAnnotationRecursive -> "invalid-recursive-exported-annotation"
+  | InvalidExtends -> "invalid-extends"
   | InvalidIdx -> "invalid-idx"
   | InvalidImportStarUse -> "invalid-import-star-use"
   | InvalidImportType -> "invalid-import-type"
   | InvalidInLhs -> "invalid-in-lhs"
   | InvalidInRhs -> "invalid-in-rhs"
   | InvalidJsxDecl -> "invalid-jsx-decl"
+  | InvalidJsxRuntimeDecl -> "invalid-jsx-runtime-decl"
   | InvalidLhs -> "invalid-lhs"
   | InvalidModule -> "invalid-module"
   | InvalidObjMap -> "invalid-obj-map"
@@ -261,7 +281,6 @@ let string_of_code : error_code -> string = function
   | InvalidPropertyTypeArg -> "invalid-property-type-arg"
   | InvalidPropType -> "invalid-prop-type"
   | InvalidReactConfig -> "invalid-react-config"
-  | InvalidReactCreateClass -> "invalid-react-create-class"
   | InvalidRefineTypeArg -> "invalid-refine-type-arg"
   | InvalidTrustedTypeArg -> "invalid-trusted-type-arg"
   | InvalidTupleArity -> "invalid-tuple-arity"
@@ -304,10 +323,12 @@ let string_of_code : error_code -> string = function
   | SketchyNullBool -> "sketchy-null-bool"
   | SketchyNullMixed -> "sketchy-null-mixed"
   | SketchyNullNumber -> "sketchy-null-number"
+  | SketchyNullBigInt -> "sketchy-null-bigint"
   | SketchyNullString -> "sketchy-null-string"
   | SketchyNumberAnd -> "sketchy-number-and"
   | Speculation -> "speculation"
   | SpeculationAmbiguous -> "speculation-ambiguous"
+  | TSSyntax -> "ts-syntax"
   | ThisInExportedFunction -> "this-in-exported-function"
   | ToplevelLibraryImport -> "toplevel-library-import"
   | TypeAsValue -> "type-as-value"
@@ -319,9 +340,16 @@ let string_of_code : error_code -> string = function
   | UnnecessaryOptionalChain -> "unnecessary-optional-chain"
   | UnreachableCode -> "unreachable-code"
   | UnsafeAddition -> "unsafe-addition"
+  | UnsafeArith -> "unsafe-arithmetic"
   | UnsafeGettersSetters -> "unsafe-getters-setters"
   | UnsupportedSyntax -> "unsupported-syntax"
   | UntypedImport -> "untyped-import"
   | UntypedTypeImport -> "untyped-type-import"
   | ValueAsType -> "value-as-type"
   | InvalidDeclaration -> "invalid-declaration"
+  | DefinitionCycle -> "definition-cycle"
+  | RecursiveDefinition -> "recursive-definition"
+  | LogicalAssignmentOperatorsNotSupported -> "logical-assignment-operators-not-supported"
+  | UnusedPromiseInAsyncScope -> "unused-promise-in-async-scope"
+  | BigIntRShift3 -> "bigint-unsigned-right-shift"
+  | BigIntNumCoerce -> "bigint-num-coerce"

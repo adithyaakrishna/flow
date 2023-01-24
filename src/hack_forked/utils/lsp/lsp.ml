@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -75,15 +75,6 @@ module Location = struct
   }
 end
 
-(** Represents a location inside a resource which also wants to display a
-    friendly name to the user. *)
-module DefinitionLocation = struct
-  type t = {
-    location: Location.t;
-    title: string option;
-  }
-end
-
 module MarkupKind = struct
   type t =
     | Markdown
@@ -127,6 +118,15 @@ module TextEdit = struct
   type t = {
     range: range;  (** to insert text, use a range where start = end *)
     newText: string;  (** for delete operations, use an empty string *)
+  }
+end
+
+(** A special text edit to provide an insert and a replace operation. *)
+module InsertReplaceEdit = struct
+  type t = {
+    newText: string;  (** The string to be inserted. *)
+    insert: range;  (** The range if the insert is requested *)
+    replace: range;  (** The range if the replace is requested. *)
   }
 end
 
@@ -346,11 +346,21 @@ module CodeActionClientCapabilities = struct
   }
 end
 
+module CompletionItemTag = struct
+  type t = Deprecated [@value 1] [@@deriving enum]
+end
+
 module CompletionClientCapabilities = struct
+  type tagSupport = { valueSet: CompletionItemTag.t list }
+
   (** The client supports the following `CompletionItem` specific capabilities. *)
   type completionItem = {
     snippetSupport: bool;  (** client can do snippets as insert text *)
     preselectSupport: bool;  (** client supports the preselect property *)
+    tagSupport: tagSupport;  (** client supports the tags property *)
+    insertReplaceSupport: bool;
+        (** Client supports insert replace edit to control different behavior if
+            a completion item is inserted in the text or should replace text. *)
     labelDetailsSupport: bool;  (** proposed for 3.17 *)
   }
 
@@ -461,7 +471,10 @@ module Initialize = struct
     trace: trace;  (** the initial trace setting, default="off" *)
   }
 
-  and result = { server_capabilities: server_capabilities  (** "capabilities" over wire *) }
+  and result = {
+    server_capabilities: server_capabilities;  (** "capabilities" over wire *)
+    server_info: serverInfo;  (** name and version of the language server; "serverInfo" over wire *)
+  }
 
   and errorData = { retry: bool  (** should client retry the initialize request *) }
 
@@ -516,7 +529,12 @@ module Initialize = struct
   (* Flow LSP specific capabilities. *)
   and experimentalClientCapabilities = { snippetTextEdit: bool }
 
-  and experimentalServerCapabilities = { server_snippetTextEdit: bool }
+  and experimentalServerCapabilities = {
+    server_snippetTextEdit: bool;
+    strictCompletionOrder: bool;
+        (** true if the server strictly orders completion results. when set, the editor
+            should not do its own sorting. *)
+  }
 
   (** What capabilities the server provides *)
   and server_capabilities = {
@@ -543,6 +561,11 @@ module Initialize = struct
     server_experimental: experimentalServerCapabilities;
     typeCoverageProvider: bool;  (** nuclide-specific *)
     rageProvider: bool;  (** nuclide-specific *)
+  }
+
+  and serverInfo = {
+    name: string;
+    version: string;
   }
 
   and signatureHelpOptions = {
@@ -712,20 +735,18 @@ module DidChangeWatchedFiles = struct
   }
 end
 
-(** Goto Definition request, method="textDocument/definition" *)
+(** Go to Definition request, method="textDocument/definition" *)
 module Definition = struct
   type params = TextDocumentPositionParams.t
 
-  and result = DefinitionLocation.t list
-
-  (* wire: either a single one or an array *)
+  and result = Location.t list
 end
 
-(** Goto TypeDefinition request, method="textDocument/typeDefinition" *)
+(** Go to Type Definition request, method="textDocument/typeDefinition" *)
 module TypeDefinition = struct
   type params = TextDocumentPositionParams.t
 
-  and result = DefinitionLocation.t list
+  and result = Location.t list
 end
 
 (** The workspace/applyEdit request is sent from the server to the client to modify
@@ -876,12 +897,15 @@ module Completion = struct
     kind: completionItemKind option;  (** tells editor which icon to use *)
     detail: string option;  (** human-readable string like type/symbol info *)
     documentation: markedString list option;  (** human-readable doc-comment *)
+    (* extra annotations that tweak the rendering of a completion item. *)
+    tags: CompletionItemTag.t list option;
     preselect: bool;  (** select this item when showing *)
     sortText: string option;  (** used for sorting; if absent, uses label *)
     filterText: string option;  (** used for filtering; if absent, uses label *)
     insertText: string option;  (** used for inserting; if absent, uses label *)
     insertTextFormat: insertTextFormat option;
-    textEdits: TextEdit.t list;  (** wire: split into hd and tl *)
+    textEdit: [ `TextEdit of TextEdit.t | `InsertReplaceEdit of InsertReplaceEdit.t ] option;
+    additionalTextEdits: TextEdit.t list;
     command: Command.t option;  (** if present, is executed after completion *)
     data: Hh_json.json option;
   }

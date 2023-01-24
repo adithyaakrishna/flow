@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -35,18 +35,18 @@ let spec =
         |> wait_for_recheck_flag
         |> flag
              "--expand-json-output"
-             no_arg
+             truthy
              ~doc:"Includes an expanded version of the returned JSON type (implies --json)"
         |> flag
              "--omit-typearg-defaults"
-             no_arg
+             truthy
              ~doc:"Omit type arguments when defaults exist and match the provided type argument"
         |> flag
              "--evaluate-type-destructors"
-             no_arg
+             truthy
              ~doc:"Use the result of type destructor evaluation if available"
         |> flag "--max-depth" (required ~default:50 int) ~doc:"Maximum depth of type (default 50)"
-        |> flag "--verbose-normalizer" no_arg ~doc:"Print verbose info during normalization"
+        |> flag "--verbose-normalizer" truthy ~doc:"Print verbose info during normalization"
         |> anon "args" (required (list_of string))
       );
   }
@@ -72,10 +72,8 @@ let handle_response ~file_contents ~json ~pretty ~strip_root ~expanded response 
     in
     let json_assoc =
       ("type", JSON_String ty)
-      ::
-      ("reasons", JSON_Array [])
-      ::
-      ("loc", json_of_loc ~strip_root ~offset_table loc)
+      :: ("reasons", JSON_Array [])
+      :: ("loc", json_of_loc ~strip_root ~offset_table loc)
       :: Errors.deprecated_json_props_of_loc ~strip_root loc
     in
     let json_assoc =

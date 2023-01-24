@@ -7,7 +7,7 @@
 //////////////////////////////////////////////////
 
 // Promise constructor resolve(T) -> then(T)
-new Promise(function(resolve, reject) {
+new Promise<number>(function(resolve, reject) {
   resolve(0);
 }).then(function(num) {
   var a: number = num;
@@ -17,7 +17,7 @@ new Promise(function(resolve, reject) {
 });
 
 // Promise constructor with arrow function resolve(T) -> then(T)
-new Promise((resolve, reject) => resolve(0))
+new Promise<number>((resolve, reject) => resolve(0))
   .then(function(num) {
     var a: number = num;
 
@@ -26,7 +26,7 @@ new Promise((resolve, reject) => resolve(0))
   });
 
 // Promise constructor resolve(Promise<T>) -> then(T)
-new Promise(function(resolve, reject) {
+new Promise<number>(function(resolve, reject) {
   resolve(new Promise(function(resolve, reject) {
     resolve(0);
   }));
@@ -36,7 +36,7 @@ new Promise(function(resolve, reject) {
 });
 
 // Promise constructor resolve(Promise<Promise<T>>) -> then(T)
-new Promise(function(resolve, reject) {
+new Promise<number>(function(resolve, reject) {
   resolve(new Promise(function(resolve, reject) {
     resolve(new Promise(function(resolve, reject) {
       resolve(0);
@@ -48,7 +48,7 @@ new Promise(function(resolve, reject) {
 });
 
 // Promise constructor resolve(T); resolve(U); -> then(T|U)
-new Promise(function(resolve, reject) {
+new Promise<number | string>(function(resolve, reject) {
   if (Math.random()) {
     resolve(42);
   } else {
@@ -68,7 +68,7 @@ new Promise(function(resolve, reject) {
 /////////////////////////////////////////////////
 
 // TODO: Promise constructor reject(T) -> catch(T)
-new Promise(function(resolve, reject) {
+new Promise<empty>(function(resolve, reject) {
   reject(0);
 }).catch(function(num) {
   var a: number = num;
@@ -78,8 +78,8 @@ new Promise(function(resolve, reject) {
 });
 
 // TODO: Promise constructor reject(Promise<T>) ~> catch(Promise<T>)
-new Promise(function(resolve, reject) {
-  reject(new Promise(function(resolve, reject) {
+new Promise<empty>(function(resolve, reject) {
+  reject(new Promise<empty>(function(resolve, reject) {
     reject(0);
   }));
 }).catch(function(num) {
@@ -90,7 +90,7 @@ new Promise(function(resolve, reject) {
 });
 
 // TODO: Promise constructor reject(T); reject(U); -> then(T|U)
-new Promise(function(resolve, reject) {
+new Promise<empty>(function(resolve, reject) {
   if (Math.random()) {
     reject(42);
   } else {
@@ -134,7 +134,7 @@ Promise.resolve(Promise.resolve(Promise.resolve(0))).then(function(num) {
 ////////////////////////////
 
 // TODO: Promise.reject(T) -> catch(T)
-Promise.reject(0).catch(function(num) {
+Promise.reject<number>(0).catch(function(num) {
   var a: number = num;
 
   // TODO
@@ -142,7 +142,7 @@ Promise.reject(0).catch(function(num) {
 });
 
 // TODO: Promise.reject(Promise<T>) -> catch(Promise<T>)
-Promise.reject(Promise.resolve(0)).then(function(num) {
+Promise.reject<Promise<number>>(Promise.resolve(0)).then(function(num) {
   var a: Promise<number> = num;
 
   // TODO
@@ -194,24 +194,24 @@ Promise.resolve(0)
 ///////////////////////////////////
 
 // rejectedPromise.catch():U -> then(U)
-Promise.reject(0)
-  .catch(function(num) { return 'asdf'; })
+Promise.reject<string>(0)
+  .catch<string>(function(num) { return 'asdf'; })
   .then(function(str) {
     var a: string = str;
     var b: number = str; // Error: string ~> number
   });
 
 // rejectedPromise.catch():Promise<U> -> then(U)
-Promise.reject(0)
-  .catch(function(num) { return Promise.resolve('asdf'); })
+Promise.reject<string>(0)
+  .catch<string>(function(num) { return Promise.resolve('asdf'); })
   .then(function(str) {
     var a: string = str;
     var b: number = str; // Error: string ~> number
   });
 
 // rejectedPromise.catch():Promise<Promise<U>> -> then(U)
-Promise.reject(0)
-  .catch(function(num) { return Promise.resolve(Promise.resolve('asdf')); })
+Promise.reject<string>(0)
+  .catch<string>(function(num) { return Promise.resolve(Promise.resolve('asdf')); })
   .then(function(str) {
     var a: string = str;
     var b: number = str; // Error: string ~> number

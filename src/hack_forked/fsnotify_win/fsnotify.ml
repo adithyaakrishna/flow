@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -20,10 +20,10 @@
 
 *)
 
-(* Abstract data type for notifier context. *)
+(** Abstract data type for notifier context. *)
 type fsenv
 
-(* Abstract data type for a watching thread. *)
+(** Abstract data type for a watching thread. *)
 type watcher_id
 
 module SSet = Flow_set.Make (String)
@@ -31,14 +31,12 @@ module SSet = Flow_set.Make (String)
 type env = {
   fsenv: fsenv;
   fd: Unix.file_descr;
-  watchers: watcher_id list;
   mutable wpaths: SSet.t;
 }
 
 type event = {
-  path: string;
-  (* The full path for the file/directory that changed *)
-  wpath: string; (* The watched path that triggered this event *)
+  path: string;  (** The full path for the file/directory that changed *)
+  wpath: string;  (** The watched path that triggered this event *)
 }
 
 (** Stubs *)
@@ -62,8 +60,12 @@ let init roots =
   Unix.set_close_on_exec in_fd;
   Unix.set_close_on_exec out_fd;
   let fsenv = raw_init out_fd in
-  let watchers = Base.List.map roots ~f:(raw_add_watch fsenv) in
-  { fsenv; fd = in_fd; watchers; wpaths = SSet.empty }
+  Base.List.iter roots ~f:(fun root ->
+      try ignore (raw_add_watch fsenv root) with
+      | Unix.Unix_error (Unix.ENOENT, _, _) ->
+        prerr_endline ("Not watching root \"" ^ root ^ "\": file not found.")
+  );
+  { fsenv; fd = in_fd; wpaths = SSet.empty }
 
 (** Faked add_watch, as for `fsnotify_darwin`. *)
 
@@ -101,11 +103,7 @@ let read_events env =
   (* read pop only one char from pipe, in order never to block. *)
   let buf = Bytes.create 1 in
   ignore (Unix.read env.fd buf 0 1 : int);
-
-  (* prefix the root path *)
-  Base.List.map (raw_read_events env.fsenv) ~f:(fun ev ->
-      { ev with path = Filename.concat ev.wpath ev.path }
-  )
+  raw_read_events env.fsenv
 
 let select env ?(read_fdl = []) ?(write_fdl = []) ~timeout callback =
   let callback () = callback (read_events env) in

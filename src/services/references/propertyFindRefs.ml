@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -130,7 +130,7 @@ let property_find_refs_in_file ~reader options ast_info file_key def_info name =
     let literal_prop_refs_result =
       (* Lazy to avoid this computation if there are no potentially-relevant object literals to
        * examine *)
-      let prop_loc_map = lazy (LiteralToPropLoc.make ast name) in
+      let prop_loc_map = lazy (LiteralToPropLoc.make ast ~prop_name:name) in
       let get_prop_loc_if_relevant (obj_aloc, into_type) =
         type_matches_locs ~reader cx into_type def_info name >>| function
         | false -> None
@@ -147,8 +147,8 @@ let property_find_refs_in_file ~reader options ast_info file_key def_info name =
     >>| ( @ ) literal_prop_refs_result
   )
 
-let find_local_refs ~reader ~options ~env ~profiling file_key ast_info loc =
-  match get_def_info ~reader ~options env profiling file_key ast_info loc with
+let find_local_refs ~reader ~options ~profiling file_key ast_info loc =
+  match get_def_info ~reader ~options profiling file_key ast_info loc with
   | Error _ as err -> err
   | Ok None -> Ok None
   | Ok (Some (def_info, name)) ->

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -34,6 +34,11 @@ let wrap exn =
 let unwrap { exn; backtrace = _ } = exn
 
 let reraise { exn; backtrace } = Printexc.raise_with_backtrace exn backtrace
+
+(** [raise_with_backtrace exn t] raises [exn] with the backtrace from [t].
+    This could be useful for reraising an exception with a new message,
+    without changing the backtrace. *)
+let raise_with_backtrace exn { backtrace; _ } = reraise { exn; backtrace }
 
 (* Converts back to an `exn` with the right backtrace. Generally, avoid this in favor of
    the helpers in this module, like `to_string` and `get_backtrace_string`. *)
@@ -135,6 +140,8 @@ let get_full_backtrace_string n { exn = _; backtrace } =
   (* skip `get_full_backtrace_string` and `internal_get_full_backtrace_slots` *)
   let slots = internal_get_full_backtrace_slots ~skip:2 n backtrace in
   backtrace_slots_to_string slots
+
+let register_printer = Printexc.register_printer
 
 let record_backtrace = Printexc.record_backtrace
 

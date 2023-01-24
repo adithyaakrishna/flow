@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,6 +10,8 @@ type compressed = {
   compressed_size: int;
   uncompressed_size: int;
 }
+[@@warning "-69"]
+(* field used in external code *)
 
 external marshal_and_compress : 'a -> compressed = "marshal_and_compress_stub"
 

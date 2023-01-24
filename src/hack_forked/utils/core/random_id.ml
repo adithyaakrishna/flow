@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,7 +16,7 @@ let short_string_with_alphabet alphabet =
   let cs = ref [] in
   while !r > 0 do
     let c = alphabet.[!r mod String.length alphabet] in
-    cs := String.make 1 c :: !cs;
+    cs := Base.String.of_char c :: !cs;
     r := !r lsr 6
   done;
   String.concat "" !cs

@@ -1,16 +1,17 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
+
+module ALocFuzzyMap = Loc_collections.ALocFuzzyMap
 
 (* First up, a model for flow and unify actions that are deferred during
    speculative matching (and possibly fired afterwards). *)
 type action =
   | FlowAction of Type.t * Type.use_t
   | UnifyAction of Type.use_op * Type.t * Type.t
-  | UnsealedObjectProperty of Type.Properties.id * Reason.name * Type.Property.t
   | ErrorAction of Error_message.t
 
 (* Action extended with a bit that determines whether the action is "benign."
@@ -37,6 +38,10 @@ type case = {
   case_id: int;
   mutable unresolved: ISet.t;
   mutable actions: extended_action list;
+  mutable implicit_instantiation_post_inference_checks: Implicit_instantiation_check.t list;
+  mutable implicit_instantiation_results: (Type.t * Subst_name.t) list ALocFuzzyMap.t;
+  lhs_t: Type.t;
+  use_t: Type.use_t;
 }
 
 (* Actions that involve some "ignored" unresolved tvars are considered

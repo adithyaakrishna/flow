@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -489,6 +489,8 @@ let statement_add_comments
     | Debugger { Debugger.comments } -> Debugger { Debugger.comments = merge_comments comments }
     | DeclareClass ({ DeclareClass.comments; _ } as s) ->
       DeclareClass { s with DeclareClass.comments = merge_comments comments }
+    | DeclareEnum ({ EnumDeclaration.comments; _ } as s) ->
+      DeclareEnum { s with EnumDeclaration.comments = merge_comments comments }
     | DeclareExportDeclaration ({ DeclareExportDeclaration.comments; _ } as s) ->
       DeclareExportDeclaration
         { s with DeclareExportDeclaration.comments = merge_comments comments }

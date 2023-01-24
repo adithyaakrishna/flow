@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -13,7 +13,7 @@ const {join} = require('path');
 const {collateLocs, getUnusedSuppressionErrors} = require('../errors');
 const getAst = require('./getAst').default;
 
-const {readFile, writeFile} = require('../utils/async');
+const {readFile, writeFile} = require('fs').promises;
 const {removeUnusedErrorSuppressionFromText} = require('./commentMutator');
 
 import type {Args} from './remove-commentsCommand';
@@ -35,7 +35,7 @@ async function removeUnusedErrorSuppressions(
   errors: Array<FlowLoc>,
   flowBinPath: string,
 ): Promise<void> {
-  const contentsString = await readFile(filename);
+  const contentsString = await readFile(filename, 'utf8');
   const contents = await removeUnusedErrorSuppressionsFromText(
     Buffer.from(contentsString, 'utf8'),
     errors,
@@ -84,7 +84,7 @@ async function removeUnusedErrorSuppressionsFromText(
 /* A flowtest is a file that ends in -flowtest.js or which is in a directory
  * named __flowtests__
  */
-function isFlowtest(filename) {
+function isFlowtest(filename: string) {
   return (
     filename.match(/-flowtest\.js$/) ||
     filename.match(/[/\\]__flowtests__[/\\]/)

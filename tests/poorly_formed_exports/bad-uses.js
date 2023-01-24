@@ -20,7 +20,7 @@ addsAPropToExports(module); // ERROR
 
 function h() {
   exports.foo; // ERROR
-  module.exports.foo; // ERROR
+  module.exports.foo;
   exports['foo'] = 42; // ERROR
   exports.foo = 5; // ERROR
 }
@@ -40,11 +40,11 @@ function g() {
 }
 
 function f() {
-  let module = {};
+  let module: {[string]: {[string]: mixed}} = {};
   let exports = {};
   // These should all be fine, since `module` and `exports` have been shadowed.
-  module.exports = {}; // OK
-  exports = {}; // OK
+  module.exports = ({}: {[string]: mixed}); // OK
+  exports = ({}: {[string]: mixed}); // OK
   exports.foo = 42; // OK
   module.exports.foo = 42; // OK
   addsAPropToExports(module); // OK

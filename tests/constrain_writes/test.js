@@ -26,18 +26,11 @@ function ff(x: number) {
   x = "Hello"; // only regular failure
 }
 
-
-function ff2(x) {
-  x = "Hello";
-  x = 42; // no failure, parameters don't have post-inference checks
-}
-ff2(true); // give x a lb
-
 function pos() {
   class X {foo: number;};
   const x = new X;
   var a : string;
-  var {...a} = x; // no post-check here
+  ({...a} = x);
 }
 
 function destruct() {
@@ -87,4 +80,11 @@ function decl() {
 
   x = "hi";
   f = "hi";
+}
+
+function interference_post_inference_check() {
+  // A regression test to check that post inference checks do not interfere with each other.
+  let x = []; // error
+  x = [3];
+  x.length === 1 ? 1 : 2;
 }

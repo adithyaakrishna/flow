@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,12 +10,12 @@ module Ssa_api = Ssa_api.With_ALoc
 module Provider_api = Provider_api.ALocProviders
 open Loc_collections
 
-let declaration_locs_of_constrained_write_error cx error =
+let declaration_locs_of_constrained_write_error cx ~arrays_only error =
   let tables = Context.aloc_tables cx in
   let rec find_constrained_writes op =
     let open Type in
     match op with
-    | Frame (ConstrainedAssignment { declaration; _ }, op) ->
+    | Frame (ConstrainedAssignment { declaration; array; _ }, op) when (not arrays_only) || array ->
       LocSet.add (ALoc.to_loc_with_tables tables declaration) (find_constrained_writes op)
     | Op (Speculation op)
     | Frame (_, op) ->
@@ -26,11 +26,10 @@ let declaration_locs_of_constrained_write_error cx error =
   let use_op_opt = Error_message.util_use_op_of_msg None (fun op _ -> Some op) msg in
   Base.Option.value_map ~f:find_constrained_writes ~default:LocSet.empty use_op_opt
 
-(* An assignment A to a variable X is trivially extractable into a const if:
+(** An assignment A to a variable X is trivially extractable into a const if:
   1. A is not a provider for X (if it is a provider, it may be used to constrain writes to X later on)
   2. All reads of X either reach *only* A, and no other assignments, OR they reach a set of writes that do not
-     include A.
-*)
+     include A. *)
 let is_extractable_assignment cx relevant_declarations =
   let { Loc_env.var_info = { Env_api.ssa_values; scopes; providers; _ }; _ } =
     Context.environment cx
@@ -65,8 +64,8 @@ let is_extractable_assignment cx relevant_declarations =
       in
       let is_provider =
         Provider_api.providers_of_def providers loc
-        |> Base.Option.value_map ~default:false ~f:(fun (_, providers) ->
-               Base.List.exists providers ~f:(fun r ->
+        |> Base.Option.value_map ~default:false ~f:(fun { Provider_api.providers; _ } ->
+               Base.List.exists providers ~f:(fun { Provider_api.reason = r; _ } ->
                    Reason.poly_loc_of_reason r |> ALoc.concretize_equal tables loc
                )
            )

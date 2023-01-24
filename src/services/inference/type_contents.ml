@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -11,15 +11,6 @@ open Types_js_types
 type parse_contents_return =
   | Parsed of parse_artifacts  (** Note that there may be parse errors *)
   | Skipped
-  | File_sig_error of File_sig.With_Loc.error
-      (** These errors are currently fatal to the parse. It would be nice to make them not fatal, at
-       * which point this whole type could be replaced by just `parse_artifacts option` *)
-  | Docblock_errors of Parsing_service_js.docblock_error list
-      (** Normally these are included in `Parse_artifacts` since they do not prevent us from
-       * parsing. However, for consistency with `flow status` and `flow check`, we return docblock
-       * errors instead of the file sig error if we encounter a file sig error but have previously
-       * encountered docblock errors. We could eliminate this case by changing the behavior of the
-       * main error-checking code, or by making file sig errors non-fatal to the parse. *)
 
 (* This puts a nicer interface for do_parse. At some point, `do_parse` itself should be
  * rethought, at which point `parse_contents` could call it directly without confusion. This would
@@ -36,37 +27,29 @@ let do_parse_wrapper ~options filename contents =
   let (docblock_errors, docblock) =
     Parsing_service_js.parse_docblock ~max_tokens filename contents
   in
-  let parse_options =
-    Parsing_service_js.make_parse_options ~fail:false ~types_mode docblock options
-  in
-  let parse_result = Parsing_service_js.do_parse ~info:docblock ~parse_options contents filename in
+  let parse_options = Parsing_service_js.make_parse_options ~types_mode docblock options in
+  let parse_result = Parsing_service_js.do_parse ~parse_options ~info:docblock contents filename in
   match parse_result with
-  | Parsing_service_js.Parse_ok { ast; file_sig; tolerable_errors; parse_errors; _ } ->
+  | Parsing_service_js.Parse_ok { ast; file_sig; tolerable_errors; _ } ->
     Parsed
-      (Parse_artifacts { docblock; docblock_errors; ast; file_sig; tolerable_errors; parse_errors })
-  | Parsing_service_js.Parse_fail fails ->
-    let errors =
-      match fails with
-      | Parsing_service_js.Parse_error _ ->
-        (* We pass `~fail:false` to `do_parse` above, so we should never reach this case. *)
-        failwith "Unexpectedly encountered Parse_fail with parse errors"
-      | Parsing_service_js.Docblock_errors _ ->
-        (* Parsing_service_js.do_parse cannot create these. They are only created by another
-         * caller of do_parse. It would be nice to prove this fact via the type system. *)
-        failwith "Unexpectedly encountered docblock errors"
-      | Parsing_service_js.File_sig_error err ->
-        begin
-          match docblock_errors with
-          | [] ->
-            (* Even with `~fail:false`, `do_parse` cannot currently recover from file sig errors, so
-               * we must handle them here. *)
-            File_sig_error err
-          | _ ->
-            (* See comments on parse_contents_return type for an explanation of this behavior *)
-            Docblock_errors docblock_errors
-        end
-    in
-    errors
+      (Parse_artifacts
+         { docblock; docblock_errors; ast; file_sig; tolerable_errors; parse_errors = [] }
+      )
+  | Parsing_service_js.Parse_recovered { ast; file_sig; tolerable_errors; parse_errors; _ } ->
+    Parsed
+      (Parse_artifacts
+         {
+           docblock;
+           docblock_errors;
+           ast;
+           file_sig;
+           tolerable_errors;
+           parse_errors = Nel.to_list parse_errors;
+         }
+      )
+  | Parsing_service_js.Parse_exn exn ->
+    (* we have historically just blown up here, so we will continue to do so. *)
+    Exception.reraise exn
   | Parsing_service_js.(Parse_skip (Skip_non_flow_file | Skip_resource_file | Skip_package_json _))
     ->
     (* This happens when a non-source file is queried, such as a json file *)
@@ -94,13 +77,6 @@ let parse_contents ~options ~profiling contents filename =
         in
         (Some parse_artifacts, errors)
       | Skipped -> (None, Flow_error.ErrorSet.empty)
-      | Docblock_errors errs ->
-        let errs = Inference_utils.set_of_docblock_errors ~source_file:filename errs in
-        (None, errs)
-      | File_sig_error err ->
-        let err = Inference_utils.error_of_file_sig_error ~source_file:filename err in
-        let errs = Flow_error.ErrorSet.singleton err in
-        (None, errs)
   )
 
 let errors_of_file_artifacts ~options ~env ~loc_of_aloc ~filename ~file_artifacts =
@@ -112,13 +88,16 @@ let errors_of_file_artifacts ~options ~env ~loc_of_aloc ~filename ~file_artifact
     file_artifacts
   in
   let errors = Context.errors cx in
-  let local_errors =
+  let errors =
     tolerable_errors
     |> File_sig.abstractify_tolerable_errors
     |> Inference_utils.set_of_file_sig_tolerable_errors ~source_file:filename
+    |> Flow_error.ErrorSet.union errors
   in
-  let docblock_errors =
-    Inference_utils.set_of_docblock_errors ~source_file:filename docblock_errors
+  let errors =
+    docblock_errors
+    |> Inference_utils.set_of_docblock_errors ~source_file:filename
+    |> Flow_error.ErrorSet.union errors
   in
   (* Suppressions for errors in this file can come from dependencies *)
   let suppressions =
@@ -140,11 +119,7 @@ let errors_of_file_artifacts ~options ~env ~loc_of_aloc ~filename ~file_artifact
       severity_cover
   in
   let errors =
-    errors
-    |> Flow_error.ErrorSet.union local_errors
-    |> Flow_error.ErrorSet.union docblock_errors
-    |> Flow_error.concretize_errors loc_of_aloc
-    |> Flow_error.make_errors_printable
+    errors |> Flow_error.concretize_errors loc_of_aloc |> Flow_error.make_errors_printable
   in
   let warnings =
     warnings |> Flow_error.concretize_errors loc_of_aloc |> Flow_error.make_errors_printable
@@ -196,54 +171,46 @@ let printable_errors_of_file_artifacts_result ~options ~env filename result =
 
 (** Resolves dependencies of [file_sig] specifically for checking contents, rather than
     for persisting in the heap. Notably, does not error if a required module is not found. *)
-let resolved_requires_of_contents ~options ~reader ~env file file_sig =
-  let audit = Expensive.warn in
-  let reader = Abstract_state_reader.State_reader reader in
+let unchecked_dependencies ~options ~reader file file_sig =
   let node_modules_containers = !Files.node_modules_containers in
   let resolved_requires =
     let require_loc_map = File_sig.With_Loc.(require_loc_map file_sig.module_sig) in
+    let reader = Abstract_state_reader.State_reader reader in
     SMap.fold
-      (fun r locs resolved_rs ->
-        let loc = Nel.hd locs |> ALoc.of_loc in
-        let resolved_r =
-          Module_js.imported_module ~options ~reader ~node_modules_containers file loc r
-        in
-        Modulename.Set.add resolved_r resolved_rs)
+      (fun r _locs acc ->
+        match Module_js.imported_module ~options ~reader ~node_modules_containers file r with
+        | Ok m -> Modulename.Set.add m acc
+        | Error _ -> acc)
       require_loc_map
       Modulename.Set.empty
   in
-  let is_checked f =
-    FilenameSet.mem f env.ServerEnv.files && Module_js.checked_file ~reader f ~audit
+  let unchecked_dependency m =
+    let ( let* ) = Option.bind in
+    let* file = Parsing_heaps.Reader.get_provider ~reader m in
+    let* parse = Parsing_heaps.Reader.get_typed_parse ~reader file in
+    match Parsing_heaps.Reader.get_leader ~reader parse with
+    | None -> Some (Parsing_heaps.read_file_key file)
+    | Some _ -> None
   in
   Modulename.Set.fold
     (fun m acc ->
-      match Module_heaps.Reader_dispatcher.get_file ~reader m ~audit with
-      | Some f ->
-        if is_checked f then
-          FilenameSet.add f acc
-        else
-          acc
-      | None -> acc) (* complain elsewhere about required module not found *)
+      match unchecked_dependency m with
+      | Some f -> FilenameSet.add f acc
+      | None -> acc)
     resolved_requires
     FilenameSet.empty
 
-(** When checking contents, ensure that dependencies are checked. Might have more
-    general utility. *)
-let ensure_checked_dependencies ~options ~reader ~env file file_sig =
-  let resolved_requires = resolved_requires_of_contents ~options ~reader ~env file file_sig in
-  let unchecked_dependencies =
-    FilenameSet.filter
-      (fun f -> not (CheckedSet.mem f env.ServerEnv.checked_files))
-      resolved_requires
-  in
+(** Ensures that dependencies are checked; schedules them to be checked and cancels the
+    Lwt thread to abort the command if not.
 
-  (* Often, all dependencies have already been checked, so input contains no unchecked files.
-   * In that case, let's short-circuit typecheck, since a no-op typecheck still takes time on
-   * large repos *)
-  if FilenameSet.is_empty unchecked_dependencies then
+    This is necessary because [merge_contents] needs all of the dep type sigs to be
+    available, but since it doesn't use workers it can't go parse everything itself. *)
+let ensure_checked_dependencies ~options ~reader file file_sig =
+  let unchecked_deps = unchecked_dependencies ~options ~reader file file_sig in
+  if FilenameSet.is_empty unchecked_deps then
     ()
   else
-    let n = FilenameSet.cardinal unchecked_dependencies in
+    let n = FilenameSet.cardinal unchecked_deps in
     Hh_logger.info "Canceling command due to %d unchecked dependencies" n;
     let _ =
       FilenameSet.fold
@@ -258,27 +225,26 @@ let ensure_checked_dependencies ~options ~reader ~env file file_sig =
           else
             ();
           i + 1)
-        unchecked_dependencies
+        unchecked_deps
         1
     in
-    let reason = LspProt.Unchecked_dependencies { filename = File_key.to_string file } in
-    ServerMonitorListenerState.push_dependencies_to_prioritize ~reason unchecked_dependencies;
+    ServerMonitorListenerState.push_dependencies_to_prioritize unchecked_deps;
     raise Lwt.Canceled
 
 (** TODO: handle case when file+contents don't agree with file system state **)
-let merge_contents ~options ~env ~profiling ~reader filename info ast file_sig =
+let merge_contents ~options ~profiling ~reader filename info ast file_sig =
   with_timer ~options "MergeContents" profiling (fun () ->
-      let () = ensure_checked_dependencies ~options ~reader ~env filename file_sig in
+      let () = ensure_checked_dependencies ~options ~reader filename file_sig in
       Merge_service.check_contents_context ~reader options filename ast info file_sig
   )
 
-let type_parse_artifacts ~options ~env ~profiling filename intermediate_result =
+let type_parse_artifacts ~options ~profiling filename intermediate_result =
   match intermediate_result with
   | (Some (Parse_artifacts { docblock; ast; file_sig; _ } as parse_artifacts), _errs) ->
     (* We assume that callers have already inspected the parse errors, so we discard them here. *)
     let reader = State_reader.create () in
     let (cx, typed_ast) =
-      merge_contents ~options ~env ~profiling ~reader filename docblock ast file_sig
+      merge_contents ~options ~profiling ~reader filename docblock ast file_sig
     in
     Ok (parse_artifacts, Typecheck_artifacts { cx; typed_ast })
   | (None, errs) -> Error errs

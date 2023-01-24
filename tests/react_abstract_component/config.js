@@ -28,7 +28,7 @@ function HOC2<Props: {}, DefaultProps: {}, Instance>(
 }
 
 class Component extends React.Component<{foo: number, bar: number}> {
-  static defaultProps = {foo: 3};
+  static defaultProps: {foo: number} = {foo: 3};
 }
 
 const WrappedComponent = HOC(Component);
@@ -38,6 +38,5 @@ const _a = <WrappedComponent foo={3} bar={3} />;
 const _b = <WrappedComponent bar={3} />;
 const _c = <WrappedComponent foo={3} />; // Error missing bar
 
-const WrappedComponent2 = HOC2(Component);
-// KP: Props in HOC2 only receives upper bounds, so the config is never calculated
-const _f = <WrappedComponent2 />;
+const WrappedComponent2 = HOC2<{foo: number, bar: number}, {foo: number}, _>(Component);
+const _f = <WrappedComponent2 />; // Error missing bar

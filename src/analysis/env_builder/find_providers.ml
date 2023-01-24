@@ -1,20 +1,30 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 open Flow_ast_mapper
-open Utils_js
 module Ast = Flow_ast
+
+exception ImpossibleState of string
 
 (* This describes the state of a variable AFTER the provider analysis, suitable for external consumption *)
 type state =
-  | AnnotatedVar
+  | AnnotatedVar of {
+      contextual: bool;
+      predicate: bool; (* true iff this annotation corresponds to a predicate function (%checks) *)
+    }
   | InitializedVar
+  | ArrayInitializedVar
+  | EmptyArrayInitializedVar
   | NullInitializedVar
   | UninitializedVar
+
+type write_kind =
+  | EmptyArray
+  | Ordinary
 
 module FindProviders (L : Loc_sig.S) : sig
   module Id : sig
@@ -28,9 +38,15 @@ module FindProviders (L : Loc_sig.S) : sig
     declare_locs: L.LSet.t;
     def_locs: L.LSet.t;
     provider_locs: 'locs;
+    binding_kind: Bindings.kind;
   }
 
-  type entry = (L.LSet.t, state) base_entry
+  type providers = {
+    writes: write_kind L.LMap.t;
+    array_writes: L.LSet.t;
+  }
+
+  type entry = (providers, state) base_entry
 
   type env
 
@@ -42,9 +58,7 @@ module FindProviders (L : Loc_sig.S) : sig
 
   val all_entries : env -> EntrySet.t
 
-  val get_providers_for_toplevel_var : string -> env -> L.LSet.t option
-
-  val print_full_env : env -> string
+  val get_providers_for_toplevel_var : string -> env -> write_kind L.LMap.t option
 end = struct
   module Id : sig
     type t
@@ -70,7 +84,10 @@ end = struct
      initializers were discovered. They will be simplified later on. *)
   type intermediate_state =
     (* Annotations are always on declarations, so they don't need depth *)
-    | Annotated
+    | Annotated of {
+        predicate: bool;
+        contextual: bool;
+      }
     (* number of var scope levels deep that the initializer, and null initializer if applicable, was found from the
        scope in which it was declared--lets us prioritize initializers from nearer
        scopes even if they're lexically later in the program.
@@ -82,14 +99,22 @@ end = struct
     | Initialized of int * int option
     (* For variables that have, so far, only been initialized to null, this records the depth of the assignment *)
     | NullInitialized of int
+    | EmptyArrInitialized
+    | ArrInitialized of int
     | Uninitialized
 
   (* This describes a single assingment/initialization of a var (rather than the var's state as a whole). ints are
      number of scopes deeper than the variable's declaration that the assignment occurs *)
   type write_state =
-    | Annotation
+    | Annotation of {
+        predicate: bool;
+        contextual: bool;
+      }
     | Value of int
+    | ArrayValue of int
     | Null of int
+    | EmptyArr
+    | ArrWrite of int
     | Nothing
 
   type kind =
@@ -121,33 +146,23 @@ end = struct
     declare_locs: L.LSet.t;
     def_locs: L.LSet.t;
     provider_locs: 'locs;
+    binding_kind: Bindings.kind;
   }
 
   type intermediate_entry = (write_state L.LMap.t, intermediate_state) base_entry
 
-  type entry = (L.LSet.t, state) base_entry
+  type providers = {
+    writes: write_kind L.LMap.t;
+    array_writes: L.LSet.t;
+  }
+
+  type entry = (providers, state) base_entry
 
   module EntrySet = Flow_set.Make (struct
     type t = entry
 
     let compare { entry_id = id1; _ } { entry_id = id2; _ } = Id.compare id1 id2
   end)
-
-  (* This records, per variable and per scope, the locations of providers for that variable within the scope or any child scopes.
-      The exact_locs field records the precise location of the variable being provided, while relative_locs records the location of
-      the statement *within the current scope* in which the provider lives. For example, in a program like
-
-      function f() {
-        if (condition) { var x = 42 };
-      }
-
-     The lexical scope for `f` will contain a `local_providers` for `x`, which contains an `exact_locs` pointing to the actual VariableDeclaration
-     node, and a `relative_locs` pointing to the IfStatement.
-  *)
-  type local_providers = {
-    exact_locs: L.LSet.t;
-    relative_locs: L.LSet.t;
-  }
 
   (* Individual lexical scope. Entries are variables "native" to this scope,
      children are the child scopes keyed by their locations, and local_providers
@@ -156,7 +171,6 @@ end = struct
     kind: kind;
     entries: intermediate_entry SMap.t;
     children: scope L.LMap.t;
-    providers: local_providers SMap.t;
   }
 
   type env = scope Nel.t
@@ -164,9 +178,21 @@ end = struct
   (* Compute the joined state of a variable, when modified in separate branches *)
   let combine_states init1 init2 =
     match (init1, init2) with
-    | (Annotated, _)
-    | (_, Annotated) ->
-      Annotated
+    | (Annotated { predicate = p1; contextual = c1 }, Annotated { predicate = p2; contextual = c2 })
+      ->
+      Annotated { predicate = p1 || p2; contextual = c1 && c2 }
+    | (Annotated { predicate; contextual }, _) -> Annotated { predicate; contextual }
+    | (_, Annotated { predicate; contextual }) -> Annotated { predicate; contextual }
+    | (Uninitialized, other)
+    | (other, Uninitialized) ->
+      other
+    | (ArrInitialized n, ArrInitialized m) -> ArrInitialized (min m n)
+    | (ArrInitialized n, EmptyArrInitialized)
+    | (EmptyArrInitialized, ArrInitialized n) ->
+      ArrInitialized n
+    | (other, (EmptyArrInitialized | ArrInitialized _))
+    | ((EmptyArrInitialized | ArrInitialized _), other) ->
+      other
     | (Initialized (n, i), Initialized (m, j)) ->
       let p = min n m in
       let k =
@@ -186,14 +212,7 @@ end = struct
         Initialized (n, Some k)
       else
         Initialized (n, None)
-    | (Initialized (n, i), _)
-    | (_, Initialized (n, i)) ->
-      Initialized (n, i)
     | (NullInitialized n, NullInitialized m) -> NullInitialized (min n m)
-    | (NullInitialized n, _)
-    | (_, NullInitialized n) ->
-      NullInitialized n
-    | (Uninitialized, Uninitialized) -> Uninitialized
 
   (* This function decides if an incoming write to a variable can possibly be a provider.
      If this function returns None, then the incoming write described by `write_state` cannot
@@ -207,30 +226,40 @@ end = struct
       var x;
       *)
       None
-    | (Annotated, _) ->
+    | (Annotated _, _) ->
       (*
       var x: string; var x: number; provider is string
       *)
       None
-    | (_, Annotation) ->
+    | (_, Annotation { predicate; contextual }) ->
       (*
        var x = 42; var x: string, provider is string
       *)
-      Some Annotated
+      Some (Annotated { predicate; contextual })
     | (Uninitialized, Null d) ->
       (*
        var x; x = null provider is null
        *)
       Some (NullInitialized d)
-    | (Uninitialized, Value d) ->
+    | (Uninitialized, (Value d | ArrayValue d)) ->
       (*
        var x; x = 42 provider is 42
        *)
       Some (Initialized (d, None))
-    | (NullInitialized n, Value d) when n <= d ->
+    | (Uninitialized, EmptyArr) ->
+      (*
+       var x; var x = [], [] provider
+       *)
+      Some EmptyArrInitialized
+    | (Uninitialized, ArrWrite _) ->
+      (*
+       var x; x.push(42) no provider
+       *)
+      None
+    | (NullInitialized n, (Value d | ArrayValue d)) when n <= d ->
       (* var x = null; x = 42; provider is null and 42*)
       Some (Initialized (d, Some n))
-    | (NullInitialized _, Value d) ->
+    | (NullInitialized _, (Value d | ArrayValue d)) ->
       (* var x; (function() { x = null }); x = 42; provider is 42 *)
       Some (Initialized (d, None))
     | (NullInitialized n, Null d) when n <= d ->
@@ -239,6 +268,16 @@ end = struct
     | (NullInitialized _, Null d) ->
       (* var x; (function() { x = null }); x = null, provider is second null *)
       Some (NullInitialized d)
+    | (NullInitialized _, EmptyArr) ->
+      (*
+       var x = null; var x = [], [] provider
+       *)
+      Some EmptyArrInitialized
+    | (NullInitialized _, ArrWrite _) ->
+      (*
+       var x = null; x.push(42), null provider
+       *)
+      None
     | (Initialized (_, Some m), Null d) when m <= d ->
       (* var x = null; x = 42; x = null, providers are first null and 42 *)
       None
@@ -251,19 +290,31 @@ end = struct
     | (Initialized (n, None), Null d) ->
       (* var x; (function () { x = 42; }); x = null, provider is 42 and null *)
       Some (Initialized (n, Some d))
-    | (Initialized (n, _), Value d) when n <= d ->
+    | (Initialized (n, _), (Value d | ArrayValue d)) when n <= d ->
       (* var x = 42; x = "a", provider is 42 *)
       None
-    | (Initialized (_, Some m), Value d) when m <= d ->
+    | (Initialized (_, Some m), (Value d | ArrayValue d)) when m <= d ->
       (* var x = null; (function () { x = 42; }); x = "a", provider is null and "a" *)
       Some (Initialized (d, Some m))
-    | (Initialized (_, _), Value d) ->
+    | (Initialized (_, _), (Value d | ArrayValue d)) ->
       (* var x; (function () { x = null; x = 42; }); x = "a", provider is "a" *)
       (* var x; (function () { x = 42; }); x = "a", provider is "a" *)
       Some (Initialized (d, None))
+    | (Initialized _, EmptyArr) -> None
+    | (Initialized (_, _), ArrWrite _) -> None
+    | (EmptyArrInitialized, (Null _ | EmptyArr)) -> None
+    | (EmptyArrInitialized, Value _) -> None
+    | (EmptyArrInitialized, ArrayValue n) -> Some (ArrInitialized n)
+    | (EmptyArrInitialized, ArrWrite n) -> Some (ArrInitialized n)
+    | (ArrInitialized _, (Null _ | EmptyArr)) -> None
+    | (ArrInitialized _, Value _) -> None
+    | (ArrInitialized n, ArrayValue d) when n <= d -> None
+    | (ArrInitialized _, ArrayValue d) -> Some (ArrInitialized d)
+    | (ArrInitialized n, ArrWrite d) when n <= d -> None
+    | (ArrInitialized _, ArrWrite d) -> Some (ArrInitialized d)
 
   (**** Functions for manipulating environments ****)
-  let empty_entry name =
+  let empty_entry name binding_kind =
     {
       entry_id = Id.new_id ();
       name;
@@ -271,9 +322,10 @@ end = struct
       provider_locs = L.LMap.empty;
       declare_locs = L.LSet.empty;
       def_locs = L.LSet.empty;
+      binding_kind;
     }
 
-  let env_invariant_violated s = failwith ("Environment invariant violated: " ^ s)
+  let env_invariant_violated s = raise (ImpossibleState ("Environment invariant violated: " ^ s))
 
   (* This function finds the right set of entries to add a new variable to in the scope chain
       based on whether it's a let, const, or var; it also returns a function to rebuild an environment
@@ -320,7 +372,7 @@ end = struct
         )
       (* If we don't see the variable in the root var scope, it's a global--create a dummy entry for it *)
       | [({ entries; kind = Var; _ } as hd)] ->
-        ( empty_entry var,
+        ( empty_entry var Bindings.Var,
           var_scopes_off,
           fun entry ->
             List.append (List.rev rev_head) [{ hd with entries = SMap.add var entry entries }]
@@ -331,33 +383,21 @@ end = struct
       | hd :: tl -> loop var_scopes_off tl (hd :: rev_head)
       | [] -> env_invariant_violated "Unreachable"
     in
-
     loop 0 (Nel.to_list env) []
 
-  let get_entry var entries = SMap.find_opt var entries |> Option.value ~default:(empty_entry var)
-
-  let empty_provider_info = { exact_locs = L.LSet.empty; relative_locs = L.LSet.empty }
-
-  let get_provider_info var providers =
-    SMap.find_opt var providers |> Base.Option.value ~default:empty_provider_info
-
-  let update_provider_info var loc (({ providers; _ } as hd), tl) =
-    let { exact_locs; relative_locs } = get_provider_info var providers in
-    let providers =
-      SMap.add
-        var
-        { exact_locs = L.LSet.add loc exact_locs; relative_locs = L.LSet.add loc relative_locs }
-        providers
+  let state_of_var var env =
+    let rec loop env =
+      match env with
+      | { entries; _ } :: _ when SMap.mem var entries -> Some (SMap.find var entries).state
+      | [{ kind = Var; _ }] -> None
+      | [{ kind = Lex; _ }] -> env_invariant_violated "Root environment should always be Var"
+      | _ :: tl -> loop tl
+      | [] -> env_invariant_violated "Unreachable"
     in
-    ({ hd with providers }, tl)
+    loop (Nel.to_list env)
 
-  let join_providers prov1 prov2 =
-    if prov1 == prov2 then
-      prov1
-    else
-      match (prov1, prov2) with
-      | ({ exact_locs = pl1; relative_locs = cl1 }, { exact_locs = pl2; relative_locs = cl2 }) ->
-        { exact_locs = L.LSet.union pl1 pl2; relative_locs = L.LSet.union cl1 cl2 }
+  let get_entry var default_binding entries =
+    SMap.find_opt var entries |> Option.value ~default:(empty_entry var default_binding)
 
   let join_envs env1 env2 =
     let join_entries entry1 entry2 =
@@ -372,6 +412,7 @@ end = struct
               provider_locs = providers1;
               declare_locs = declares1;
               def_locs = defs1;
+              binding_kind = binding_kind1;
             },
             {
               entry_id = _;
@@ -380,6 +421,7 @@ end = struct
               provider_locs = providers2;
               declare_locs = declares2;
               def_locs = defs2;
+              binding_kind = binding_kind2;
             }
           ) ->
           assert (name1 = name2);
@@ -393,11 +435,27 @@ end = struct
                   if i = j then
                     Some i
                   else
-                    failwith "Inconsistent states")
+                    raise (ImpossibleState "Inconsistent states"))
                 providers1
                 providers2;
             declare_locs = L.LSet.union declares1 declares2;
             def_locs = L.LSet.union defs1 defs2;
+            binding_kind =
+              (* We care about the binding kind so that we can report declared functions as
+               * providers. Declared functions aren't typically declared inside a branching
+               * statement, but there is no syntax error preventing someone from doing that.
+               * To account for this case, we consider a binding to be for a declared function if
+               * at least one branch was a declared function. In all other non-equal cases we
+               * just use Var, since we're only concerned with declared functions here *)
+              ( if binding_kind1 = binding_kind2 then
+                binding_kind1
+              else
+                match (binding_kind1, binding_kind2) with
+                | (Bindings.DeclaredFunction { predicate }, _)
+                | (_, Bindings.DeclaredFunction { predicate }) ->
+                  Bindings.DeclaredFunction { predicate }
+                | _ -> Bindings.Var
+              );
           }
     in
     let rec join_scopes scope1 scope2 =
@@ -405,16 +463,14 @@ end = struct
         scope1
       else
         match (scope1, scope2) with
-        | ( { kind = kind1; entries = entries1; children = children1; providers = providers1 },
-            { kind = kind2; entries = entries2; children = children2; providers = providers2 }
+        | ( { kind = kind1; entries = entries1; children = children1 },
+            { kind = kind2; entries = entries2; children = children2 }
           ) ->
           assert (kind1 = kind2);
           {
             kind = kind1;
             entries =
               SMap.union ~combine:(fun _ e1 e2 -> Some (join_entries e1 e2)) entries1 entries2;
-            providers =
-              SMap.union ~combine:(fun _ p1 p2 -> Some (join_providers p1 p2)) providers1 providers2;
             children =
               L.LMap.union ~combine:(fun _ c1 c2 -> Some (join_scopes c1 c2)) children1 children2;
           }
@@ -429,26 +485,8 @@ end = struct
 
   let exit_lex_child loc env =
     match env with
-    | ( ({ providers = pchild; entries; _ } as child),
-        ({ children; providers = pparent; _ } as parent) :: rest
-      ) ->
-      (* For all variables that aren't native to the child scope, update the parent scope's
-         provider_info with whatever providing information the child scope contains,
-         coarsening the relative_locs to point at the child scope as a whole. *)
-      let pchild_promoted =
-        SMap.filter (fun k _ -> not (SMap.mem k entries)) pchild
-        |> SMap.map (fun { relative_locs = _; exact_locs } ->
-               { relative_locs = L.LSet.singleton loc; exact_locs }
-           )
-      in
-      ( {
-          parent with
-          children = L.LMap.add loc child children;
-          providers =
-            SMap.union ~combine:(fun _ p1 p2 -> Some (join_providers p1 p2)) pparent pchild_promoted;
-        },
-        rest
-      )
+    | (child, ({ children; _ } as parent) :: rest) ->
+      ({ parent with children = L.LMap.add loc child children }, rest)
     | (_, []) -> env_invariant_violated "Popping to empty stack"
 
   (* Root visitor. Uses the `enter_lex_child` function parameter to manipulate the environment when it dives into a scope,
@@ -555,6 +593,10 @@ end = struct
           loc
           expr
 
+      (* Declared modules provide their own var scope *)
+      method! declare_module loc m =
+        this#enter_scope Var (fun _ _ -> super#declare_module loc m) loc m
+
       (* For the purposes of this analysis, we don't need to consider `if` statements without alternatives,
          and similarly elsewhere we don't worry about merging the initial environment of e.g. loops with the
          final environment from their bodies. It's ok if we're basing typechecking on statements that might not
@@ -585,12 +627,12 @@ end = struct
 
       method! switch _loc (switch : ('loc, 'loc) Ast.Statement.Switch.t) =
         let open Ast.Statement.Switch in
-        let { discriminant; cases = _; comments = _ } = switch in
+        let { discriminant; cases = _; comments = _; exhaustive_out = _ } = switch in
         let _discriminant' = this#expression discriminant in
         this#enter_scope
           Lex
           (fun _loc switch ->
-            let { discriminant = _; cases; comments } = switch in
+            let { discriminant = _; cases; comments; exhaustive_out = _ } = switch in
             let (env0, cx) = this#acc in
             let (rev_cases', env') =
               Base.List.fold cases ~init:([], env0) ~f:(fun (acc_cases, acc_env) case ->
@@ -669,8 +711,7 @@ end = struct
 
   (****** pass 1 *******)
 
-  let new_scope ~kind =
-    { kind; entries = SMap.empty; children = L.LMap.empty; providers = SMap.empty }
+  let new_scope ~kind = { kind; entries = SMap.empty; children = L.LMap.empty }
 
   let empty_env = (new_scope ~kind:Var, [])
 
@@ -691,28 +732,42 @@ end = struct
           ~enter_lex_child:enter_new_lex_child as super
 
       (* Add a new variable declaration to the scope, which may or may not be a provider as well. *)
-      method new_entry var kind loc =
+      method new_entry var binding_kind kind loc =
         let (env, ({ init_state = write_state } as cx)) = this#acc in
         let (entries, reconstruct_env) = find_entries_for_new_variable kind env in
-        let ({ declare_locs; state = cur_state; provider_locs; _ } as entry) =
-          get_entry var entries
+        let ( {
+                declare_locs;
+                state = cur_state;
+                provider_locs;
+                binding_kind = stored_binding_kind;
+                _;
+              } as entry
+            ) =
+          get_entry var binding_kind entries
         in
         let declare_locs = L.LSet.add loc declare_locs in
-        let new_state = extended_state_opt ~state:cur_state ~write_state in
         let (state, provider_locs) =
-          Base.Option.value_map
-            ~f:(fun state -> (state, L.LMap.add loc write_state provider_locs))
-            ~default:(cur_state, provider_locs)
-            new_state
+          match (binding_kind, stored_binding_kind) with
+          | ( Bindings.DeclaredFunction { predicate = p1 },
+              Bindings.DeclaredFunction { predicate = p2 }
+            ) ->
+            (* TODO: It would be better if we modeled providers as Inter | UnionLike. This would
+             * make it clear that certain providers are meant to be intersected and others
+             * are meant to be unioned. *)
+            let predicate = p1 || p2 in
+            ( Annotated { predicate; contextual = false },
+              L.LMap.add loc (Annotation { predicate; contextual = false }) provider_locs
+            )
+          | (_, Bindings.DeclaredFunction _) -> (cur_state, provider_locs)
+          | _ ->
+            let new_state = extended_state_opt ~state:cur_state ~write_state in
+            Base.Option.value_map
+              ~f:(fun state -> (state, L.LMap.add loc write_state provider_locs))
+              ~default:(cur_state, provider_locs)
+              new_state
         in
         let entries = SMap.add var { entry with declare_locs; state; provider_locs } entries in
         let env = reconstruct_env entries in
-        let env =
-          if Base.Option.is_some new_state then
-            update_provider_info var loc env
-          else
-            env
-        in
         this#set_acc (env, cx)
 
       method! declare_variable _loc (decl : ('loc, 'loc) Ast.Statement.DeclareVariable.t) =
@@ -721,7 +776,8 @@ end = struct
         let (_ : ('a, 'b) Ast.Type.annotation) = this#type_annotation annot in
         let (_ : ('a, 'b) Ast.Identifier.t) =
           this#in_context
-            ~mod_cx:(fun _cx -> { init_state = Annotation })
+            ~mod_cx:(fun _cx ->
+              { init_state = Annotation { predicate = false; contextual = false } })
             (fun () -> this#pattern_identifier ~kind:Ast.Statement.VariableDeclaration.Var ident)
         in
         decl
@@ -740,8 +796,10 @@ end = struct
         in
         let init_state =
           match (init, annot) with
-          | (_, Some (Ast.Type.Available _)) -> Annotation
+          | (_, Some (Ast.Type.Available _)) -> Annotation { predicate = false; contextual = false }
           | (None, _) -> Nothing
+          | (Some (_, Ast.Expression.Array { Ast.Expression.Array.elements = []; _ }), _) ->
+            EmptyArr
           | (Some (_, Ast.Expression.Literal { Ast.Literal.value = Ast.Literal.Null; _ }), _) ->
             Null 0
           | _ -> Value 0
@@ -777,7 +835,8 @@ end = struct
         in
         let init_state =
           match return with
-          | Ast.Type.Available _ -> Annotation
+          | Ast.Type.Available _ ->
+            Annotation { predicate = Option.is_some predicate; contextual = false }
           | _ -> Value 0
         in
 
@@ -820,7 +879,8 @@ end = struct
         in
         let init_state =
           match return with
-          | Ast.Type.Available _ -> Annotation
+          | Ast.Type.Available _ ->
+            Annotation { predicate = Option.is_some predicate; contextual = false }
           | _ -> Value 0
         in
 
@@ -843,14 +903,35 @@ end = struct
       method! pattern_identifier ?kind ((loc, { Ast.Identifier.name; comments = _ }) as ident) =
         begin
           match kind with
-          | Some kind -> this#new_entry name kind loc
+          | Some kind ->
+            let binding_kind =
+              match kind with
+              | Ast.Statement.VariableDeclaration.Var -> Bindings.Var
+              | Ast.Statement.VariableDeclaration.Let -> Bindings.Let
+              | Ast.Statement.VariableDeclaration.Const -> Bindings.Const
+            in
+            this#new_entry name binding_kind kind loc
           | _ -> ()
         end;
         super#identifier ident
 
+      method! function_this_param ((loc, _) as this_) =
+        this#new_entry "this" Bindings.Const Ast.Statement.VariableDeclaration.Const loc;
+        super#function_this_param this_
+
       method! function_identifier ((loc, { Ast.Identifier.name; comments = _ }) as ident) =
-        this#new_entry name Flow_ast.Statement.VariableDeclaration.Let loc;
+        this#new_entry name Bindings.Function Flow_ast.Statement.VariableDeclaration.Let loc;
         super#identifier ident
+
+      method! declare_function
+          stmt_loc ({ Flow_ast.Statement.DeclareFunction.id; predicate; _ } as stmt) =
+        let (loc, { Flow_ast.Identifier.name; _ }) = id in
+        this#new_entry
+          name
+          (Bindings.DeclaredFunction { predicate = Option.is_some predicate })
+          Flow_ast.Statement.VariableDeclaration.Let
+          loc;
+        super#declare_function stmt_loc stmt
 
       method! for_in_left_declaration left =
         let (_, decl) = left in
@@ -866,15 +947,19 @@ end = struct
               | (_, Array { Array.annot = Ast.Type.Available _; _ })
               | (_, Object { Object.annot = Ast.Type.Available _; _ })
               | (_, Identifier { Identifier.annot = Ast.Type.Available _; _ }) ->
-                Annotation
+                Annotation { predicate = false; contextual = false }
               | _ -> Value 0
             in
             ignore
             @@ this#in_context
                  ~mod_cx:(fun _cx -> { init_state })
                  (fun () -> this#variable_declarator_pattern ~kind id)
-          | _ -> failwith "unexpected AST node")
-        | _ -> failwith "Syntactically valid for-in loops must have exactly one left declaration");
+          | _ -> raise (ImpossibleState "unexpected AST node"))
+        | _ ->
+          raise
+            (ImpossibleState
+               "Syntactically valid for-in loops must have exactly one left declaration"
+            ));
         left
 
       method! for_of_left_declaration left =
@@ -891,16 +976,41 @@ end = struct
               | (_, Array { Array.annot = Ast.Type.Available _; _ })
               | (_, Object { Object.annot = Ast.Type.Available _; _ })
               | (_, Identifier { Identifier.annot = Ast.Type.Available _; _ }) ->
-                Annotation
+                Annotation { predicate = false; contextual = false }
               | _ -> Value 0
             in
             ignore
             @@ this#in_context
                  ~mod_cx:(fun _cx -> { init_state })
                  (fun () -> this#variable_declarator_pattern ~kind id)
-          | _ -> failwith "unexpected AST node")
-        | _ -> failwith "Syntactically valid for-in loops must have exactly one left declaration");
+          | _ -> raise (ImpossibleState "unexpected AST node"))
+        | _ ->
+          raise
+            (ImpossibleState
+               "Syntactically valid for-in loops must have exactly one left declaration"
+            ));
         left
+
+      method! function_param_pattern (expr : ('loc, 'loc) Ast.Pattern.t) =
+        (* NOTE: All function parameters are considered annotated, whether this
+         * annotation is explicitly provided, is contextually inferred, or is
+         * implicitly `any` when missing. *)
+        let contextual =
+          let open Ast.Pattern in
+          match expr with
+          | (_, Array { Array.annot = Ast.Type.Available _; _ })
+          | (_, Object { Object.annot = Ast.Type.Available _; _ })
+          | (_, Identifier { Identifier.annot = Ast.Type.Available _; _ }) ->
+            false
+          | _ -> true
+        in
+        let init_state = Annotation { predicate = false; contextual } in
+        ignore
+        @@ this#in_context
+             ~mod_cx:(fun _cx -> { init_state })
+             (fun () -> super#function_param_pattern expr);
+
+        expr
     end
 
   let find_declaration_statements { Ast.Program.statements; _ } =
@@ -915,35 +1025,31 @@ end = struct
   (****** pass 2 *******)
 
   let enter_existing_lex_child _ loc (({ children; _ }, _) as env) =
-    Nel.cons (L.LMap.find loc children) env
+    try Nel.cons (L.LMap.find loc children) env with
+    | Not_found -> raise (ImpossibleState "Missing lexical child at expected position")
 
-  type find_providers_cx = { null_assign: bool }
+  type find_providers_cx = { mk_state: int -> write_state }
 
   (* This visitor finds variable assignments that are not declarations and adds them to the providers for that variable
      if appropriate. *)
-  class find_providers ~env () =
+  class find_providers ~env:init_env () =
     object (this)
       inherit
         [find_providers_cx] finder
-          ~env
-          ~cx:{ null_assign = false }
+          ~env:init_env
+          ~cx:{ mk_state = (fun n -> Value n) }
           ~enter_lex_child:enter_existing_lex_child as super
 
       (* Add a new variable provider to the scope, which is not a declaration. *)
       method add_provider var loc =
-        let (env, ({ null_assign } as cx)) = this#acc in
+        let (env, ({ mk_state } as cx)) = this#acc in
         let ( ({ state = cur_state; provider_locs; def_locs; _ } as entry),
               var_scopes_off,
               reconstruct_env
             ) =
           find_entry_for_existing_variable var env
         in
-        let write_state =
-          if null_assign then
-            Null var_scopes_off
-          else
-            Value var_scopes_off
-        in
+        let write_state = mk_state var_scopes_off in
         let extended_state = extended_state_opt ~state:cur_state ~write_state in
         let def_locs = L.LSet.add loc def_locs in
         let (state, provider_locs) =
@@ -953,25 +1059,18 @@ end = struct
             extended_state
         in
         let env = reconstruct_env { entry with state; provider_locs; def_locs } in
-        let env =
-          if Base.Option.is_some extended_state then
-            update_provider_info var loc env
-          else
-            env
-        in
         this#set_acc (env, cx)
 
       method! assignment
           _loc ({ Ast.Expression.Assignment.operator = _; left; right; comments; _ } as expr) =
-        let null_assign =
+        let mk_state n =
           match right with
-          | (_, Ast.Expression.Literal { Ast.Literal.value = Ast.Literal.Null; _ }) -> true
-          | _ -> false
+          | (_, Ast.Expression.Literal { Ast.Literal.value = Ast.Literal.Null; _ }) -> Null n
+          | (_, Ast.Expression.Array { Ast.Expression.Array.elements = _ :: _; _ }) -> ArrayValue n
+          | _ -> Value n
         in
         let _left' =
-          this#in_context
-            ~mod_cx:(fun _cx -> { null_assign })
-            (fun () -> this#assignment_pattern left)
+          this#in_context ~mod_cx:(fun _cx -> { mk_state }) (fun () -> this#assignment_pattern left)
         in
         let _right' = this#expression right in
         let _comments' = this#syntax_opt comments in
@@ -984,6 +1083,81 @@ end = struct
           | Some _ -> ()
         end;
         super#identifier ident
+
+      method! unary_expression loc expr =
+        let { Ast.Expression.Unary.argument; operator; _ } = expr in
+        match (argument, operator) with
+        | ( (_, Ast.Expression.Identifier (loc, { Ast.Identifier.name; _ })),
+            Ast.Expression.Unary.Delete
+          ) ->
+          this#add_provider name loc;
+          expr
+        | _ -> super#unary_expression loc expr
+
+      method! expression expr =
+        let open Ast.Expression.Member in
+        let open Ast.Expression.Assignment in
+        let open Ast.Expression.Call in
+        begin
+          match expr with
+          | ( _,
+              Ast.Expression.Call
+                {
+                  callee =
+                    ( _,
+                      Ast.Expression.Member
+                        {
+                          _object = (_, Ast.Expression.Identifier (_, { Ast.Identifier.name; _ }));
+                          property = PropertyIdentifier (_, { Ast.Identifier.name = "push"; _ });
+                          _;
+                        }
+                    );
+                  targs = None;
+                  arguments =
+                    ( _,
+                      {
+                        Ast.Expression.ArgList.arguments = [Ast.Expression.Expression (arg_loc, _)];
+                        _;
+                      }
+                    );
+                  _;
+                }
+            )
+          | ( _,
+              Ast.Expression.Assignment
+                {
+                  operator = None;
+                  left =
+                    ( _,
+                      Ast.Pattern.Expression
+                        ( _,
+                          Ast.Expression.Member
+                            {
+                              _object =
+                                (_, Ast.Expression.Identifier (_, { Ast.Identifier.name; _ }));
+                              property = PropertyExpression _;
+                              _;
+                            }
+                        )
+                    );
+                  right = (arg_loc, _);
+                  _;
+                }
+            ) ->
+            let (env, _) = this#acc in
+            let state = state_of_var name env in
+            begin
+              match state with
+              | Some (EmptyArrInitialized | ArrInitialized _) ->
+                let mk_state n = ArrWrite n in
+                this#in_context
+                  ~mod_cx:(fun _cx -> { mk_state })
+                  (fun () -> this#add_provider name arg_loc)
+              | _ -> ()
+            end
+          | _ -> ()
+        end;
+        super#expression expr
     end
 
   let find_provider_statements env { Ast.Program.statements; _ } =
@@ -1001,24 +1175,50 @@ end = struct
       L.LMap.fold
         (fun loc write_state acc ->
           match (write_state, state) with
-          | (Annotation, Annotated) -> L.LSet.add loc acc
-          | (Annotation, _) -> assert_false "Invariant violated"
+          | (Annotation _, Annotated _) -> { acc with writes = L.LMap.add loc Ordinary acc.writes }
+          | (Annotation _, _) -> raise (ImpossibleState "Invariant violated")
           | (Null n, (NullInitialized m | Initialized (_, Some m)))
-          | (Value n, Initialized (m, _)) ->
+          | ((ArrayValue n | Value n), Initialized (m, _)) ->
             if n = m then
-              L.LSet.add loc acc
+              { acc with writes = L.LMap.add loc Ordinary acc.writes }
             else if n < m then
-              assert_false "Invariant violated"
+              raise (ImpossibleState "Invariant violated")
             else
               acc
-          | (Nothing, _) -> assert_false "Invariant violated"
-          | _ -> acc)
+          | (ArrayValue n, ArrInitialized m) ->
+            if n = m then
+              { acc with writes = L.LMap.add loc Ordinary acc.writes }
+            else if n < m then
+              raise (ImpossibleState "Invariant violated")
+            else
+              acc
+          | (ArrWrite n, ArrInitialized m) ->
+            if n = m then
+              { acc with array_writes = L.LSet.add loc acc.array_writes }
+            else if n < m then
+              raise (ImpossibleState "Invariant violated")
+            else
+              acc
+          | (EmptyArr, (EmptyArrInitialized | ArrInitialized _)) ->
+            { acc with writes = L.LMap.add loc EmptyArray acc.writes }
+          | (Nothing, _)
+          | (ArrWrite _, Initialized _)
+          | (Value _, ArrInitialized _) ->
+            raise (ImpossibleState "Invariant violated")
+          | (Null _, (Initialized (_, None) | ArrInitialized _))
+          | (EmptyArr, (Uninitialized | Annotated _ | Initialized _ | NullInitialized _))
+          | ( (Value _ | ArrayValue _ | ArrWrite _ | Null _),
+              (EmptyArrInitialized | Uninitialized | Annotated _ | NullInitialized _)
+            ) ->
+            acc)
         provider_locs
-        L.LSet.empty
+        { writes = L.LMap.empty; array_writes = L.LSet.empty }
     in
     let state =
       match state with
-      | Annotated -> AnnotatedVar
+      | Annotated { predicate; contextual } -> AnnotatedVar { predicate; contextual }
+      | ArrInitialized _ -> ArrayInitializedVar
+      | EmptyArrInitialized -> EmptyArrayInitializedVar
       | Initialized _ -> InitializedVar
       | NullInitialized _ -> NullInitializedVar
       | Uninitialized -> UninitializedVar
@@ -1041,56 +1241,5 @@ end = struct
 
   let get_providers_for_toplevel_var var ({ entries; _ }, _) =
     let entry = SMap.find_opt var entries in
-    Base.Option.map ~f:(fun entry -> (simplify_providers entry).provider_locs) entry
-
-  let print_full_env env =
-    let rec ptabs count =
-      if count = 0 then
-        ""
-      else
-        spf " %s" (ptabs (count - 1))
-    in
-    let rec print_rec label tabs { providers; entries = _; children; _ } =
-      let msg = spf "%s%s:\n" (ptabs tabs) label in
-      let tabs = tabs + 1 in
-      let t = ptabs tabs in
-      let msg =
-        spf
-          "%s%sproviders: \n%s\n"
-          msg
-          t
-          (SMap.bindings providers
-          |> Base.List.map ~f:(fun (k, { relative_locs; exact_locs }) ->
-                 spf
-                   "%s %s:\n%s  relative: (%s)\n%s  exact: (%s)"
-                   t
-                   k
-                   t
-                   (L.LSet.elements relative_locs
-                   |> Base.List.map ~f:(L.debug_to_string ~include_source:false)
-                   |> String.concat "), ("
-                   )
-                   t
-                   (L.LSet.elements exact_locs
-                   |> Base.List.map ~f:(L.debug_to_string ~include_source:false)
-                   |> String.concat "), ("
-                   )
-             )
-          |> String.concat "\n"
-          )
-      in
-      spf
-        "%s%schildren:\n%s"
-        msg
-        t
-        (L.LMap.bindings children
-        |> Base.List.map ~f:(fun (loc, scope) ->
-               print_rec (L.debug_to_string ~include_source:false loc) (tabs + 1) scope
-           )
-        |> String.concat "\n"
-        )
-    in
-    match env with
-    | (top, []) -> print_rec "toplevel" 0 top
-    | _ -> env_invariant_violated "Final environment has depth =/= 1"
+    Base.Option.map ~f:(fun entry -> (simplify_providers entry).provider_locs.writes) entry
 end

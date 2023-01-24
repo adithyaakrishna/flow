@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,7 +10,7 @@
 
 const {format} = require('util');
 
-const colors = require('colors/safe');
+const chalk = require('chalk');
 
 import type {
   AssertionLocation,
@@ -30,23 +30,23 @@ function lspNoNewMessagesAfterSleep(
           ? []
           : [
               format(
-                colors.white('%s line %d col %d'),
+                chalk.white('%s line %d col %d'),
                 assertLoc.filename,
                 assertLoc.line,
                 assertLoc.column,
               ),
             ];
       const keyMessage = [
-        colors.green('Actual LSP messages (+)') +
-          colors.grey(" didn't match expected no new LSP messages"),
+        chalk.green('Actual LSP messages (+)') +
+          chalk.grey(" didn't match expected no new LSP messages"),
       ];
       const errorMessages = JSON.stringify(actual, null, 2)
         .split('\n')
-        .map(line => colors.green('+ ' + line));
+        .map(line => chalk.green('+ ' + line));
       const reasonMessage =
         reason == null
           ? []
-          : [format(colors.grey('Reason: ') + colors.red('%s'), reason)];
+          : [format(chalk.grey('Reason: ') + chalk.red('%s'), reason)];
       const messages = [].concat(
         locMessage,
         reasonMessage,

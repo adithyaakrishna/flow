@@ -783,14 +783,6 @@ References:
                         ^^^^^ [2]
 
 
-Error ---------------------------------------------------------------------------------------------- expression.js:38:11
-
-Cannot resolve module `fs`. [cannot-resolve-module]
-
-   38| (((import('fs'): empty): T).p: empty);
-                 ^^^^
-
-
 Error ----------------------------------------------------------------------------------------------- expression.js:39:2
 
 Cannot cast `<MyComponent />.p` to empty because mixed [1] is incompatible with empty [2]. [incompatible-cast]
@@ -810,34 +802,16 @@ References:
 
 Error ----------------------------------------------------------------------------------------------- expression.js:39:4
 
-Cannot resolve name `React$Element`. [cannot-resolve-name]
+Cannot cast `<MyComponent />` to empty because `React.Element` [1] is incompatible with empty [2]. [incompatible-cast]
 
+   expression.js:39:4
    39| (((<MyComponent />: empty): T).p: empty);
-          ^^^^^^^^^^^^^^^
+          ^^^^^^^^^^^^^^^ [1]
 
-
-Error ----------------------------------------------------------------------------------------------- expression.js:39:4
-
-Cannot resolve name `React$Key`. [cannot-resolve-name]
-
+References:
+   expression.js:39:21
    39| (((<MyComponent />: empty): T).p: empty);
-          ^^^^^^^^^^^^^^^
-
-
-Error ----------------------------------------------------------------------------------------------- expression.js:39:4
-
-Cannot resolve name `React$Node`. [cannot-resolve-name]
-
-   39| (((<MyComponent />: empty): T).p: empty);
-          ^^^^^^^^^^^^^^^
-
-
-Error ----------------------------------------------------------------------------------------------- expression.js:39:4
-
-Cannot resolve name `React$Ref`. [cannot-resolve-name]
-
-   39| (((<MyComponent />: empty): T).p: empty);
-          ^^^^^^^^^^^^^^^
+                           ^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------- expression.js:40:2
@@ -859,6 +833,20 @@ References:
 
 Error ----------------------------------------------------------------------------------------------- expression.js:40:4
 
+Cannot cast `<>...</>` to empty because `React.Element` [1] is incompatible with empty [2]. [incompatible-cast]
+
+   expression.js:40:4
+   40| (((<>foo</>: empty): T).p: empty);
+          ^^^^^^^^ [1]
+
+References:
+   expression.js:40:14
+   40| (((<>foo</>: empty): T).p: empty);
+                    ^^^^^ [2]
+
+
+Error ----------------------------------------------------------------------------------------------- expression.js:40:4
+
 Cannot get `React.Fragment` because property `Fragment` is missing in object type [1]. [prop-missing]
 
    expression.js:40:4
@@ -869,30 +857,6 @@ References:
    expression.js:12:20
    12| declare var React: {createElement: React$CreateElement};
                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ [1]
-
-
-Error ----------------------------------------------------------------------------------------------- expression.js:40:4
-
-Cannot resolve name `React$Element`. [cannot-resolve-name]
-
-   40| (((<>foo</>: empty): T).p: empty);
-          ^^^^^^^^
-
-
-Error ----------------------------------------------------------------------------------------------- expression.js:40:4
-
-Cannot resolve name `React$Key`. [cannot-resolve-name]
-
-   40| (((<>foo</>: empty): T).p: empty);
-          ^^^^^^^^
-
-
-Error ----------------------------------------------------------------------------------------------- expression.js:40:4
-
-Cannot resolve name `React$Ref`. [cannot-resolve-name]
-
-   40| (((<>foo</>: empty): T).p: empty);
-          ^^^^^^^^
 
 
 Error ----------------------------------------------------------------------------------------------- expression.js:41:2
@@ -1132,18 +1096,18 @@ References:
                                  ^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- expression.js:48:4
+Error ----------------------------------------------------------------------------------------------- expression.js:48:8
 
-Cannot cast `new f()` to empty because new object [1] is incompatible with empty [2]. [incompatible-cast]
+Cannot use `new` on function [1]. Only classes can be constructed. [invalid-constructor]
 
-   expression.js:48:4
+   expression.js:48:8
    48| (((new f(): empty): T).p: empty);
-          ^^^^^^^ [1]
+              ^
 
 References:
-   expression.js:48:13
-   48| (((new f(): empty): T).p: empty);
-                   ^^^^^ [2]
+   expression.js:9:11
+    9| const f = (x: mixed): mixed => x;
+                 ^^^^^^^^^^^^^^^^^^^^^^ [1]
 
 
 Error ----------------------------------------------------------------------------------------------- expression.js:49:2
@@ -1163,18 +1127,18 @@ References:
                                    ^^^^^ [2]
 
 
-Error ----------------------------------------------------------------------------------------------- expression.js:49:4
+Error ----------------------------------------------------------------------------------------------- expression.js:49:8
 
-Cannot cast `new f(...)` to empty because new object [1] is incompatible with empty [2]. [incompatible-cast]
+Cannot use `new` on function [1]. Only classes can be constructed. [invalid-constructor]
 
-   expression.js:49:4
+   expression.js:49:8
    49| (((new f(42): empty): T).p: empty);
-          ^^^^^^^^^ [1]
+              ^
 
 References:
-   expression.js:49:15
-   49| (((new f(42): empty): T).p: empty);
-                     ^^^^^ [2]
+   expression.js:9:11
+    9| const f = (x: mixed): mixed => x;
+                 ^^^^^^^^^^^^^^^^^^^^^^ [1]
 
 
 Error ----------------------------------------------------------------------------------------------- expression.js:50:2
@@ -1239,6 +1203,17 @@ References:
                      ^^^^^ [2]
 
 
+Error ---------------------------------------------------------------------------------------------- expression.js:52:17
+
+Cannot use `class { ... }` [1] as a superclass. Only variables and member expressions may be extended [invalid-extends]
+
+                       v------
+   52| class X extends class {
+   53|   m() {}
+   54| } {
+       ^ [1]
+
+
 Error ----------------------------------------------------------------------------------------------- expression.js:56:6
 
 Cannot cast `super.m.p` to empty because mixed [1] is incompatible with empty [2]. [incompatible-cast]
@@ -1254,38 +1229,6 @@ References:
    expression.js:56:31
    56|     (((super.m: empty): T).p: empty);
                                      ^^^^^ [2]
-
-
-Error ----------------------------------------------------------------------------------------------- expression.js:56:8
-
-Cannot cast `super.m` to empty because function [1] is incompatible with empty [2]. [incompatible-cast]
-
-   expression.js:56:8
-   56|     (((super.m: empty): T).p: empty);
-              ^^^^^^^
-
-References:
-   expression.js:53:3
-   53|   m() {}
-         ^^^^^^ [1]
-   expression.js:56:17
-   56|     (((super.m: empty): T).p: empty);
-                       ^^^^^ [2]
-
-
-Error ---------------------------------------------------------------------------------------------- expression.js:56:14
-
-Cannot get `super.m` because property `m` [1] cannot be unbound from the context [2] where it was defined.
-[method-unbinding]
-
-   expression.js:56:14
-   56|     (((super.m: empty): T).p: empty);
-                    ^ [1]
-
-References:
-   expression.js:53:3
-   53|   m() {}
-         ^^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------- expression.js:59:2
@@ -1368,6 +1311,23 @@ References:
    expression.js:62:26
    62|   (((this: empty): T).p: empty);
                                 ^^^^^ [2]
+
+
+Error ----------------------------------------------------------------------------------------------- expression.js:62:6
+
+Cannot cast `this` to empty because number [1] is incompatible with empty [2]. [incompatible-cast]
+
+   expression.js:62:6
+   62|   (((this: empty): T).p: empty);
+            ^^^^
+
+References:
+   expression.js:61:17
+   61| (function(this: number) {
+                       ^^^^^^ [1]
+   expression.js:62:12
+   62|   (((this: empty): T).p: empty);
+                  ^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------- expression.js:64:2
@@ -1642,4 +1602,4 @@ References:
 
 
 
-Found 108 errors
+Found 102 errors

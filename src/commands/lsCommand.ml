@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -33,15 +33,15 @@ let spec =
         |> root_flag
         |> json_flags
         |> from_flag
-        |> flag "--all" no_arg ~doc:"Even list ignored files"
+        |> flag "--all" truthy ~doc:"Even list ignored files"
         |> flag
              "--imaginary"
-             no_arg
+             truthy
              ~doc:
                "Even list non-existent specified files (normally they are silently dropped). Non-existent files are never considered to be libs."
         |> flag
              "--explain"
-             no_arg
+             truthy
              ~doc:"Output what kind of file each file is and why Flow cares about it"
         |> input_file_flag "ls"
         |> anon "files or dirs" (list_of string)
@@ -82,7 +82,7 @@ let explain ~flowconfig_name ~root ~options ~libs raw_file =
     if SSet.mem file libs then
       (* This is a lib file *)
       let flowtyped_path = Files.get_flowtyped_path root in
-      if String_utils.string_starts_with file (Path.to_string flowtyped_path) then
+      if String.starts_with ~prefix:(Path.to_string flowtyped_path) file then
         ImplicitLib
       else
         ExplicitLib
@@ -90,7 +90,7 @@ let explain ~flowconfig_name ~root ~options ~libs raw_file =
       ConfigFile
     else if Files.is_ignored options file then
       ExplicitlyIgnored
-    else if String_utils.string_starts_with file root_str then
+    else if String.starts_with ~prefix:root_str file then
       ImplicitlyIncluded
     else if Files.is_included options file then
       ExplicitlyIncluded
@@ -118,7 +118,6 @@ let rec iter_get_next ~f get_next =
     iter_get_next ~f get_next
 
 let make_options ~flowconfig ~root ~ignore_flag ~include_flag ~untyped_flag ~declaration_flag =
-  let temp_dir = Path.make (FlowConfig.temp_dir flowconfig) in
   let includes = CommandUtils.list_of_string_arg include_flag in
   let ignores = CommandUtils.list_of_string_arg ignore_flag in
   let untyped = CommandUtils.list_of_string_arg untyped_flag in
@@ -128,7 +127,7 @@ let make_options ~flowconfig ~root ~ignore_flag ~include_flag ~untyped_flag ~dec
     flowconfig
     ~root
     ~no_flowlib:true
-    ~temp_dir
+    ~temp_dir:(CommandUtils.get_temp_dir None |> Path.make)
     ~ignores
     ~includes
     ~libs
@@ -141,18 +140,18 @@ let wanted ~root ~options libs file =
   Files.wanted ~options libs file
   &&
   let root_str = spf "%s%s" (Path.to_string root) Filename.dir_sep in
-  String_utils.string_starts_with file root_str || Files.is_included options file
+  String.starts_with ~prefix:root_str file || Files.is_included options file
 
 (* Directories will return a closure that returns every file under that
    directory. Individual files will return a closure that returns just that file
 *)
 let get_ls_files ~root ~all ~options ~libs ~imaginary = function
-  | None -> Files.make_next_files ~root ~all ~subdir:None ~options ~libs
+  | None -> Files.make_next_files ~sort:true ~root ~all ~subdir:None ~options ~libs
   | Some dir
     when try Sys.is_directory dir with
          | _ -> false ->
     let subdir = Some (Path.make dir) in
-    Files.make_next_files ~root ~all ~subdir ~options ~libs
+    Files.make_next_files ~sort:true ~root ~all ~subdir ~options ~libs
   | Some file ->
     if (Sys.file_exists file || imaginary) && (all || wanted ~root ~options libs file) then
       let file = file |> Path.make |> Path.to_string in
@@ -262,8 +261,7 @@ let main
     files_or_dirs = []
     || List.exists
          (fun file_or_dir ->
-           file_or_dir = config_file_relative
-           || String_utils.string_starts_with root_str file_or_dir)
+           file_or_dir = config_file_relative || String.starts_with ~prefix:file_or_dir root_str)
          files_or_dirs
   in
   let next_files =

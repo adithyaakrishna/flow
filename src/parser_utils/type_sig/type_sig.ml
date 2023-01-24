@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -37,7 +37,7 @@ type ('key, 'loc, 'a) predicate =
   | AndP of ('key, 'loc, 'a) predicate * ('key, 'loc, 'a) predicate
   | OrP of ('key, 'loc, 'a) predicate * ('key, 'loc, 'a) predicate
   | NotP of ('key, 'loc, 'a) predicate
-  | ExistsP of 'key * 'loc option
+  | ExistsP of 'key
   | InstanceofP of 'key * 'a
   | ArrP of 'key
   | NullP of 'key
@@ -45,15 +45,18 @@ type ('key, 'loc, 'a) predicate =
   | SingletonStrP of 'key * 'loc * bool * string
   | SingletonBoolP of 'key * 'loc * bool
   | SingletonNumP of 'key * 'loc * bool * float * string
+  | SingletonBigIntP of 'key * 'loc * bool * int64 option * string
   | BoolP of 'key * 'loc
   | FunP of 'key
   | NumP of 'key * 'loc
+  | BigIntP of 'key * 'loc
   | ObjP of 'key
   | StrP of 'key * 'loc
   | SymbolP of 'key * 'loc
   | VoidP of 'key
   | SentinelStrP of 'key * string * 'loc * string
   | SentinelNumP of 'key * string * 'loc * float * string
+  | SentinelBigIntP of 'key * string * 'loc * int64 option * string
   | SentinelBoolP of 'key * string * 'loc * bool
   | SentinelNullP of 'key * string * 'loc
   | SentinelVoidP of 'key * string * 'loc
@@ -99,6 +102,14 @@ type ('loc, 'a) fun_sig =
       this_param: 'a option;
       return: 'a;
       predicate: ('loc * (string, 'loc, 'a) predicate option) option;
+    }
+[@@deriving iter, map, show { with_path = false }]
+
+type 'a tuple_element =
+  | TupleElement of {
+      name: string option;
+      t: 'a;
+      polarity: Polarity.t;
     }
 [@@deriving iter, map, show { with_path = false }]
 
@@ -228,6 +239,7 @@ type enum_rep =
   | NumberRep of { truthy: bool }
   | StringRep of { truthy: bool }
   | SymbolRep
+  | BigIntRep of { truthy: bool }
 [@@deriving iter, map, show { with_path = false }]
 
 (* Definitions represent the structure of things which can be found when
@@ -347,6 +359,8 @@ type ('loc, 'a) value =
   | LongStringLit of 'loc
   | NumberVal of 'loc
   | NumberLit of 'loc * float * string
+  | BigIntVal of 'loc
+  | BigIntLit of 'loc * int64 option * string
   | BooleanVal of 'loc
   | BooleanLit of 'loc * bool
   | NullLit of 'loc
@@ -399,13 +413,13 @@ type ('loc, 'a) annot =
     }
   | Tuple of {
       loc: 'loc;
-      ts: 'a tailrec_list;
+      elems_rev: 'a tuple_element tailrec_list;
     }
   | Array of 'loc * 'a
   | ReadOnlyArray of 'loc * 'a
   | SingletonString of 'loc * string
   | SingletonNumber of 'loc * float * string
-  | SingletonBigInt of 'loc * string
+  | SingletonBigInt of 'loc * int64 option * string
   | SingletonBoolean of 'loc * bool
   | Typeof of {
       loc: 'loc;
@@ -518,10 +532,8 @@ type ('loc, 'a) annot =
   | ReactElementProps of 'loc * 'a
   | ReactElementConfig of 'loc * 'a
   | ReactElementRef of 'loc * 'a
-  | FacebookismIdx of 'loc
-  | FacebookismTypeAssertIs of 'loc
-  | FacebookismTypeAssertThrows of 'loc
-  | FacebookismTypeAssertWraps of 'loc
+  | FacebookismIdxUnwrapper of 'loc * 'a
+  | FacebookismIdxWrapper of 'loc * 'a
   | FlowDebugPrint of 'loc
   | FlowDebugThrow of 'loc
   | FlowDebugSleep of 'loc
@@ -553,9 +565,11 @@ type ('loc, 'a) annot =
  * operations over values and annotations, like unary operators and
  * destructuring. *)
 type 'a op =
+  | Arith of Flow_ast.Expression.Binary.operator * 'a
   | GetProp of string
   | GetElem of 'a
   | Unary of Flow_ast.Expression.Unary.operator
+  | Update
 [@@deriving iter, map, show { with_path = false }]
 
 (* Parsing out a signature can fail. There are three interesting failure modes,

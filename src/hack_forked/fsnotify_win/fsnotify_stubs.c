@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,12 +7,16 @@
 
 /* See `fsnotify_win/fsnotify.ml` for a general description. */
 
+// expose win_wide_char_to_multi_byte
+#define CAML_INTERNALS
+
 #include <caml/alloc.h>
 #include <caml/callback.h>
 #include <caml/custom.h>
 #include <caml/fail.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
+#include <caml/osdeps.h>
 #include <caml/signals.h>
 #include <caml/unixsupport.h>
 
@@ -44,7 +48,8 @@ struct fsenv {
 
 // Parameter to the watching thread
 struct wenv {
-  char* wpath; // the directory to be watched
+  char* wpath; // path of the directory to be watched
+  HANDLE dir_handle; // handle of the directory to be watched
   struct fsenv* fsenv; // where to store the events.
 };
 
@@ -84,26 +89,49 @@ static struct events* pop_events(struct fsenv* fsenv) {
 // Converts a `struct events *` in an OCaml value of type `Fsnotify.event list`
 static value parse_events(struct events* events) {
   CAMLparam0();
-  CAMLlocal4(res, cell, ev, wpath);
+  CAMLlocal5(res, cell, ev, wpath_value, path_value);
   res = Val_unit;
   for (;;) {
     if (events == NULL)
       break;
     FILE_NOTIFY_INFORMATION* fileInfo = events->info;
-    wpath = caml_copy_string(events->wpath);
+    wpath_value = caml_copy_string(events->wpath);
+    size_t wpath_len = strlen(events->wpath);
     for (;;) {
-      // Forcefully null terminate the filename.
-      char* modifiedFilename = (char*)malloc(fileInfo->FileNameLength);
-      wcstombs_s(
-          NULL,
-          modifiedFilename,
-          fileInfo->FileNameLength,
-          fileInfo->FileName,
-          fileInfo->FileNameLength / sizeof(wchar_t));
+      int i;
+
+      // Relative path in UTF16. Not null-terminated!
+      const wchar_t* filename = fileInfo->FileName;
+      // Length of relative path in UTF16. Does not include final NULL.
+      size_t wlen = fileInfo->FileNameLength;
+      // Length of the relative path in UTF8.
+      int slen = win_wide_char_to_multi_byte(filename, wlen, NULL, 0);
+
+      // Allocate the absolute path, including a slash
+      path_value = caml_alloc_string(wpath_len + 1 + slen);
+      char* path = (char*)String_val(path_value);
+      strncpy(path, events->wpath, wpath_len);
+      path[wpath_len] = '\\';
+      win_wide_char_to_multi_byte(filename, wlen, path + wpath_len + 1, slen);
+
+      // normalize slashes
+      //
+      // this SHOULD be a no-op because the wpath should already be normalized,
+      // and ReadDirectoryChangesW should give us paths using native slashes,
+      // but it's cheap to double check.
+      //
+      // ideally, we'd normalize to forward slashes here and consistently
+      // use forward slashes everywhere.
+      for (i = 0; i < slen; i++) {
+        if (path[i] == '/') {
+          path[i] = '\\';
+        }
+      }
+
       // Allocate 'Fsnotify.events'
       ev = caml_alloc_tuple(2);
-      Store_field(ev, 0, caml_copy_string(modifiedFilename));
-      Store_field(ev, 1, wpath);
+      Store_field(ev, 0, path_value);
+      Store_field(ev, 1, wpath_value);
       // Allocate list cell
       cell = caml_alloc_tuple(2);
       Store_field(cell, 0, ev);
@@ -129,25 +157,11 @@ static value parse_events(struct events* events) {
 static DWORD watcher_thread_main(LPVOID param) {
   char* buf;
   struct wenv* wenv = (struct wenv*)param;
-  HANDLE dir_handle = CreateFile(
-      wenv->wpath,
-      FILE_LIST_DIRECTORY,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-      NULL,
-      OPEN_EXISTING,
-      FILE_FLAG_BACKUP_SEMANTICS,
-      NULL);
-
-  if (dir_handle == INVALID_HANDLE_VALUE) {
-    win32_maperr(GetLastError());
-    uerror("CreateFile", Nothing);
-  }
-
   while (TRUE) {
     DWORD size;
     buf = malloc(FILE_NOTIFY_BUFFER_LENGTH);
     if (!ReadDirectoryChangesW(
-            dir_handle,
+            wenv->dir_handle,
             buf,
             FILE_NOTIFY_BUFFER_LENGTH,
             TRUE,
@@ -163,7 +177,8 @@ static DWORD watcher_thread_main(LPVOID param) {
   }
 
   free(buf);
-  CloseHandle(dir_handle);
+  CloseHandle(wenv->dir_handle);
+  free(wenv);
   return 0;
 }
 
@@ -175,6 +190,22 @@ value caml_fsnotify_add_watch(value vfsenv, value path) {
   struct wenv* wenv = malloc(sizeof(struct wenv));
   wenv->wpath = _strdup(_fullpath(output, String_val(path), _MAX_PATH));
   wenv->fsenv = fsenv;
+
+  HANDLE dir_handle = CreateFile(
+      wenv->wpath,
+      FILE_LIST_DIRECTORY,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      NULL,
+      OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS,
+      NULL);
+
+  if (dir_handle == INVALID_HANDLE_VALUE) {
+    win32_maperr(GetLastError());
+    uerror("CreateFile", Nothing);
+  }
+  wenv->dir_handle = dir_handle;
+
   HANDLE th = CreateThread(NULL, 0, watcher_thread_main, wenv, 0, NULL);
   if (th == INVALID_HANDLE_VALUE) {
     win32_maperr(GetLastError());

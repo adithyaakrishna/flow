@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -51,7 +51,6 @@ val input_value : 'a in_channel -> 'b
 
    All required data must be passed through the typed channels.
    associated to the spawned process.
-
 *)
 
 (* Alternate entry points *)
@@ -99,8 +98,16 @@ val spawn :
   'param ->
   ('output, 'input) handle
 
-(* Close the typed channels associated to a 'spawned' child. *)
+(** Close the typed channels associated to a 'spawned' child,
+  flushing all buffered write operations. Does nothing when applied to an
+  already closed channel. May raise [Sys_error] if the operating system
+  signals an error when flushing or closing. *)
 val close : ('a, 'b) handle -> unit
+
+(** Close the typed channels associated to a 'spawned' child,
+  flushing all buffered write operations. Does nothing when applied to an
+  already closed channel. Same as [close] but ignore all errors. *)
+val close_noerr : ('a, 'b) handle -> unit
 
 (* Kill a 'spawned' child and close the associated typed channels. *)
 val kill : ('a, 'b) handle -> unit

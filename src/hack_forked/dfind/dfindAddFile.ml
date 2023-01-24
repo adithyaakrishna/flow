@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -15,19 +15,19 @@ open DfindMaybe
 (* helpers *)
 (*****************************************************************************)
 
-(* Gives back a set of all the files in the directory.
- * A directory handle is of type Unix.dir_handle, it is the result of
- * a call to Unix.opendir. Not to be confused with dfind handles.
- * The path argument is useful because we want this function to give us
- * "full" paths. If I am in the directory "/tmp/bla" and I iterate
- * over the elements of the directory, the result I want is:
- * /tmp/bla/file1
- * /tmp/bla/file2
- * As opposed to:
- * file1
- * file2
- *)
+(** Gives back a set of all the files in the directory.
 
+  A directory handle is of type Unix.dir_handle, it is the result of
+  a call to Unix.opendir. Not to be confused with dfind handles.
+  The path argument is useful because we want this function to give us
+  "full" paths. If I am in the directory "/tmp/bla" and I iterate
+  over the elements of the directory, the result I want is:
+    /tmp/bla/file1
+    /tmp/bla/file2
+  As opposed to:
+    file1
+    file2
+ *)
 let get_files path dir_handle =
   let paths = ref SSet.empty in
   try
@@ -107,8 +107,6 @@ and add_watch links env path =
 and add_fsnotify_watch env path = return (Fsnotify.add_watch env.fsnotify path)
 
 and add_new_file links env path =
-  let time = Time.get () in
-  env.files <- TimeFiles.add (time, path) env.files;
   env.new_files <- SSet.add path env.new_files;
   call (wrap Unix.lstat) path >>= fun ({ Unix.st_kind = kind; _ } as st) ->
   if ISet.mem st.Unix.st_ino links then
@@ -136,11 +134,11 @@ and add_new_file links env path =
         SSet.fold
           begin
             fun file all_files ->
-            try
-              let sub_dir = SMap.find file env.dirs in
-              SSet.union sub_dir all_files
-            with
-            | Not_found -> SSet.add file all_files
+              try
+                let sub_dir = SMap.find file env.dirs in
+                SSet.union sub_dir all_files
+              with
+              | Not_found -> SSet.add file all_files
           end
           files
           prev_files

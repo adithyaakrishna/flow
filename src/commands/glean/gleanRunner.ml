@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -9,7 +9,7 @@ module TypeScheme = Type.TypeScheme
 
 class member_searcher add_member =
   object (this)
-    inherit Typed_ast_utils.type_parameter_mapper
+    inherit Typed_ast_utils.type_parameter_mapper as super
 
     method! on_loc_annot x = x
 
@@ -22,7 +22,7 @@ class member_searcher add_member =
       | PropertyIdentifier ((aloc, _), Flow_ast.Identifier.{ name; _ }) ->
         this#annot_with_tparams (add_member ~type_ ~aloc ~name)
       | _ -> ());
-      member
+      super#member member
   end
 
 class type_reference_searcher add_reference =
@@ -50,9 +50,15 @@ let remove_dot_flow_suffix = function
     Module.File (Base.Option.value ~default:file (Base.String.chop_suffix ~suffix:".flow" file))
   | module_ -> module_
 
-let module_of_module_ref ~resolved_requires ~root ~write_root module_ref =
-  SMap.find module_ref resolved_requires.Module_heaps.resolved_modules
-  |> Module.of_modulename ~root ~write_root
+let module_of_module_ref ~resolved_modules ~root ~write_root module_ref =
+  match SMap.find module_ref resolved_modules with
+  | Ok m -> Module.of_modulename ~root ~write_root m
+  | Error mapped_name ->
+    (* TODO: We reach this codepath for requires that might resolve to builtin
+     * modules. During check we check the master context, which we can also do
+     * here. *)
+    let name = Option.value mapped_name ~default:module_ref in
+    Module.String name
 
 let loc_of_index ~loc_source ~reader (i : Type_sig_collections.Locs.index) : Loc.t =
   (i :> int)
@@ -63,8 +69,7 @@ let loc_of_def ~loc_source ~reader packed_def =
   let idx = Type_sig.def_id_loc packed_def in
   loc_of_index ~loc_source ~reader idx
 
-let source_of_type_exports ~root ~write_root ~file ~reader ~loc_source ~type_sig ~resolved_requires
-    =
+let source_of_type_exports ~root ~write_root ~file ~reader ~loc_source ~type_sig ~resolved_modules =
   let Packed_type_sig.Module.{ module_kind; module_refs; local_defs; remote_refs; _ } = type_sig in
   let open Base.List.Let_syntax in
   let open Type_sig_pack in
@@ -72,7 +77,7 @@ let source_of_type_exports ~root ~write_root ~file ~reader ~loc_source ~type_sig
     | ImportType { index; remote; _ } ->
       let module_ =
         let module_ref = Type_sig_collections.Module_refs.get module_refs index in
-        module_of_module_ref ~resolved_requires ~root ~write_root module_ref
+        module_of_module_ref ~resolved_modules ~root ~write_root module_ref
       in
       let typeExport = TypeExport.Named remote in
       return (SourceOfTypeExport.ModuleTypeExport ModuleTypeExport.{ module_; typeExport })
@@ -82,7 +87,7 @@ let source_of_type_exports ~root ~write_root ~file ~reader ~loc_source ~type_sig
     | ImportTypeofNs { index; _ } ->
       let module_ =
         let module_ref = Type_sig_collections.Module_refs.get module_refs index in
-        module_of_module_ref ~resolved_requires ~root ~write_root module_ref
+        module_of_module_ref ~resolved_modules ~root ~write_root module_ref
       in
       return (SourceOfTypeExport.ModuleNamespace module_)
     | Import _
@@ -110,7 +115,7 @@ let source_of_type_exports ~root ~write_root ~file ~reader ~loc_source ~type_sig
     let star_type_exports =
       let%bind (_, index) = type_stars in
       let module_ref = Type_sig_collections.Module_refs.get module_refs index in
-      let remote_module = module_of_module_ref ~resolved_requires ~root ~write_root module_ref in
+      let remote_module = module_of_module_ref ~resolved_modules ~root ~write_root module_ref in
       let typeExport = TypeExport.Star remote_module in
       let moduleTypeExport = ModuleTypeExport.{ module_; typeExport } in
       let source = SourceOfTypeExport.ModuleNamespace remote_module in
@@ -144,12 +149,12 @@ let export_of_export_name = function
   | "default" -> Export.Default
   | name -> Export.Named name
 
-let type_import_declarations ~root ~write_root ~reader ~resolved_requires ~file_sig =
+let type_import_declarations ~root ~write_root ~reader ~resolved_modules ~file_sig =
   let open File_sig.With_ALoc in
   let open Base.List.Let_syntax in
   (match%bind file_sig.module_sig.requires with
   | Import { source = (_, module_ref); types; typesof; typesof_ns; _ } ->
-    let module_ = module_of_module_ref ~resolved_requires ~root ~write_root module_ref in
+    let module_ = module_of_module_ref ~resolved_modules ~root ~write_root module_ref in
     let types_info =
       let%bind (export_name, local) = SMap.elements types in
       let typeExport = TypeExport.Named export_name in
@@ -180,7 +185,8 @@ let type_import_declarations ~root ~write_root ~reader ~resolved_requires ~file_
     types_info @ typesof_info @ typesof_ns_info
   | Require _
   | ImportDynamic _
-  | Import0 _ ->
+  | Import0 _
+  | ExportFrom _ ->
     [])
   |> Base.List.map ~f:(TypeImportDeclaration.to_json ~root ~write_root)
 
@@ -208,7 +214,7 @@ let type_declaration_references ~root ~write_root ~reader ~full_cx ~typed_ast =
 
 let extract_member_def ~cx ~typed_ast ~file_sig scheme name : ALoc.t option =
   let open Ty_members in
-  match extract ~include_proto_members:true ~cx ~typed_ast ~file_sig scheme with
+  match extract ~cx ~typed_ast ~file_sig scheme with
   | Error _ -> None
   | Ok { members; _ } ->
     Base.Option.bind
@@ -237,12 +243,12 @@ let member_declaration_references ~root ~write_root ~reader ~full_cx ~typed_ast 
   ignore ((new member_searcher add_member)#program typed_ast);
   !results |> Base.List.map ~f:(MemberDeclarationReference.to_json ~root ~write_root)
 
-let import_declarations ~root ~write_root ~reader ~resolved_requires ~file_sig =
+let import_declarations ~root ~write_root ~reader ~resolved_modules ~file_sig =
   let open File_sig.With_ALoc in
   let open Base.List.Let_syntax in
   (match%bind file_sig.module_sig.requires with
   | Require { source = (_, module_ref); bindings; _ } ->
-    let module_ = module_of_module_ref ~resolved_requires ~root ~write_root module_ref in
+    let module_ = module_of_module_ref ~resolved_modules ~root ~write_root module_ref in
     (match bindings with
     | None -> []
     | Some (BindIdent (aloc, name)) ->
@@ -266,10 +272,11 @@ let import_declarations ~root ~write_root ~reader ~resolved_requires ~file_sig =
         let declaration = Declaration.{ loc; name } in
         return ImportDeclaration.{ import; declaration }))
   | ImportDynamic _
-  | Import0 _ ->
+  | Import0 _
+  | ExportFrom _ ->
     []
   | Import { source = (_, module_ref); named; ns; _ } ->
-    let module_ = module_of_module_ref ~resolved_requires ~root ~write_root module_ref in
+    let module_ = module_of_module_ref ~resolved_modules ~root ~write_root module_ref in
     let named_import_declarations =
       let%bind (export_name, local) = SMap.elements named in
       let export = export_of_export_name export_name in
@@ -310,7 +317,7 @@ let loc_of_obj_annot_prop ~loc_source ~reader =
   | ObjAnnotMethod { id_loc = index; _ } ->
     loc_of_index ~loc_source ~reader index
 
-let source_of_exports ~root ~write_root ~loc_source ~type_sig ~resolved_requires ~reader =
+let source_of_exports ~root ~write_root ~loc_source ~type_sig ~resolved_modules ~reader =
   let Packed_type_sig.Module.{ module_kind; local_defs; remote_refs; module_refs; _ } = type_sig in
   let open Base.List.Let_syntax in
   let open Type_sig_pack in
@@ -319,14 +326,14 @@ let source_of_exports ~root ~write_root ~loc_source ~type_sig ~resolved_requires
     | Import { index; remote; _ } ->
       let module_ =
         let module_ref = Type_sig_collections.Module_refs.get module_refs index in
-        module_of_module_ref ~resolved_requires ~root ~write_root module_ref
+        module_of_module_ref ~resolved_modules ~root ~write_root module_ref
       in
       let export = Export.Named remote in
       return (SourceOfExport.ModuleExport ModuleExport.{ module_; export })
     | ImportNs { index; _ } ->
       let module_ =
         let module_ref = Type_sig_collections.Module_refs.get module_refs index in
-        module_of_module_ref ~resolved_requires ~root ~write_root module_ref
+        module_of_module_ref ~resolved_modules ~root ~write_root module_ref
       in
       return (SourceOfExport.ModuleNamespace module_)
     | ImportType _
@@ -474,7 +481,7 @@ let source_of_exports ~root ~write_root ~loc_source ~type_sig ~resolved_requires
         let%bind (_, index) = stars in
         let star_module =
           let module_ref = Type_sig_collections.Module_refs.get module_refs index in
-          module_of_module_ref ~resolved_requires ~root ~write_root module_ref
+          module_of_module_ref ~resolved_modules ~root ~write_root module_ref
         in
         let moduleExport =
           let export = Export.Star star_module in
@@ -577,7 +584,8 @@ class declaration_info_collector ~scope_info ~reader ~add_var_info ~add_member_i
         Base.List.iter members ~f:defaulted_member
       | StringBody StringBody.{ members = Initialized members; _ } ->
         Base.List.iter members ~f:initialized_member
-      | SymbolBody SymbolBody.{ members; _ } -> Base.List.iter members ~f:defaulted_member);
+      | SymbolBody SymbolBody.{ members; _ } -> Base.List.iter members ~f:defaulted_member
+      | BigIntBody BigIntBody.{ members; _ } -> Base.List.iter members ~f:initialized_member);
       super#enum_declaration enum
   end
 
@@ -603,19 +611,7 @@ let declaration_infos ~root ~write_root ~scope_info ~file ~file_sig ~full_cx ~re
        typed_ast
     );
   let genv = Ty_normalizer_env.mk_genv ~full_cx ~file ~typed_ast ~file_sig in
-  let options =
-    {
-      Ty_normalizer_env.expand_internal_types = false;
-      flag_shadowed_type_params = false;
-      preserve_inferred_literal_types = false;
-      evaluate_type_destructors = false;
-      optimize_types = true;
-      omit_targ_defaults = false;
-      merge_bot_and_any_kinds = true;
-      verbose_normalizer = false;
-      max_depth = Some 50;
-    }
-  in
+  let options = Ty_normalizer_env.default_options in
   let exact_by_default = Context.exact_by_default full_cx in
   let documentations = Find_documentation.def_loc_to_comment_loc_map ast in
   Base.List.fold
@@ -659,7 +655,7 @@ let file_of_string_modules ~root ~write_root ~options ~docblock ~file:file_key =
     | _ -> []
   in
   let%bind string =
-    match Module_js.exported_module ~options file_key docblock with
+    match Module_js.exported_module ~options file_key (`Module docblock) with
     | Some string -> return string
     | None -> []
   in
@@ -679,6 +675,11 @@ let file_liness ~root ~write_root ~file:file_key =
     Offset_cache.ends_in_newline_of_file_key file_key |> Base.Option.to_list
   in
   return Src.FileLines.(to_json { file; lengths; hasUnicodeOrTabs; endsInNewline })
+
+(* Latest version of the 'all' schema supported by this indexer *)
+let all_schema_version = 7
+
+let flow_schema_version = 3
 
 let make ~output_dir ~write_root =
   (module Codemod_runner.MakeSimpleTypedRunner (struct
@@ -718,8 +719,10 @@ let make ~output_dir ~write_root =
       in
       let root = Options.root options in
       let reader = State_reader.create () in
-      let resolved_requires =
-        Module_heaps.Reader.get_resolved_requires_unsafe ~reader ~audit:Expensive.warn file
+      let resolved_modules =
+        Parsing_heaps.get_file_addr_unsafe file
+        |> Parsing_heaps.Reader.get_typed_parse_unsafe ~reader file
+        |> Parsing_heaps.Reader.get_resolved_modules_unsafe ~reader file
       in
       let scope_info =
         Scope_builder.program ~enable_enums:(Options.enums options) ~with_types:false ast
@@ -737,11 +740,11 @@ let make ~output_dir ~write_root =
           ~ast
       in
       let type_import_declaration =
-        type_import_declarations ~root ~write_root ~reader ~resolved_requires ~file_sig
+        type_import_declarations ~root ~write_root ~reader ~resolved_modules ~file_sig
       in
       let loc_source = fst ast |> Loc.source in
       let source_of_export =
-        source_of_exports ~root ~write_root ~loc_source ~type_sig ~resolved_requires ~reader
+        source_of_exports ~root ~write_root ~loc_source ~type_sig ~resolved_modules ~reader
       in
       let source_of_type_export =
         source_of_type_exports
@@ -751,13 +754,13 @@ let make ~output_dir ~write_root =
           ~reader
           ~loc_source
           ~type_sig
-          ~resolved_requires
+          ~resolved_modules
       in
       let local_declaration_reference =
         local_declaration_references ~root ~write_root ~scope_info
       in
       let import_declaration =
-        import_declarations ~root ~write_root ~reader ~resolved_requires ~file_sig
+        import_declarations ~root ~write_root ~reader ~resolved_modules ~file_sig
       in
       let member_declaration_reference =
         member_declaration_references ~root ~write_root ~reader ~full_cx ~typed_ast ~file_sig
@@ -787,27 +790,28 @@ let make ~output_dir ~write_root =
         output_string out_channel "["
       else
         output_string out_channel ",";
-      output_facts "flow.LocalDeclarationReference.3" local_declaration_reference;
+      let flow_pred pred = Printf.sprintf "flow.%s.%d" pred flow_schema_version in
+      output_facts (flow_pred "LocalDeclarationReference") local_declaration_reference;
       output_string out_channel ",";
-      output_facts "flow.DeclarationInfo.3" declaration_info;
+      output_facts (flow_pred "DeclarationInfo") declaration_info;
       output_string out_channel ",";
-      output_facts "flow.SourceOfExport.3" source_of_export;
+      output_facts (flow_pred "SourceOfExport") source_of_export;
       output_string out_channel ",";
-      output_facts "flow.ImportDeclaration.3" import_declaration;
+      output_facts (flow_pred "ImportDeclaration") import_declaration;
       output_string out_channel ",";
-      output_facts "flow.MemberDeclarationReference.3" member_declaration_reference;
+      output_facts (flow_pred "MemberDeclarationReference") member_declaration_reference;
       output_string out_channel ",";
-      output_facts "flow.MemberDeclarationInfo.3" member_declaration_info;
+      output_facts (flow_pred "MemberDeclarationInfo") member_declaration_info;
       output_string out_channel ",";
-      output_facts "flow.TypeDeclarationReference.3" type_declaration_reference;
+      output_facts (flow_pred "TypeDeclarationReference") type_declaration_reference;
       output_string out_channel ",";
-      output_facts "flow.TypeDeclarationInfo.3" type_declaration_info;
+      output_facts (flow_pred "TypeDeclarationInfo") type_declaration_info;
       output_string out_channel ",";
-      output_facts "flow.TypeImportDeclaration.3" type_import_declaration;
+      output_facts (flow_pred "TypeImportDeclaration") type_import_declaration;
       output_string out_channel ",";
-      output_facts "flow.SourceOfTypeExport.3" source_of_type_export;
+      output_facts (flow_pred "SourceOfTypeExport") source_of_type_export;
       output_string out_channel ",";
-      output_facts "flow.FileOfStringModule.3" file_of_string_module;
+      output_facts (flow_pred "FileOfStringModule") file_of_string_module;
       output_string out_channel ",";
       output_facts "src.FileLines.1" file_lines;
       close_out out_channel;

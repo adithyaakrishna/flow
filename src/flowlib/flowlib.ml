@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,6 +16,8 @@ let contents no_flowlib : (string * string) array =
     [%prelude_contents]
   else
     [%flowlib_contents]
+
+let contents_list ~no_flowlib = contents no_flowlib |> Array.to_list
 
 type libdir =
   | Flowlib of Path.t

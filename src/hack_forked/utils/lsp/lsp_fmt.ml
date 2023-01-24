@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -15,15 +15,14 @@ open Hh_json_helpers
 
 let parse_id (json : json) : lsp_id =
   match json with
-  | JSON_Number s ->
-    begin
-      try NumberId (int_of_string s) with
-      | Failure _ ->
-        raise
-          (Error.LspException
-             { Error.code = Error.ParseError; message = "float ids not allowed: " ^ s; data = None }
-          )
-    end
+  | JSON_Number s -> begin
+    try NumberId (int_of_string s) with
+    | Failure _ ->
+      raise
+        (Error.LspException
+           { Error.code = Error.ParseError; message = "float ids not allowed: " ^ s; data = None }
+        )
+  end
   | JSON_String s -> StringId s
   | _ ->
     raise
@@ -65,17 +64,6 @@ let print_location (location : Location.t) : json =
       ]
   )
 
-let print_definition_location (definition_location : DefinitionLocation.t) : json =
-  DefinitionLocation.(
-    let location = definition_location.location in
-    Jprint.object_opt
-      [
-        ("uri", Some (JSON_String (DocumentUri.to_string location.Location.uri)));
-        ("range", Some (print_range location.Location.range));
-        ("title", Base.Option.map definition_location.title ~f:string_);
-      ]
-  )
-
 let parse_range_exn (json : json option) : range =
   {
     start = Jget.obj_exn json "start" |> parse_position;
@@ -83,12 +71,10 @@ let parse_range_exn (json : json option) : range =
   }
 
 let parse_location (j : json option) : Location.t =
-  Location.
-    {
-      uri = Jget.string_exn j "uri" |> DocumentUri.of_string;
-      range = Jget.obj_exn j "range" |> parse_range_exn;
-    }
-  
+  {
+    Location.uri = Jget.string_exn j "uri" |> DocumentUri.of_string;
+    range = Jget.obj_exn j "range" |> parse_range_exn;
+  }
 
 let parse_range_opt (json : json option) : range option =
   if json = None then
@@ -100,22 +86,18 @@ let parse_textDocumentIdentifier (json : json option) : TextDocumentIdentifier.t
   TextDocumentIdentifier.{ uri = Jget.string_exn json "uri" |> DocumentUri.of_string }
 
 let parse_versionedTextDocumentIdentifier (json : json option) : VersionedTextDocumentIdentifier.t =
-  VersionedTextDocumentIdentifier.
-    {
-      uri = Jget.string_exn json "uri" |> DocumentUri.of_string;
-      version = Jget.int_d json "version" 0;
-    }
-  
+  {
+    VersionedTextDocumentIdentifier.uri = Jget.string_exn json "uri" |> DocumentUri.of_string;
+    version = Jget.int_d json "version" ~default:0;
+  }
 
 let parse_textDocumentItem (json : json option) : TextDocumentItem.t =
-  TextDocumentItem.
-    {
-      uri = Jget.string_exn json "uri" |> DocumentUri.of_string;
-      languageId = Jget.string_d json "languageId" "";
-      version = Jget.int_d json "version" 0;
-      text = Jget.string_exn json "text";
-    }
-  
+  {
+    TextDocumentItem.uri = Jget.string_exn json "uri" |> DocumentUri.of_string;
+    languageId = Jget.string_d json "languageId" ~default:"";
+    version = Jget.int_d json "version" ~default:0;
+    text = Jget.string_exn json "text";
+  }
 
 let print_textDocumentItem (item : TextDocumentItem.t) : json =
   TextDocumentItem.(
@@ -135,32 +117,47 @@ let print_markedItem (item : markedString) : json =
     JSON_Object [("language", JSON_String language); ("value", JSON_String value)]
 
 let parse_textDocumentPositionParams (params : json option) : TextDocumentPositionParams.t =
-  TextDocumentPositionParams.
+  {
+    TextDocumentPositionParams.textDocument =
+      Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier;
+    position = Jget.obj_exn params "position" |> parse_position;
+  }
+
+module TextEditFmt = struct
+  let of_json (params : json option) : TextEdit.t =
     {
-      textDocument = Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier;
-      position = Jget.obj_exn params "position" |> parse_position;
+      TextEdit.range = Jget.obj_exn params "range" |> parse_range_exn;
+      newText = Jget.string_exn params "newText";
     }
-  
 
-let parse_textEdit (params : json option) : TextEdit.t option =
-  match params with
-  | None -> None
-  | _ ->
-    TextEdit.(
-      Some
-        {
-          range = Jget.obj_exn params "range" |> parse_range_exn;
-          newText = Jget.string_exn params "newText";
-        }
-    )
+  let to_json (edit : TextEdit.t) : json =
+    let { TextEdit.range; newText } = edit in
+    JSON_Object [("range", print_range range); ("newText", JSON_String newText)]
+end
 
-let print_textEdit (edit : TextEdit.t) : json =
-  TextEdit.(JSON_Object [("range", print_range edit.range); ("newText", JSON_String edit.newText)])
+module InsertReplaceEditFmt = struct
+  open InsertReplaceEdit
+
+  let to_json { newText; insert; replace } =
+    JSON_Object
+      [
+        ("newText", JSON_String newText);
+        ("insert", print_range insert);
+        ("replace", print_range replace);
+      ]
+
+  let of_json json : InsertReplaceEdit.t =
+    {
+      newText = Jget.string_exn json "newText";
+      insert = Jget.obj_exn json "insert" |> parse_range_exn;
+      replace = Jget.obj_exn json "replace" |> parse_range_exn;
+    }
+end
 
 let print_workspaceEdit (r : WorkspaceEdit.t) : json =
   WorkspaceEdit.(
     let print_workspace_edit_changes (uri, text_edits) =
-      (DocumentUri.to_string uri, JSON_Array (Base.List.map ~f:print_textEdit text_edits))
+      (DocumentUri.to_string uri, JSON_Array (Base.List.map ~f:TextEditFmt.to_json text_edits))
     in
     JSON_Object
       [
@@ -190,17 +187,17 @@ let parse_command_name str =
 
 let parse_command (json : json option) : Command.t =
   let open Command in
-  let name = Jget.string_d json "command" "" in
+  let name = Jget.string_d json "command" ~default:"" in
   {
-    title = Jget.string_d json "title" "";
+    title = Jget.string_d json "title" ~default:"";
     command = parse_command_name name;
     arguments = Jget.array_d json "arguments" ~default:[] |> Base.List.filter_opt;
   }
 
 let parse_formattingOptions (json : json option) : DocumentFormatting.formattingOptions =
   {
-    DocumentFormatting.tabSize = Jget.int_d json "tabSize" 2;
-    insertSpaces = Jget.bool_d json "insertSpaces" true;
+    DocumentFormatting.tabSize = Jget.int_d json "tabSize" ~default:2;
+    insertSpaces = Jget.bool_d json "insertSpaces" ~default:true;
   }
 
 module SymbolKindFmt = struct
@@ -214,18 +211,16 @@ let print_symbolInformation (info : SymbolInformation.t) : json =
         ("name", Some (JSON_String info.name));
         ("kind", Some (SymbolKindFmt.to_json info.kind));
         ("location", Some (print_location info.location));
-        ("containerName", Base.Option.map info.containerName string_);
+        ("containerName", Base.Option.map info.containerName ~f:string_);
       ]
   )
 
 let parse_codeLens (json : json option) : CodeLens.t =
-  CodeLens.
-    {
-      range = Jget.obj_exn json "range" |> parse_range_exn;
-      command = Jget.obj_exn json "command" |> parse_command;
-      data = Jget.obj_exn json "data";
-    }
-  
+  {
+    CodeLens.range = Jget.obj_exn json "range" |> parse_range_exn;
+    command = Jget.obj_exn json "command" |> parse_command;
+    data = Jget.obj_exn json "data";
+  }
 
 let print_codeLens ~key (codeLens : CodeLens.t) : json =
   CodeLens.(
@@ -325,33 +320,30 @@ let parse_didClose (params : json option) : DidClose.params =
 (************************************************************************)
 
 let parse_didSave (params : json option) : DidSave.params =
-  DidSave.
+  {
+    DidSave.textDocument = Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier;
+    text = Jget.string_opt params "text";
+  }
+
+(** textDocument/didChange notification *)
+module DidChangeFmt = struct
+  open DidChange
+
+  let content_change_event_of_json json =
     {
-      textDocument = Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier;
-      text = Jget.string_opt params "text";
+      range = Jget.obj_opt json "range" |> parse_range_opt;
+      rangeLength = Jget.int_opt json "rangeLength";
+      text = Jget.string_exn json "text";
     }
-  
 
-(************************************************************************)
-(* textDocument/didChange notification                                  *)
-(************************************************************************)
-
-let parse_didChange (params : json option) : DidChange.params =
-  DidChange.(
-    let parse_textDocumentContentChangeEvent json =
-      {
-        range = Jget.obj_opt json "range" |> parse_range_opt;
-        rangeLength = Jget.int_opt json "rangeLength";
-        text = Jget.string_exn json "text";
-      }
-    in
+  let params_of_json (params : json option) : params =
     {
       textDocument = Jget.obj_exn params "textDocument" |> parse_versionedTextDocumentIdentifier;
       contentChanges =
         Jget.array_d params "contentChanges" ~default:[]
-        |> Base.List.map ~f:parse_textDocumentContentChangeEvent;
+        |> Base.List.map ~f:content_change_event_of_json;
     }
-  )
+end
 
 module SelectionRangeFmt = struct
   open SelectionRange
@@ -372,10 +364,7 @@ module SelectionRangeFmt = struct
     JSON_Array ranges
 end
 
-(************************************************************************)
-(* textDocument/signatureHelp notification                              *)
-(************************************************************************)
-
+(** textDocument/signatureHelp notification *)
 module SignatureHelpFmt = struct
   open SignatureHelp
   open Hh_json
@@ -439,56 +428,53 @@ module SignatureHelpFmt = struct
     }
 end
 
-(************************************************************************)
-(* codeLens/resolve Request                                             *)
-(************************************************************************)
+(** codeLens/resolve Request *)
+module CodeLensResolveFmt = struct
+  open CodeLensResolve
 
-let parse_codeLensResolve (params : json option) : CodeLensResolve.params = parse_codeLens params
+  let params_of_json (params : json option) : params = parse_codeLens params
 
-let print_codeLensResolve ~key (r : CodeLensResolve.result) : json = print_codeLens ~key r
+  let json_of_result ~key (r : result) : json = print_codeLens ~key r
+end
 
-(************************************************************************)
-(* textDocument/rename Request                                          *)
-(************************************************************************)
+(** textDocument/rename Request *)
+module RenameFmt = struct
+  open Rename
 
-let parse_documentRename (params : json option) : Rename.params =
-  Rename.
+  let params_of_json (params : json option) : params =
     {
       textDocument = Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier;
       position = Jget.obj_exn params "position" |> parse_position;
       newName = Jget.string_exn params "newName";
     }
-  
 
-let print_documentRename : Rename.result -> json = print_workspaceEdit
+  let json_of_result : result -> json = print_workspaceEdit
+end
 
-(************************************************************************)
-(* textDocument/codeLens Request                                        *)
-(************************************************************************)
+(** textDocument/codeLens Request *)
+module DocumentCodeLensFmt = struct
+  open DocumentCodeLens
 
-let parse_documentCodeLens (params : json option) : DocumentCodeLens.params =
-  DocumentCodeLens.
+  let params_of_json (params : json option) : params =
     { textDocument = Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier }
-  
 
-let print_documentCodeLens ~key (r : DocumentCodeLens.result) : json =
-  JSON_Array (Base.List.map r ~f:(print_codeLens ~key))
+  let json_of_result ~key (r : result) : json = JSON_Array (Base.List.map r ~f:(print_codeLens ~key))
+end
 
-(************************************************************************)
-(* workspace/executeCommand Request                                     *)
-(************************************************************************)
+(** workspace/executeCommand Request *)
+module ExecuteCommandFmt = struct
+  open ExecuteCommand
 
-let parse_executeCommand (params : json option) : ExecuteCommand.params =
-  ExecuteCommand.
+  let params_of_json (params : json option) : params =
     {
       command = Jget.string_exn params "command" |> parse_command_name;
       arguments =
         Jget.array_opt params "arguments"
         |> Base.Option.map ~f:(Base.List.map ~f:(fun j -> Base.Option.value_exn j));
     }
-  
 
-let print_executeCommand (() : ExecuteCommand.result) : json = JSON_Null
+  let json_of_result (() : result) : json = JSON_Null
+end
 
 (** workspace/applyEdit server -> client request *)
 module ApplyWorkspaceEditFmt = struct
@@ -522,7 +508,7 @@ end
 
 let print_diagnostic (diagnostic : PublishDiagnostics.diagnostic) : json =
   PublishDiagnostics.(
-    let print_diagnosticSeverity = Fn.compose int_ diagnosticSeverity_to_enum in
+    let print_diagnosticSeverity x = int_ (diagnosticSeverity_to_enum x) in
     let print_diagnosticCode = function
       | IntCode i -> Some (int_ i)
       | StringCode s -> Some (string_ s)
@@ -538,9 +524,9 @@ let print_diagnostic (diagnostic : PublishDiagnostics.diagnostic) : json =
     Jprint.object_opt
       [
         ("range", Some (print_range diagnostic.range));
-        ("severity", Base.Option.map diagnostic.severity print_diagnosticSeverity);
+        ("severity", Base.Option.map diagnostic.severity ~f:print_diagnosticSeverity);
         ("code", print_diagnosticCode diagnostic.code);
-        ("source", Base.Option.map diagnostic.source string_);
+        ("source", Base.Option.map diagnostic.source ~f:string_);
         ("message", Some (JSON_String diagnostic.message));
         ( "relatedInformation",
           Some (JSON_Array (Base.List.map diagnostic.relatedInformation ~f:print_related))
@@ -568,19 +554,18 @@ let parse_diagnostic (j : json option) : PublishDiagnostics.diagnostic =
     let parse_code = function
       | None -> NoCode
       | Some (JSON_String s) -> StringCode s
-      | Some (JSON_Number s) ->
-        begin
-          try IntCode (int_of_string s) with
-          | Failure _ ->
-            raise
-              (Error.LspException
-                 {
-                   Error.code = Error.ParseError;
-                   message = "Diagnostic code expected to be an int: " ^ s;
-                   data = None;
-                 }
-              )
-        end
+      | Some (JSON_Number s) -> begin
+        try IntCode (int_of_string s) with
+        | Failure _ ->
+          raise
+            (Error.LspException
+               {
+                 Error.code = Error.ParseError;
+                 message = "Diagnostic code expected to be an int: " ^ s;
+                 data = None;
+               }
+            )
+      end
       | _ ->
         raise
           (Error.LspException
@@ -655,7 +640,7 @@ let print_codeAction ~key (c : CodeAction.t) : json =
         ("title", Some (JSON_String c.title));
         ("kind", Some (JSON_String (CodeActionKind.string_of_kind c.kind)));
         ("diagnostics", Some (print_diagnostic_list c.diagnostics));
-        ("edit", Base.Option.map edit ~f:print_documentRename);
+        ("edit", Base.Option.map edit ~f:RenameFmt.json_of_result);
         ("command", Base.Option.map command ~f:(print_command ~key));
       ]
   )
@@ -766,17 +751,15 @@ let print_hover (r : Hover.result) : json =
 (************************************************************************)
 (* textDocument/definition request                                      *)
 (************************************************************************)
+module DefinitionFmt = struct
+  open Definition
 
-let parse_definition (params : json option) : Definition.params =
-  parse_textDocumentPositionParams params
+  let params_of_json (params : json option) : params = parse_textDocumentPositionParams params
 
-let print_definition (r : Definition.result) : json =
-  JSON_Array (Base.List.map r ~f:print_definition_location)
+  let json_of_result (r : result) : json = JSON_Array (Base.List.map r ~f:print_location)
+end
 
-(************************************************************************)
-(* completionItem/resolve request                                       *)
-(************************************************************************)
-
+(** completionItem/resolve request *)
 module CompletionItemLabelDetailsFmt = struct
   open CompletionItemLabelDetails
 
@@ -796,9 +779,16 @@ end
 
 let parse_completionItem (params : json option) : CompletionItemResolve.params =
   Completion.(
-    let textEdits =
-      Jget.obj_opt params "textEdit" :: Jget.array_d params "additionalTextEdits" ~default:[]
-      |> Base.List.filter_map ~f:parse_textEdit
+    let textEdit =
+      match Jget.obj_opt params "textEdit" with
+      | None -> None
+      | edit ->
+        (match Jget.obj_opt edit "range" with
+        | Some _ -> Some (`TextEdit (TextEditFmt.of_json edit))
+        | None -> Some (`InsertReplaceEdit (InsertReplaceEditFmt.of_json edit)))
+    in
+    let additionalTextEdits =
+      Jget.array_d params "additionalTextEdits" ~default:[] |> Base.List.map ~f:TextEditFmt.of_json
     in
     let command =
       match Jget.obj_opt params "command" with
@@ -808,17 +798,21 @@ let parse_completionItem (params : json option) : CompletionItemResolve.params =
     {
       label = Jget.string_exn params "label";
       labelDetails =
-        Base.Option.map (Jget.obj_opt params "labelDetails") CompletionItemLabelDetailsFmt.of_json;
-      kind = Base.Option.bind (Jget.int_opt params "kind") completionItemKind_of_enum;
+        Base.Option.map
+          (Jget.obj_opt params "labelDetails")
+          ~f:CompletionItemLabelDetailsFmt.of_json;
+      kind = Base.Option.bind (Jget.int_opt params "kind") ~f:completionItemKind_of_enum;
       detail = Jget.string_opt params "detail";
       documentation = None;
+      tags = None;
       preselect = Jget.bool_d params "preselect" ~default:false;
       sortText = Jget.string_opt params "sortText";
       filterText = Jget.string_opt params "filterText";
       insertText = Jget.string_opt params "insertText";
       insertTextFormat =
-        Base.Option.bind (Jget.int_opt params "insertTextFormat") insertTextFormat_of_enum;
-      textEdits;
+        Base.Option.bind (Jget.int_opt params "insertTextFormat") ~f:insertTextFormat_of_enum;
+      textEdit;
+      additionalTextEdits;
       command;
       data = Jget.obj_opt params "data";
     }
@@ -835,8 +829,8 @@ let print_completionItem ~key (item : Completion.completionItem) : json =
       [
         ("label", Some (JSON_String item.label));
         ("labelDetails", Base.Option.map item.labelDetails ~f:CompletionItemLabelDetailsFmt.to_json);
-        ("kind", Base.Option.map item.kind (fun x -> int_ @@ completionItemKind_to_enum x));
-        ("detail", Base.Option.map item.detail string_);
+        ("kind", Base.Option.map item.kind ~f:(fun x -> int_ @@ completionItemKind_to_enum x));
+        ("detail", Base.Option.map item.detail ~f:string_);
         ( "documentation",
           Base.Option.map item.documentation ~f:(fun doc ->
               JSON_Object
@@ -848,27 +842,35 @@ let print_completionItem ~key (item : Completion.completionItem) : json =
                 ]
           )
         );
+        ( "tags",
+          Base.Option.map item.tags ~f:(fun tags ->
+              JSON_Array (List.map (fun tag -> int_ @@ CompletionItemTag.to_enum tag) tags)
+          )
+        );
         ( "preselect",
           if item.preselect then
             Some (JSON_Bool true)
           else
             None
         );
-        ("sortText", Base.Option.map item.sortText string_);
-        ("filterText", Base.Option.map item.filterText string_);
-        ("insertText", Base.Option.map item.insertText string_);
+        ("sortText", Base.Option.map item.sortText ~f:string_);
+        ("filterText", Base.Option.map item.filterText ~f:string_);
+        ("insertText", Base.Option.map item.insertText ~f:string_);
         ( "insertTextFormat",
-          Base.Option.map item.insertTextFormat (fun x -> int_ @@ insertTextFormat_to_enum x)
+          Base.Option.map item.insertTextFormat ~f:(fun x -> int_ @@ insertTextFormat_to_enum x)
         );
-        ("textEdit", Base.Option.map (Base.List.hd item.textEdits) print_textEdit);
+        ( "textEdit",
+          Base.Option.map item.textEdit ~f:(function
+              | `TextEdit edit -> TextEditFmt.to_json edit
+              | `InsertReplaceEdit edit -> InsertReplaceEditFmt.to_json edit
+              )
+        );
         ( "additionalTextEdits",
-          match Base.List.tl item.textEdits with
-          | None
-          | Some [] ->
-            None
-          | Some l -> Some (JSON_Array (Base.List.map l ~f:print_textEdit))
+          match item.additionalTextEdits with
+          | [] -> None
+          | l -> Some (JSON_Array (Base.List.map l ~f:TextEditFmt.to_json))
         );
-        ("command", Base.Option.map item.command (print_command ~key));
+        ("command", Base.Option.map item.command ~f:(print_command ~key));
         ("data", item.data);
       ]
   )
@@ -876,9 +878,10 @@ let print_completionItem ~key (item : Completion.completionItem) : json =
 (************************************************************************)
 (* textDocument/completion request                                      *)
 (************************************************************************)
+module CompletionFmt = struct
+  open Completion
 
-let parse_completion (params : json option) : Completion.params =
-  Lsp.Completion.(
+  let params_of_json (params : json option) : params =
     let context = Jget.obj_opt params "context" in
     {
       loc = parse_textDocumentPositionParams params;
@@ -891,21 +894,19 @@ let parse_completion (params : json option) : Completion.params =
               triggerKind =
                 Base.Option.value_exn
                   ~message:(Printf.sprintf "Unsupported trigger kind: %d" tk)
-                  (Lsp.Completion.completionTriggerKind_of_enum tk);
+                  (completionTriggerKind_of_enum tk);
               triggerCharacter = Jget.string_opt context "triggerCharacter";
             }
         | None -> None);
     }
-  )
 
-let print_completion ~key (r : Completion.result) : json =
-  Completion.(
+  let json_of_result ~key (r : result) : json =
     JSON_Object
       [
         ("isIncomplete", JSON_Bool r.isIncomplete);
         ("items", JSON_Array (Base.List.map r.items ~f:(print_completionItem ~key)));
       ]
-  )
+end
 
 (** workspace/configuration request *)
 module ConfigurationFmt = struct
@@ -951,27 +952,21 @@ module DidChangeConfigurationFmt = struct
     { settings }
 end
 
-(************************************************************************)
-(* workspace/symbol request                                             *)
-(************************************************************************)
+(** workspace/symbol request *)
+module WorkspaceSymbolFmt = struct
+  open WorkspaceSymbol
 
-let parse_workspaceSymbol (params : json option) : WorkspaceSymbol.params =
-  WorkspaceSymbol.{ query = Jget.string_exn params "query" }
+  let params_of_json (params : json option) : params = { query = Jget.string_exn params "query" }
 
-let print_workspaceSymbol (r : WorkspaceSymbol.result) : json =
-  JSON_Array (Base.List.map r ~f:print_symbolInformation)
+  let json_of_result (r : result) : json = JSON_Array (Base.List.map r ~f:print_symbolInformation)
+end
 
-(************************************************************************)
-(* textDocument/documentSymbol request                                  *)
-(************************************************************************)
-
-let parse_documentSymbol (params : json option) : DocumentSymbol.params =
-  DocumentSymbol.
-    { textDocument = Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier }
-  
-
+(** textDocument/documentSymbol request *)
 module DocumentSymbolFmt = struct
   open DocumentSymbol
+
+  let params_of_json (params : json option) : params =
+    { textDocument = Jget.obj_exn params "textDocument" |> parse_textDocumentIdentifier }
 
   let rec to_json t =
     let { name; detail; kind; deprecated; range; selectionRange; children } = t in
@@ -996,12 +991,12 @@ module DocumentSymbolFmt = struct
             children
         );
       ]
-end
 
-let print_documentSymbol (r : DocumentSymbol.result) : json =
-  match r with
-  | `SymbolInformation xs -> JSON_Array (Base.List.map xs ~f:print_symbolInformation)
-  | `DocumentSymbol xs -> JSON_Array (Base.List.map xs ~f:DocumentSymbolFmt.to_json)
+  let json_of_result (r : result) : json =
+    match r with
+    | `SymbolInformation xs -> JSON_Array (Base.List.map xs ~f:print_symbolInformation)
+    | `DocumentSymbol xs -> JSON_Array (Base.List.map xs ~f:to_json)
+end
 
 (************************************************************************)
 (* textDocument/references request                                      *)
@@ -1013,8 +1008,8 @@ let parse_findReferences (params : json option) : FindReferences.params =
     FindReferences.loc = parse_textDocumentPositionParams params;
     context =
       {
-        FindReferences.includeDeclaration = Jget.bool_d context "includeDeclaration" true;
-        includeIndirectReferences = Jget.bool_d context "includeIndirectReferences" false;
+        FindReferences.includeDeclaration = Jget.bool_d context "includeDeclaration" ~default:true;
+        includeIndirectReferences = Jget.bool_d context "includeIndirectReferences" ~default:false;
       };
   }
 
@@ -1093,7 +1088,7 @@ let parse_documentFormatting (params : json option) : DocumentFormatting.params 
   }
 
 let print_documentFormatting (r : DocumentFormatting.result) : json =
-  JSON_Array (Base.List.map r ~f:print_textEdit)
+  JSON_Array (Base.List.map r ~f:TextEditFmt.to_json)
 
 (************************************************************************)
 (* textDocument/rangeFormatting request                                 *)
@@ -1108,7 +1103,7 @@ let parse_documentRangeFormatting (params : json option) : DocumentRangeFormatti
   }
 
 let print_documentRangeFormatting (r : DocumentRangeFormatting.result) : json =
-  JSON_Array (Base.List.map r ~f:print_textEdit)
+  JSON_Array (Base.List.map r ~f:TextEditFmt.to_json)
 
 (************************************************************************)
 (* textDocument/onTypeFormatting request                                *)
@@ -1124,7 +1119,7 @@ let parse_documentOnTypeFormatting (params : json option) : DocumentOnTypeFormat
   }
 
 let print_documentOnTypeFormatting (r : DocumentOnTypeFormatting.result) : json =
-  JSON_Array (Base.List.map r ~f:print_textEdit)
+  JSON_Array (Base.List.map r ~f:TextEditFmt.to_json)
 
 (************************************************************************)
 (* initialize request                                                   *)
@@ -1153,10 +1148,23 @@ end
 module CompletionClientCapabilitiesFmt = struct
   open CompletionClientCapabilities
 
+  let tagSupport_of_json json =
+    {
+      valueSet =
+        Jget.array_d json "valueSet" ~default:[]
+        |> List.filter_map (function
+               | Some (JSON_Number num_string) ->
+                 num_string |> int_of_string_opt |> Base.Option.bind ~f:CompletionItemTag.of_enum
+               | _ -> None
+               );
+    }
+
   let completionItem_of_json json =
     {
       snippetSupport = Jget.bool_d json "snippetSupport" ~default:false;
       preselectSupport = Jget.bool_d json "preselectSupport" ~default:false;
+      tagSupport = Jget.obj_opt json "tagSupport" |> tagSupport_of_json;
+      insertReplaceSupport = Jget.bool_d json "insertReplaceSupport" ~default:false;
       labelDetailsSupport = Jget.bool_d json "labelDetailsSupport" ~default:false;
     }
 
@@ -1339,11 +1347,17 @@ let print_initialize ~key (r : Initialize.result) : json =
     let cap = r.server_capabilities in
     let sync = cap.textDocumentSync in
     let experimental =
-      let { server_snippetTextEdit } = cap.server_experimental in
+      let { server_snippetTextEdit; strictCompletionOrder } = cap.server_experimental in
       let props = [] in
       let props =
         if server_snippetTextEdit then
           ("snippetTextEdit", JSON_Bool true) :: props
+        else
+          props
+      in
+      let props =
+        if strictCompletionOrder then
+          ("strictCompletionOrder", JSON_Bool true) :: props
         else
           props
       in
@@ -1352,6 +1366,7 @@ let print_initialize ~key (r : Initialize.result) : json =
       else
         Some (JSON_Object props)
     in
+    let info = r.server_info in
     JSON_Object
       [
         ( "capabilities",
@@ -1426,6 +1441,9 @@ let print_initialize ~key (r : Initialize.result) : json =
               ("rageProvider", Some (JSON_Bool cap.rageProvider));
               ("experimental", experimental);
             ]
+        );
+        ( "serverInfo",
+          JSON_Object [("name", JSON_String info.name); ("version", JSON_String info.version)]
         );
       ]
   )
@@ -1530,7 +1548,8 @@ let print_error ?(include_error_stack_trace = true) (e : Error.t) (stack : strin
   in
   let entries =
     ("code", int_ (Error.code_to_enum e.Error.code))
-    :: ("message", string_ e.Error.message) :: entries
+    :: ("message", string_ e.Error.message)
+    :: entries
   in
   JSON_Object entries
 
@@ -1656,15 +1675,15 @@ let parse_lsp_request (method_ : string) (params : json option) : lsp_request =
   match method_ with
   | "initialize" -> InitializeRequest (parse_initialize params)
   | "shutdown" -> ShutdownRequest
-  | "codeLens/resolve" -> CodeLensResolveRequest (parse_codeLensResolve params)
+  | "codeLens/resolve" -> CodeLensResolveRequest (CodeLensResolveFmt.params_of_json params)
   | "textDocument/hover" -> HoverRequest (parse_hover params)
   | "textDocument/codeAction" -> CodeActionRequest (parse_codeActionRequest params)
-  | "textDocument/completion" -> CompletionRequest (parse_completion params)
-  | "textDocument/definition" -> DefinitionRequest (parse_definition params)
-  | "workspace/symbol" -> WorkspaceSymbolRequest (parse_workspaceSymbol params)
-  | "textDocument/documentSymbol" -> DocumentSymbolRequest (parse_documentSymbol params)
+  | "textDocument/completion" -> CompletionRequest (CompletionFmt.params_of_json params)
+  | "textDocument/definition" -> DefinitionRequest (DefinitionFmt.params_of_json params)
+  | "workspace/symbol" -> WorkspaceSymbolRequest (WorkspaceSymbolFmt.params_of_json params)
+  | "textDocument/documentSymbol" -> DocumentSymbolRequest (DocumentSymbolFmt.params_of_json params)
   | "textDocument/references" -> FindReferencesRequest (parse_findReferences params)
-  | "textDocument/rename" -> RenameRequest (parse_documentRename params)
+  | "textDocument/rename" -> RenameRequest (RenameFmt.params_of_json params)
   | "textDocument/documentHighlight" -> DocumentHighlightRequest (parse_documentHighlight params)
   | "textDocument/typeCoverage" -> TypeCoverageRequest (parse_typeCoverage params)
   | "textDocument/formatting" -> DocumentFormattingRequest (parse_documentFormatting params)
@@ -1672,11 +1691,11 @@ let parse_lsp_request (method_ : string) (params : json option) : lsp_request =
     DocumentRangeFormattingRequest (parse_documentRangeFormatting params)
   | "textDocument/onTypeFormatting" ->
     DocumentOnTypeFormattingRequest (parse_documentOnTypeFormatting params)
-  | "textDocument/codeLens" -> DocumentCodeLensRequest (parse_documentCodeLens params)
+  | "textDocument/codeLens" -> DocumentCodeLensRequest (DocumentCodeLensFmt.params_of_json params)
   | "textDocument/selectionRange" -> SelectionRangeRequest (SelectionRangeFmt.params_of_json params)
   | "textDocument/signatureHelp" -> SignatureHelpRequest (SignatureHelpFmt.of_json params)
   | "telemetry/rage" -> RageRequest
-  | "workspace/executeCommand" -> ExecuteCommandRequest (parse_executeCommand params)
+  | "workspace/executeCommand" -> ExecuteCommandRequest (ExecuteCommandFmt.params_of_json params)
   | "workspace/configuration" -> ConfigurationRequest (ConfigurationFmt.params_of_json params)
   | "completionItem/resolve"
   | "window/showMessageRequest" (* server -> client, we should never receive this *)
@@ -1695,7 +1714,7 @@ let parse_lsp_notification (method_ : string) (params : json option) : lsp_notif
   | "textDocument/didOpen" -> DidOpenNotification (parse_didOpen params)
   | "textDocument/didClose" -> DidCloseNotification (parse_didClose params)
   | "textDocument/didSave" -> DidSaveNotification (parse_didSave params)
-  | "textDocument/didChange" -> DidChangeNotification (parse_didChange params)
+  | "textDocument/didChange" -> DidChangeNotification (DidChangeFmt.params_of_json params)
   | "workspace/didChangeConfiguration" ->
     DidChangeConfigurationNotification (DidChangeConfigurationFmt.params_of_json params)
   | "workspace/didChangeWatchedFiles" ->
@@ -1822,15 +1841,15 @@ let print_lsp_response ?include_error_stack_trace ~key (id : lsp_id) (result : l
     match result with
     | InitializeResult r -> print_initialize ~key r
     | ShutdownResult -> print_shutdown ()
-    | CodeLensResolveResult r -> print_codeLensResolve ~key r
+    | CodeLensResolveResult r -> CodeLensResolveFmt.json_of_result ~key r
     | HoverResult r -> print_hover r
     | CodeActionResult r -> print_codeActionResult ~key r
-    | CompletionResult r -> print_completion ~key r
+    | CompletionResult r -> CompletionFmt.json_of_result ~key r
     | ConfigurationResult r -> ConfigurationFmt.json_of_result r
-    | DefinitionResult r -> print_definition r
-    | TypeDefinitionResult r -> print_definition r
-    | WorkspaceSymbolResult r -> print_workspaceSymbol r
-    | DocumentSymbolResult r -> print_documentSymbol r
+    | DefinitionResult r -> DefinitionFmt.json_of_result r
+    | TypeDefinitionResult r -> DefinitionFmt.json_of_result r
+    | WorkspaceSymbolResult r -> WorkspaceSymbolFmt.json_of_result r
+    | DocumentSymbolResult r -> DocumentSymbolFmt.json_of_result r
     | FindReferencesResult r -> print_Locations r
     | GoToImplementationResult r -> print_Locations r
     | DocumentHighlightResult r -> print_documentHighlight r
@@ -1839,9 +1858,9 @@ let print_lsp_response ?include_error_stack_trace ~key (id : lsp_id) (result : l
     | DocumentRangeFormattingResult r -> print_documentRangeFormatting r
     | DocumentOnTypeFormattingResult r -> print_documentOnTypeFormatting r
     | RageResult r -> print_rage r
-    | RenameResult r -> print_documentRename r
-    | DocumentCodeLensResult r -> print_documentCodeLens ~key r
-    | ExecuteCommandResult r -> print_executeCommand r
+    | RenameResult r -> RenameFmt.json_of_result r
+    | DocumentCodeLensResult r -> DocumentCodeLensFmt.json_of_result ~key r
+    | ExecuteCommandResult r -> ExecuteCommandFmt.json_of_result r
     | ApplyWorkspaceEditResult r -> ApplyWorkspaceEditFmt.json_of_result r
     | SelectionRangeResult r -> SelectionRangeFmt.json_of_result r
     | SignatureHelpResult r -> SignatureHelpFmt.to_json r

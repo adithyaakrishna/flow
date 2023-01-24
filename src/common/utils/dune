@@ -1,12 +1,14 @@
 (library
-  (name flow_common_utils)
-  (wrapped false)
-  (flags -w +a-4-6-29-35-44-48-50)
-  (libraries
-    hh_json ; hack
-    imported_core ; hack
-    flow_parser
-    string ; hack
-    sys_utils ; hack
-    lwt)
-  (preprocess (pps lwt_ppx ppx_deriving.std)))
+ (name flow_common_utils)
+ (wrapped false)
+ (libraries
+  hh_json ; hack
+  flow_parser
+  string ; hack
+  sys_utils ; hack
+  lwt)
+ (preprocess
+  (pps lwt_ppx ppx_deriving.std)))
+
+(dirs
+ (:standard __tests__))

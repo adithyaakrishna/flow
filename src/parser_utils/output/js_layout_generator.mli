@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -113,6 +113,9 @@ val function_params :
   opts:opts ->
   (Loc.t, Loc.t) Flow_ast.Function.Params.t ->
   Layout.layout_node
+
+val function_params_and_return :
+  opts:opts -> Loc.t * (Loc.t, Loc.t) Flow_ast.Function.t -> Layout.layout_node
 
 val better_quote : prefer_single_quotes:bool -> string -> string
 

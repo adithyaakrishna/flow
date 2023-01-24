@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -22,7 +22,6 @@ set -x
 sed -i 's/^\(let version = "\)[^"]*\("\)/\1'"$VERSION"'\2/' src/common/flow_version.ml
 sed -i 's/^\(version: "\)[^"]*\("\)/\1'"$OPAM_VERSION"'\2/' flowtype.opam
 sed -i 's/^\(version: "\)[^"]*\("\)/\1'"$OPAM_VERSION"'\2/' flow_parser.opam
-sed -i 's/^\(version="\)[^"]*\("\)/\1'"$OPAM_VERSION"'\2/' src/parser/META
 sed -i 's/\("version": "\)[^"]*\("\)/\1'"$VERSION"'\2/' packages/flow-parser-bin/package.json
 sed -i 's/\("version": "\)[^"]*\("\)/\1'"$VERSION"'\2/' packages/flow-parser/package.json
 sed -i 's/\("version": "\)[^"]*\("\)/\1'"$REMOVE_TYPES_VERSION"'\2/' packages/flow-remove-types/package.json

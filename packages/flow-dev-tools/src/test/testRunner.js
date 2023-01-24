@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,20 +8,21 @@
  * @format
  */
 
-const colors = require('colors/safe');
-
+const chalk = require('chalk');
+const {readFile, symlink} = require('fs').promises;
 const {format} = require('util');
 const {basename, dirname, resolve, join} = require('path');
 const {spawn} = require('child_process');
 
 const {getTestsDir} = require('../constants');
-const {drain, readFile, rimraf, symlink} = require('../utils/async');
+const {drain, rimraf} = require('../utils/async');
 const {Builder} = require('./builder');
 const {findTestsByName, findTestsByRun, loadSuite} = require('./findTests');
 const {RunQueue} = require('./RunQueue');
 
 import type {Suite} from './Suite';
 import type {Args} from './testCommand';
+import type {SaneWatcher} from 'sane';
 
 /* We potentially have a ton of info to dump into stdout/stderr. Let's handle
  * drain events properly */
@@ -35,7 +36,7 @@ async function write(
   }
 }
 
-function startWatchAndRun(suites, args) {
+function startWatchAndRun(suites: Set<string>, args: Args) {
   // Require in here to avoid the dependency for most test runs
   const sane = require('sane');
 
@@ -56,7 +57,7 @@ function startWatchAndRun(suites, args) {
     process.stdout.write('> ');
   };
 
-  const keydown = chunk => {
+  const keydown = (chunk: Buffer) => {
     const char = chunk.toString()[0];
 
     const shortcut = shortcuts.get(char);
@@ -108,7 +109,7 @@ function startWatchAndRun(suites, args) {
         );
       }
     }
-    changedThings = new Set();
+    changedThings = new Set<string>();
 
     if (queuedSet.size === 0) {
       return;
@@ -117,17 +118,17 @@ function startWatchAndRun(suites, args) {
     running = true;
     stopListeningForShortcuts();
     const runSet = queuedSet;
-    queuedSet = new Set();
+    queuedSet = new Set<string>();
 
-    const suitesToRun = {};
+    const suitesToRun: {[string]: Suite} = {};
     for (const suiteName of runSet) {
       try {
         suitesToRun[suiteName] = loadSuite(suiteName);
       } catch (e) {
         process.stderr.write(
           format(
-            colors.red.bold('Failed to load test suite `%s`\n%s\n'),
-            colors.blue(suiteName),
+            chalk.red.bold('Failed to load test suite `%s`\n%s\n'),
+            chalk.blue(suiteName),
             e.stack,
           ),
         );
@@ -161,13 +162,13 @@ function startWatchAndRun(suites, args) {
     run();
   };
 
-  async function rerun(runID, failedOnly) {
+  async function rerun(runID: string, failedOnly: boolean) {
     suites = await findTestsByRun(runID, failedOnly);
     suites.forEach(suite => queuedSet.add(suite));
     run();
   }
 
-  async function record(runID) {
+  async function record(runID: string) {
     running = true;
     stopListeningForShortcuts();
 
@@ -188,7 +189,11 @@ function startWatchAndRun(suites, args) {
     running = false;
   }
 
-  const watch = (watcher, name, suiteNames) => {
+  const watch = (
+    watcher: SaneWatcher,
+    name: string,
+    suiteNames: Array<string>,
+  ) => {
     const callback = () => {
       changedThings.add(name);
       suiteNames.forEach(suite => queuedSet.add(suite));
@@ -222,14 +227,15 @@ function startWatchAndRun(suites, args) {
   }
 }
 
-async function runOnce(suites: {[suiteName: string]: Suite}, args) {
+async function runOnce(suites: {[suiteName: string]: Suite}, args: Args) {
   let maxErroredTests = 0;
   if (args.maxErroredTests != null) {
     maxErroredTests = args.maxErroredTests;
   }
   if (args.maxErroredTestsPct != null) {
+    const maxErroredTestsPct = args.maxErroredTestsPct;
     const numTests = Object.keys(suites).length;
-    maxErroredTests = Math.floor((numTests * args.maxErroredTestsPct) / 100);
+    maxErroredTests = Math.floor((numTests * maxErroredTestsPct) / 100);
   }
   if (maxErroredTests > 0) {
     process.stderr.write(
@@ -267,11 +273,11 @@ async function runOnce(suites: {[suiteName: string]: Suite}, args) {
       }
       await write(
         process.stdout,
-        colors.bgRed(colors.white.bold('ERRORED')) +
-          colors.grey(': suite ') +
-          colors.blue('%s') +
+        chalk.bgRed(chalk.white.bold('ERRORED')) +
+          chalk.grey(': suite ') +
+          chalk.blue('%s') +
           '\n' +
-          colors.red('%s') +
+          chalk.red('%s') +
           '\n',
         suiteName,
         suiteResult.message,
@@ -290,12 +296,12 @@ async function runOnce(suites: {[suiteName: string]: Suite}, args) {
             exitCode = 1;
             await write(
               process.stdout,
-              colors.red.bold('FAILED') +
-                colors.grey(': suite ') +
-                colors.blue('%s') +
-                colors.grey(', test ') +
-                colors.blue('%s') +
-                colors.grey(' (%d of %d), step %d of %d') +
+              chalk.red.bold('FAILED') +
+                chalk.grey(': suite ') +
+                chalk.blue('%s') +
+                chalk.grey(', test ') +
+                chalk.blue('%s') +
+                chalk.grey(' (%d of %d), step %d of %d') +
                 '\n',
               suiteName,
               testResult.name || 'unnamed test',
@@ -330,13 +336,13 @@ async function runOnce(suites: {[suiteName: string]: Suite}, args) {
             process.env['VISUAL'] || process.env['EDITOR'] || 'cat';
           let logContents = '';
           try {
-            logContents = await readFile(logFile);
+            logContents = await readFile(logFile, 'utf8');
           } catch (e) {
             logContents = e.message != null ? e.message : String(e);
           }
           await write(
             process.stdout,
-            colors.grey.bold('%s %s') + '\n' + colors.grey('%s') + '\n',
+            chalk.grey.bold('%s %s') + '\n' + chalk.grey('%s') + '\n',
             logCommand,
             logFile,
             logContents,
@@ -402,7 +408,7 @@ async function testRunner(args: Args): Promise<void> {
   if (args.watch) {
     startWatchAndRun(suites, args);
   } else {
-    const loadedSuites = {};
+    const loadedSuites: {[string]: Suite} = {};
     for (const suiteName of suites) {
       loadedSuites[suiteName] = loadSuite(suiteName);
     }

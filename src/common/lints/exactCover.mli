@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -117,10 +117,6 @@ val default_file_cover : File_key.t -> lint_severity_cover
 (* Gets the severity of the provided lint kind at the provided location. Errors
  * if queried for a file not contained in this cover. *)
 val get_severity : lint_kind -> Loc.t -> lint_severity_cover -> severity
-
-(* True iff the provided lint kind has severity `Off` at the provided location.
- * Errors if queried for a file not contained in this cover. *)
-val is_suppressed : lint_kind -> Loc.t -> lint_severity_cover -> bool
 
 (* True iff the severity for the provided lint kind has been explicitly set at
  * the provided location. Errors if queried for a file not contained in this

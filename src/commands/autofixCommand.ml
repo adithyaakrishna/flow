@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -38,7 +38,7 @@ module InsertType = struct
             |> wait_for_recheck_flag
             |> flag
                  "--strict-location"
-                 no_arg
+                 truthy
                  ~doc:"Restrict the number of valid positions for each annotation"
             |> flag
                  "--strategy"
@@ -50,11 +50,11 @@ module InsertType = struct
                    )
             |> flag
                  "--in-place"
-                 no_arg
+                 truthy
                  ~doc:"Overwrite the input file or file specified by the path flag"
             |> flag
                  "--omit-typearg-defaults"
-                 no_arg
+                 truthy
                  ~doc:"Omit type arguments when defaults exist and match the provided type argument"
             |> anon "args" (required (list_of string))
           );
@@ -89,13 +89,12 @@ module InsertType = struct
     match (in_place, path, source_path) with
     | (false, _, _) -> stdout
     | (true, Some p, _)
-    | (true, None, Some p) ->
-      begin
-        try open_out p with
-        | _ ->
-          handle_error ~code:Exit.Path_is_not_a_file
-          @@ Printf.sprintf "failed to open output file: %s" p
-      end
+    | (true, None, Some p) -> begin
+      try open_out p with
+      | _ ->
+        handle_error ~code:Exit.Path_is_not_a_file
+        @@ Printf.sprintf "failed to open output file: %s" p
+    end
     | (true, None, None) ->
       handle_error "Flow: --in-place flag used without input file or explicit path"
 
@@ -178,9 +177,9 @@ module Exports = struct
           |> wait_for_recheck_flag
           |> flag
                "--in-place"
-               no_arg
+               truthy
                ~doc:"Overwrite the input file or file specified by the path flag"
-          |> flag "--force" no_arg ~doc:"Write the results even if errors are encountered"
+          |> flag "--force" truthy ~doc:"Write the results even if errors are encountered"
           |> anon "file" (required string)
         );
     }
@@ -191,13 +190,12 @@ module Exports = struct
     match (in_place, path, source_path) with
     | (false, _, _) -> stdout
     | (true, Some p, _)
-    | (true, None, p) ->
-      begin
-        try open_out p with
-        | _ ->
-          handle_error ~code:Exit.Path_is_not_a_file
-          @@ Printf.sprintf "failed to open output file: %s" p
-      end
+    | (true, None, p) -> begin
+      try open_out p with
+      | _ ->
+        handle_error ~code:Exit.Path_is_not_a_file
+        @@ Printf.sprintf "failed to open output file: %s" p
+    end
 
   let avg_error_size = 100
 

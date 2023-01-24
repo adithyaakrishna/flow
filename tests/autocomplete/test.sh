@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -73,15 +73,16 @@ queries_in_file autocomplete "function-added-properties.js" --pretty
 queries_in_file autocomplete "comments.js" --pretty
 queries_in_file autocomplete "literal.js" --pretty
 queries_in_file autocomplete "import_source.js" --pretty
-queries_in_file autocomplete "object-with-prototype.js" --pretty
 queries_in_file autocomplete "object-spread-1.js" --pretty
 queries_in_file autocomplete "object-spread-2.js" --pretty
+queries_in_file autocomplete "object_keys_spread.js" --pretty
 queries_in_file autocomplete "union-2.js" --pretty
 queries_in_file autocomplete "type-alias.js" --pretty
 queries_in_file autocomplete "intersection.js" --pretty
 queries_in_file autocomplete "rank.js" --lsp
 queries_in_file autocomplete "rank_union.js" --lsp
 queries_in_file autocomplete "rank_intersection.js" --lsp
+queries_in_file autocomplete "shadow-prop.js" --pretty
 queries_in_file autocomplete "suggest_optional_chaining_1.js" --lsp
 queries_in_file autocomplete "suggest_optional_chaining_2.js" --lsp
 queries_in_file autocomplete "suggest_optional_chaining_3.js" --lsp
@@ -112,17 +113,26 @@ queries_in_file autocomplete "bracket_syntax_needed.js" --lsp
 queries_in_file autocomplete "bracket_syntax_needed_2.js" --lsp
 queries_in_file autocomplete "upper_bounds_1.js" --lsp
 queries_in_file autocomplete "upper_bounds_2.js" --lsp
-queries_in_file autocomplete "upper_bounds_3.js" --pretty
-queries_in_file autocomplete "upper_bounds_4.js" --pretty
-queries_in_file autocomplete "upper_bounds_5.js" --pretty
 queries_in_file autocomplete "upper_bounds_6.js" --pretty
 queries_in_file autocomplete "upper_bounds_7.js" --pretty
 queries_in_file autocomplete "upper_bounds_8.js" --pretty
 queries_in_file autocomplete "upper_bounds_9.js" --pretty
 queries_in_file autocomplete "upper_bounds_10.js" --pretty
+queries_in_file autocomplete "upper_bounds_11.js" --pretty
+queries_in_file autocomplete "upper_bounds_12.js" --pretty
+queries_in_file autocomplete "upper_bounds_13.js" --pretty
+queries_in_file autocomplete "upper_bounds_14.js" --pretty
+queries_in_file autocomplete "upper_bounds_15.js" --pretty
+queries_in_file autocomplete "upper_bounds_16.js" --pretty
+queries_in_file autocomplete "upper_bounds_17.js" --pretty
 queries_in_file autocomplete "indexed-access-1.js" --lsp
 queries_in_file autocomplete "indexed-access-2.js" --lsp
 queries_in_file autocomplete "indexed-access-optional-1.js" --lsp
 queries_in_file autocomplete "indexed-access-optional-2.js" --lsp
 queries_in_file autocomplete "typeof.js" --lsp
 queries_in_file autocomplete "typeof_2.js" --lsp
+queries_in_file autocomplete "recursive.js" --pretty
+queries_in_file autocomplete "class_members.js" --pretty
+queries_in_file autocomplete "method_signature.js" --lsp
+query_at_pos autocomplete "last_empty_line.js" 5 0 --pretty
+queries_in_file autocomplete "string_literal.js" --lsp

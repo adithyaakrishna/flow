@@ -26,7 +26,7 @@ class E extends A {
   }
 }
 
-function leak(f) {
+function leak(f: F) {
   f.y; // OK (errors at leaked site)
   f.x; // OK (errors at leaked site)
 }
@@ -41,7 +41,7 @@ class F extends A {
 }
 
 class G extends A {
-  constructor(b) {
+  constructor(b: mixed) {
     super.x; // error (no super call)
   }
 }
@@ -59,7 +59,7 @@ class H extends A {
 }
 
 class I_ {
-  constructor(leaked_this) {
+  constructor(leaked_this: I_) {
     leaked_this.foo() // OK (errors at leaked site)
   }
   foo() { }
@@ -72,7 +72,7 @@ class I extends I_ {
 
 class J__ { }
 class J_ extends J__ {
-  constructor(closure_leaking_this) {
+  constructor(closure_leaking_this: () => void) {
     closure_leaking_this();
     super();
   }
@@ -91,7 +91,7 @@ class J extends J_ {
 
 class K_ {
   closure_leaking_this: () => void;
-  constructor(closure_leaking_this) {
+  constructor(closure_leaking_this: () => void) {
     this.closure_leaking_this = closure_leaking_this;
   }
   foo() { }
@@ -104,50 +104,43 @@ class K extends K_ {
   }
 }
 
-// even though super() calls the parent's constructor(), it does not do the same
-// conversion on non-objects. so `new L_()` returns an instance of `L_` because
-// the constructor returns false (a non-object), but `super()` returns false,
-// which then similarly causes `new L()` to return an instance of `L`.
+// We enforce that constructors cannot have non-void returns
 class L_ {
   constructor() {
-    return false;
+    return false; // error: boolean ~> void
   }
 }
 class L extends L_ {
   constructor() {
-    let x: boolean = super();
-    return x;
+    let x: boolean = super(); // error: void ~> boolean
+    return x; // error: boolean ~> void
   }
 }
 (new L_(): L_);
 (new L(): L);
 
-// similarly, the converse is true: if the parent's constructor returns an
-// object, then the child does too.
 class M_ {
   constructor() {
-    return {foo: 'foo'};
+    return {foo: 'foo'}; // error: object ~> void
   }
 }
 class M extends M_ {
   constructor() {
-    return super();
+    return super(); // OK
   }
 }
-(new M_(): {foo: string});
-(new M(): {foo: string});
+(new M_(): M_);
+(new M(): M);
 
-// however! super() calls the parent constructor with the subclass as its `this`
-// value (essentially `super.constructor.call(this)`).
 class N_ {
-  constructor(): this {
+  constructor(): this { // error: this ~> void
     let x = this;
     return x;
   }
 }
 class N extends N_ {
   constructor() {
-    return super();
+    return super(); // error: N ~> void
   }
 }
 (new N_(): N_);

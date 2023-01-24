@@ -71,48 +71,6 @@ var u = (<X>(x: X, escape: boolean): X => {
   return u;
 })(42, true);
 
-var a3 = {};
-
-function f6<X>(x: X, escape: boolean): X | void {
-  if (escape) {
-    a3.x = x;
-  }
-  return a3.x;
-}
-
-var a4 = () => 42;
-
-function f7<X>(x: X, escape: boolean): X | void {
-  if (escape) {
-    a4.x = x;
-  }
-  return a4.x;
-}
-
-var a5 = Object.create(null);
-
-function f8<X>(x: X, escape: boolean): X | void {
-  if (escape) {
-    a5.x = x;
-  }
-  return a5.x;
-}
-
-
-var a6 = {};
-a6.a7 = 42;
-function f9<Y>(y: Y, escape): ?Y {
-  var {a7, ...a8} = a6;
-  a8.c = y; // this should be ok
-  function g<X>(x: X): ?X {
-    if (escape) {
-      a8.b = x;
-    }
-    return a8.b;
-  }
-  return a8.c;
-}
-
 for (var x0 of []) {
   function f<X>(y: X) {
     x0 = y;
@@ -143,20 +101,15 @@ try {
     e = y;
   }
 }
-function f10({...x}) {
-  function f<X>(y: X) {
-    x = y;
-  }
-}
 
-for (var xe of [(42: any)]) {
+for (const xe of [(42: any)]) {
   let {...x} = xe;
   function f<X>(y: X) {
     x = y;
   }
 }
 
-for (var xe of [(42: any)]) {
+for (const xe of [(42: any)]) {
   let {x: y} = xe;
   function f<X>(z: X) {
     y = z;

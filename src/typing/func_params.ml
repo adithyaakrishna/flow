@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,33 +16,13 @@
 
 include Func_params_intf
 
-module Make (C : Config) = struct
-  type 'T ast = 'T C.ast
-
-  type 'T param_ast = 'T C.param_ast
-
-  type 'T rest_ast = 'T C.rest_ast
-
-  type 'T this_ast = 'T C.this_ast
-
-  type param = C.param
-
-  type rest = C.rest
-
-  type this_param = C.this_param
-
-  type reconstruct =
-    (ALoc.t * Type.t) param_ast list ->
-    (ALoc.t * Type.t) rest_ast option ->
-    (ALoc.t * Type.t) this_ast option ->
-    (ALoc.t * Type.t) ast option
-
-  type t = {
-    params_rev: param list;
-    rest: rest option;
-    this_: this_param option;
-    reconstruct: reconstruct;
-  }
+module Make
+    (CT : Func_class_sig_types.Config.S)
+    (C : Config with module Types := CT)
+    (T : Func_class_sig_types.Param.S with module Config := CT) :
+  S with module Config_types := CT and module Config := C and module Types = T = struct
+  module Types = T
+  open T
 
   let empty reconstruct = { params_rev = []; rest = None; this_ = None; reconstruct }
 
@@ -51,6 +31,10 @@ module Make (C : Config) = struct
   let add_rest r x = { x with rest = Some r }
 
   let add_this t x = { x with this_ = Some t }
+
+  let all_params_annotated { params_rev; rest; _ } =
+    Base.List.for_all params_rev ~f:C.is_param_type_annotated
+    && Base.Option.value_map rest ~default:true ~f:C.is_rest_type_annotated
 
   let value { params_rev; _ } =
     List.fold_left
@@ -63,14 +47,6 @@ module Make (C : Config) = struct
   let rest { rest; _ } = Base.Option.map ~f:C.rest_type rest
 
   let this { this_; _ } = Base.Option.map ~f:C.this_type this_
-
-  let subst cx map { params_rev; rest; this_; reconstruct } =
-    {
-      params_rev = Base.List.map ~f:(C.subst_param cx map) params_rev;
-      rest = Base.Option.map ~f:(C.subst_rest cx map) rest;
-      this_ = Base.Option.map ~f:(C.subst_this cx map) this_;
-      reconstruct;
-    }
 
   let eval cx { params_rev; rest; this_; reconstruct } =
     let params = List.rev params_rev in

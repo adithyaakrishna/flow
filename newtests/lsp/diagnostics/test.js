@@ -128,7 +128,7 @@ module.exports = (suite(
         .waitUntilLSPMessage(9000, 'textDocument/publishDiagnostics')
         .verifyAllLSPMessagesInStep(
           [['textDocument/publishDiagnostics', '{"diagnostics":[]}']],
-          [],
+          ['window/showStatus'],
         ),
       // Make another change that doesn't introduce errors. We should get no reports.
       lspNotification('textDocument/didChange', {
@@ -145,7 +145,7 @@ module.exports = (suite(
         ],
       })
         .sleep(1000)
-        .verifyAllLSPMessagesInStep([], []),
+        .verifyAllLSPMessagesInStep([], ['window/showStatus']),
       // Make a change that introduces the error. We should get a report immediately.
       lspNotification('textDocument/didChange', {
         textDocument: {
@@ -163,7 +163,7 @@ module.exports = (suite(
         .waitUntilLSPMessage(9000, 'textDocument/publishDiagnostics')
         .verifyAllLSPMessagesInStep(
           [['textDocument/publishDiagnostics', '{Unexpected token}']],
-          [],
+          ['window/showStatus'],
         ),
       // Close the file. The live error should go away.
       lspNotification('textDocument/didClose', {
@@ -175,7 +175,7 @@ module.exports = (suite(
         .waitUntilLSPMessage(9000, 'textDocument/publishDiagnostics')
         .verifyAllLSPMessagesInStep(
           [['textDocument/publishDiagnostics', '{"diagnostics":[]}']],
-          [],
+          ['window/showStatus'],
         ),
     ]),
     test('live non-parse diagnostics', [
@@ -303,38 +303,6 @@ module.exports = (suite(
           ['window/showStatus', 'textDocument/publishDiagnostics'],
         ),
     ]).flowConfig('_flowconfig_lazy'),
-    test('live non-parse diagnostics can be disabled in .flowconfig', [
-      lspStartAndConnect(),
-      // Open a document with no errors. We should not see errors
-      lspNotification('textDocument/didOpen', {
-        textDocument: {
-          uri: '<PLACEHOLDER_PROJECT_URL>/typeError1.js',
-          languageId: 'javascript',
-          version: 1,
-          text: `// @flow`,
-        },
-      })
-        .sleep(1000)
-        .verifyAllLSPMessagesInStep([], [...lspIgnoreStatusAndCancellation]),
-      // Edit it and add a type error. We won't see the error since
-      // experimental.disable_live_non_parse_errors=true
-      // is set in the .flowconfig
-      lspNotification('textDocument/didChange', {
-        textDocument: {
-          uri: '<PLACEHOLDER_PROJECT_URL>/typeError1.js',
-          version: 2,
-        },
-        contentChanges: [
-          {
-            text: `// @flow
-    let x: string = 123;
-    `,
-          },
-        ],
-      })
-        .sleep(1000)
-        .verifyAllLSPMessagesInStep([], [...lspIgnoreStatusAndCancellation]),
-    ]).flowConfig('_flowconfig_disable_live_non_parse_errors'),
     test('live non-parse diagnostics respect missing @flow pragma', [
       lspStartAndConnect(),
       // Open a document with no errors. We should not see errors

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -43,6 +43,8 @@ let restore_context _ = ()
 
 let set_command _ = ()
 
+let set_eden _ = ()
+
 let set_from from = context := { from }
 
 let set_root _ = ()
@@ -65,24 +67,13 @@ let set_server_options
 
 let status_response ~num_errors:_ = ()
 
-let init_done
-    ?estimated_time_to_recheck:_
-    ?estimated_time_to_restart:_
-    ?estimated_time_to_init:_
-    ?estimated_time_per_file:_
-    ?estimated_files_to_recheck:_
-    ?estimated_files_to_init:_
-    ?first_internal_error:_
-    _profiling =
-  ()
+let init_done ?first_internal_error:_ ~saved_state_fetcher:_ _profiling = ()
 
 let init_flow_command ~init_id:_ = ()
 
 let init_worker ~init_id:_ _ = ()
 
 let should_log () = false
-
-let killed _ = ()
 
 let lock_lost _ = ()
 
@@ -95,7 +86,6 @@ let exit ?error:_ _ _ = ()
 let report_from_monitor_server_exit_due_to_signal _ = ()
 
 let recheck
-    ~recheck_reasons:_
     ~modified:_
     ~deleted:_
     ~to_merge:_
@@ -105,16 +95,14 @@ let recheck
     ~merge_skip_count:_
     ~check_skip_count:_
     ~profiling:_
-    ~estimated_time_to_recheck:_
-    ~estimated_time_to_restart:_
-    ~estimated_time_to_init:_
-    ~estimated_time_per_file:_
-    ~estimated_files_to_recheck:_
-    ~estimated_files_to_init:_
     ~first_internal_error:_
     ~slowest_file:_
     ~num_slow_files:_
     ~scm_changed_mergebase:_ =
+  ()
+
+let recheck_canceled
+    ~priority:_ ~num_files_to_prioritize:_ ~num_files_to_recheck:_ ~num_files_to_force:_ =
   ()
 
 let recheck_series ~recheck_count:_ ~profiling:_ = ()
@@ -204,3 +192,5 @@ let sharedmem_failed_memfd_init _ = ()
 let worker_exception _ = ()
 
 let dfind_ready _ _ = ()
+
+let parsing_exception _ = ()

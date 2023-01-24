@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -24,6 +24,7 @@ type 'loc virtual_reason_desc =
   | RBoolean
   | RMixed
   | REmpty
+  | REmptyArrayElement
   | RVoid
   | RNull
   | RVoidedNull
@@ -77,7 +78,7 @@ type 'loc virtual_reason_desc =
   | RImplicitInstantiation
   | RTooFewArgs
   | RTooFewArgsExpectedRest
-  | RConstructorReturn
+  | RConstructorVoidReturn
   | RNewObject
   | RUnion
   | RUnionType
@@ -95,7 +96,6 @@ type 'loc virtual_reason_desc =
   | RDefaultConstructor
   | RConstructorCall of 'loc virtual_reason_desc
   | RReturn
-  | RImplicitReturn of 'loc virtual_reason_desc
   | RRegExp
   | RSuper
   | RNoSuper
@@ -110,7 +110,8 @@ type 'loc virtual_reason_desc =
   | RType of name
   | RTypeAlias of string * 'loc option * 'loc virtual_reason_desc
   | ROpaqueType of string
-  | RTypeParam of string * ('loc virtual_reason_desc * 'loc) * ('loc virtual_reason_desc * 'loc)
+  | RTypeParam of
+      Subst_name.t * ('loc virtual_reason_desc * 'loc) * ('loc virtual_reason_desc * 'loc)
   | RTypeof of string
   | RMethod of string option
   | RMethodCall of string option
@@ -122,7 +123,6 @@ type 'loc virtual_reason_desc =
   | RPropertyAssignment of string option
   | RProperty of name option
   | RPrivateProperty of string
-  | RShadowProperty of name
   | RMember of {
       object_: string;
       property: string;
@@ -151,7 +151,7 @@ type 'loc virtual_reason_desc =
   | RReadOnlyType
   | ROptional of 'loc virtual_reason_desc
   | RMaybe of 'loc virtual_reason_desc
-  | RRestArray of 'loc virtual_reason_desc
+  | RRestArrayLit of 'loc virtual_reason_desc
   | RAbstract of 'loc virtual_reason_desc
   | RTypeApp of 'loc virtual_reason_desc
   | RTypeAppImplicit of 'loc virtual_reason_desc
@@ -194,6 +194,7 @@ type 'loc virtual_reason_desc =
   | RUnionBranching of 'loc virtual_reason_desc * int
   | RUninitialized
   | RPossiblyUninitialized
+  | RUnannotatedNext
 
 and reason_desc_function =
   | RAsync
@@ -280,13 +281,6 @@ val is_array_reason : 'loc virtual_reason -> bool
 
 val is_literal_object_reason : 'loc virtual_reason -> bool
 
-val is_literal_array_reason : 'loc virtual_reason -> bool
-
-val builtin_reason : reason_desc -> reason
-
-(* reason location preds *)
-val is_builtin_reason : ('loc -> File_key.t option) -> 'loc virtual_reason -> bool
-
 val is_lib_reason : reason -> bool
 
 val is_lib_reason_def : reason -> bool
@@ -349,6 +343,9 @@ val opt_annot_reason : ?annot_loc:'loc -> 'loc virtual_reason -> 'loc virtual_re
 val mk_annot_reason : 'loc virtual_reason_desc -> 'loc -> 'loc virtual_reason
 
 module ReasonMap : WrappedMap.S with type key = reason
+
+module ImplicitInstantiationReasonMap :
+  WrappedMap.S with type key = reason * reason * reason Nel.t * bool
 
 val mk_expression_reason : (ALoc.t, ALoc.t) Flow_ast.Expression.t -> reason
 

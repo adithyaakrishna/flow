@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -13,8 +13,6 @@ class ['a] t :
     method def_type : Context.t -> Polarity.t -> 'a -> Type.def_t -> 'a
 
     method targ : Context.t -> Polarity.t -> 'a -> Type.targ -> 'a
-
-    method use_type_ : Context.t -> 'a -> Type.use_t -> 'a
 
     method tvar : Context.t -> Polarity.t -> 'a -> Reason.reason -> Type.ident -> 'a
 
@@ -33,4 +31,8 @@ class ['a] t :
     method dict_type : Context.t -> Polarity.t -> 'a -> Type.dicttype -> 'a
 
     method destructor : Context.t -> 'a -> Type.destructor -> 'a
+
+    method type_param : Context.t -> Polarity.t -> 'a -> Type.typeparam -> 'a
+
+    method class_binding : Context.t -> 'a -> Type.class_binding -> 'a
   end

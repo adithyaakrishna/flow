@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -15,25 +15,23 @@ let run_command command argv =
   | CommandSpec.Show_help ->
     print_endline (CommandSpec.string_of_usage command);
     Exit.(exit No_error)
-  | CommandSpec.Failed_to_parse (arg_name, msg) ->
+  | CommandSpec.Failed_to_parse { arg; msg; details } ->
     let is_pretty_or_json_arg s =
-      String_utils.string_starts_with s "--pretty" || String_utils.string_starts_with s "--json"
+      String.starts_with ~prefix:"--pretty" s || String.starts_with ~prefix:"--json" s
     in
     begin
       match Base.List.find ~f:is_pretty_or_json_arg argv with
       | Some json_arg ->
-        let pretty = String_utils.string_starts_with json_arg "--pretty" in
+        let pretty = String.starts_with ~prefix:"--pretty" json_arg in
         Exit.set_json_mode ~pretty
       | None -> ()
     end;
-    let msg =
-      Utils_js.spf
-        "%s: %s %s\n%s"
-        (Filename.basename Sys.executable_name)
-        arg_name
-        msg
-        (CommandSpec.string_of_usage command)
+    let details =
+      match details with
+      | Some x -> Printf.sprintf " (%s)" x
+      | None -> ""
     in
+    let msg = Printf.sprintf "%s: %s%s" msg arg details in
     Exit.(exit ~msg Commandline_usage_error)
 
 let expand_file_list ?options filenames =
@@ -98,6 +96,7 @@ let collect_error_flags
     include_warnings
     max_warnings
     one_line
+    list_files
     show_all_errors
     show_all_branches
     unicode
@@ -124,6 +123,7 @@ let collect_error_flags
       include_warnings;
       max_warnings;
       one_line;
+      list_files;
       show_all_errors;
       show_all_branches;
       unicode;
@@ -135,7 +135,7 @@ let warning_flags prev =
     prev
     |> flag
          "--include-warnings"
-         no_arg
+         truthy
          ~doc:"Include warnings in the error output (warnings are excluded by default)"
     |> flag
          "--max-warnings"
@@ -146,7 +146,7 @@ let warning_flags prev =
 
 let profile_flag prev =
   let open CommandSpec.ArgSpec in
-  prev |> flag "--profile" no_arg ~doc:"Output profiling information" ~env:"FLOW_PROFILE"
+  prev |> flag "--profile" truthy ~doc:"Output profiling information" ~env:"FLOW_PROFILE"
 
 let error_flags prev =
   CommandSpec.ArgSpec.(
@@ -162,14 +162,15 @@ let error_flags prev =
          )
          ~doc:"Display terminal output in color. never, always, auto (default: auto)"
     |> warning_flags
-    |> flag "--one-line" no_arg ~doc:"Escapes newlines so that each error prints on one line"
+    |> flag "--one-line" truthy ~doc:"Escapes newlines so that each error prints on one line"
+    |> flag "--list-files" truthy ~doc:"List files with errors"
     |> flag
          "--show-all-errors"
-         no_arg
+         truthy
          ~doc:"Print all errors (the default is to truncate after 50 errors)"
     |> flag
          "--show-all-branches"
-         no_arg
+         truthy
          ~doc:"Print all branch errors (the default is to print the most relevant branches)"
     |> flag
          "--unicode"
@@ -190,8 +191,8 @@ let json_flags prev =
   CommandSpec.ArgSpec.(
     prev
     |> collect collect_json_flags
-    |> flag "--json" no_arg ~doc:"Output results in JSON format"
-    |> flag "--pretty" no_arg ~doc:"Pretty-print JSON output (implies --json)"
+    |> flag "--json" truthy ~doc:"Output results in JSON format"
+    |> flag "--pretty" truthy ~doc:"Pretty-print JSON output (implies --json)"
   )
 
 let temp_dir_flag prev =
@@ -218,7 +219,7 @@ let lazy_flags prev =
   CommandSpec.ArgSpec.(
     prev
     |> collect collect_lazy_flags
-    |> flag "--lazy" no_arg ~doc:"Only check changed files. Shorthand for `--lazy-mode true`"
+    |> flag "--lazy" truthy ~doc:"Only check changed files. Shorthand for `--lazy-mode true`"
     |> flag
          "--lazy-mode"
          (enum
@@ -254,7 +255,7 @@ let verbose_focus_flag prev =
     prev
     |> flag
          "--verbose-focus"
-         no_arg
+         truthy
          ~doc:"Print verbose output about target file only (implies --verbose)"
   )
 
@@ -334,7 +335,7 @@ let from_flag =
     )
 
 let strip_root_flag prev =
-  CommandSpec.ArgSpec.(prev |> flag "--strip-root" no_arg ~doc:"Print paths without the root")
+  CommandSpec.ArgSpec.(prev |> flag "--strip-root" truthy ~doc:"Print paths without the root")
 
 let wait_for_recheck_flag prev =
   CommandSpec.ArgSpec.(
@@ -358,7 +359,7 @@ let path_flag prev =
   )
 
 let autostop_flag prev =
-  CommandSpec.ArgSpec.(prev |> flag "--autostop" no_arg ~doc:"" (* empty to omit it from --help *))
+  CommandSpec.ArgSpec.(prev |> flag "--autostop" truthy ~doc:"" (* empty to omit it from --help *))
 
 let verbose_flags =
   let collector main verbose indent depth enabled_during_flowlib =
@@ -388,20 +389,20 @@ let verbose_flags =
     CommandSpec.ArgSpec.(
       prev
       |> collect collector
-      |> flag "--verbose" no_arg ~doc:"Print verbose info during typecheck"
+      |> flag "--verbose" truthy ~doc:"Print verbose info during typecheck"
       |> flag
            "--verbose-indent"
-           no_arg
+           truthy
            ~doc:"Indent verbose info during typecheck (implies --verbose)"
       |> flag
            "--verbose-depth"
            int
            ~doc:"Recursively print types up to specified depth (default 1, implies --verbose)"
-      |> flag "--verbose-flowlib" no_arg ~doc:"Print verbose info while initializing the flowlib"
+      |> flag "--verbose-flowlib" truthy ~doc:"Print verbose info while initializing the flowlib"
     )
 
 let quiet_flag prev =
-  CommandSpec.ArgSpec.(prev |> flag "--quiet" no_arg ~doc:"Suppress output about server startup")
+  CommandSpec.ArgSpec.(prev |> flag "--quiet" truthy ~doc:"Suppress output about server startup")
 
 type on_mismatch_behavior =
   | Choose_newest
@@ -439,7 +440,7 @@ let ignore_version_flag prev =
     prev
     |> flag
          "--ignore-version"
-         no_arg
+         truthy
          ~doc:"Ignore the version constraint in .flowconfig"
          ~env:"FLOW_IGNORE_VERSION"
   )
@@ -584,7 +585,7 @@ let collect_flowconfig_flags
   main { ignores; includes; libs; raw_lint_severities; untyped; declarations }
 
 let remove_exclusion pattern =
-  if String_utils.string_starts_with pattern "!" then
+  if String.starts_with ~prefix:"!" pattern then
     String.sub pattern 1 (String.length pattern - 1)
   else
     pattern
@@ -733,7 +734,7 @@ let no_restart_flag prev =
     prev
     |> flag
          "--no-auto-restart"
-         no_arg
+         truthy
          ~doc:"If the server dies, do not try and restart it; just exit"
   )
 
@@ -795,7 +796,7 @@ let connect_flags_with_lazy_collector collector =
     collector
     |> flag "--timeout" (optional int) ~doc:"Maximum time to wait, in seconds"
     |> flag "--retries" (optional int) ~doc:"Set the number of retries. (default: 3)"
-    |> flag "--no-auto-start" no_arg ~doc:"If the server is not running, do not start it; just exit"
+    |> flag "--no-auto-start" truthy ~doc:"If the server is not running, do not start it; just exit"
     |> temp_dir_flag
     |> shm_flags
     |> from_flag
@@ -822,10 +823,8 @@ let connect_and_json_flags =
   fun prev ->
     prev |> CommandSpec.ArgSpec.collect collect_connect_and_json |> connect_flags |> json_flags
 
-let server_log_file ~flowconfig_name ~tmp_dir root flowconfig =
-  match FlowConfig.log_file flowconfig with
-  | Some x -> x
-  | None -> Path.make (Server_files_js.log_file ~flowconfig_name ~tmp_dir root)
+let server_log_file ~flowconfig_name ~tmp_dir root =
+  Path.make (Server_files_js.log_file ~flowconfig_name ~tmp_dir root)
 
 let monitor_log_file ~flowconfig_name ~tmp_dir root =
   Path.make (Server_files_js.monitor_log_file ~flowconfig_name ~tmp_dir root)
@@ -847,21 +846,25 @@ module Options_flags = struct
     temp_dir: string option;
     traces: int option;
     trust_mode: Options.trust_mode option;
-    env_mode: Options.env_mode option;
-    abstract_locations: bool;
-    new_merge: bool;
+    inference_mode: Options.inference_mode option;
+    run_post_inference_implicit_instantiation: bool option;
+    abstract_locations: bool option;
     verbose: Verbose.t option;
     wait_for_recheck: bool option;
     include_suppressions: bool;
-    prioritize_dependency_checks: bool option;
+    estimate_recheck_time: bool option;
+    distributed: bool;
   }
 end
 
 module Saved_state_flags = struct
   type t = {
+    saved_state_allow_reinit: bool option;
     saved_state_fetcher: Options.saved_state_fetcher option;
     saved_state_force_recheck: bool;
     saved_state_no_fallback: bool;
+    saved_state_skip_version_check: bool;
+    saved_state_verify: bool;
   }
 end
 
@@ -912,12 +915,13 @@ let options_flags =
       temp_dir
       quiet
       merge_timeout
-      new_merge
       abstract_locations
       include_suppressions
       trust_mode
-      env_mode
-      prioritize_dependency_checks =
+      inference_mode
+      run_post_inference_implicit_instantiation
+      estimate_recheck_time
+      distributed =
     (match merge_timeout with
     | Some timeout when timeout < 0 ->
       Exit.(exit ~msg:"--merge-timeout must be non-negative" Commandline_usage_error)
@@ -929,7 +933,8 @@ let options_flags =
         profile;
         all;
         wait_for_recheck;
-        env_mode;
+        inference_mode;
+        run_post_inference_implicit_instantiation;
         traces;
         no_flowlib;
         munge_underscore_members;
@@ -943,29 +948,29 @@ let options_flags =
         quiet;
         merge_timeout;
         trust_mode;
-        new_merge;
         abstract_locations;
         include_suppressions;
-        prioritize_dependency_checks;
+        estimate_recheck_time;
+        distributed;
       }
   in
   fun prev ->
     CommandSpec.ArgSpec.(
       prev
       |> collect collect_options_flags
-      |> flag "--debug" no_arg ~doc:"Print debug info during typecheck" ~env:"FLOW_DEBUG"
+      |> flag "--debug" truthy ~doc:"Print debug info during typecheck" ~env:"FLOW_DEBUG"
       |> profile_flag
-      |> flag "--all" no_arg ~doc:"Typecheck all files, not just @flow"
+      |> flag "--all" truthy ~doc:"Typecheck all files, not just @flow"
       |> flag
            "--wait-for-recheck"
            (optional bool)
            ~doc:
              "If true, always wait for rechecks to finish before serving commands (default: false)"
       |> flag "--traces" (optional int) ~doc:"Outline an error path up to a specified level"
-      |> flag "--no-flowlib" no_arg ~doc:"Do not include embedded declarations"
+      |> flag "--no-flowlib" truthy ~doc:"Do not include embedded declarations"
       |> flag
            "--munge-underscore-members"
-           no_arg
+           truthy
            ~doc:"Treat any class member name with a leading underscore as private"
       |> flag
            "--max-workers"
@@ -986,7 +991,6 @@ let options_flags =
              ^ "0 means no timeout (default: 100)"
              )
            ~env:"FLOW_MERGE_TIMEOUT"
-      |> flag "--new-merge" no_arg ~doc:""
       |> flag
            "--abstract-locations"
            no_arg
@@ -994,7 +998,7 @@ let options_flags =
              "[EXPERIMENTAL] Use abstract locations to improve recheck times. Has no effect unless types-first is also enabled"
       |> flag
            "--include-suppressed"
-           no_arg
+           truthy
            ~doc:"Ignore any `suppress_comment` lines in .flowconfig"
       |> flag
            "--trust-mode"
@@ -1009,49 +1013,72 @@ let options_flags =
            )
            ~doc:""
       |> flag
-           "--env-mode"
-           (optional
-              (enum
-                 [
-                   ("classic", Options.ClassicEnv []);
-                   ("ssa", Options.SSAEnv { resolved = false });
-                   ("resolved", Options.SSAEnv { resolved = true });
-                 ]
-              )
-           )
+           "--inference-mode"
+           (optional (enum [("constrain_writes", Options.ConstrainWrites); ("lti", Options.LTI)]))
            ~doc:""
-      |> flag "--prioritize-dep-checks" (optional bool) ~doc:(* experimental *) ""
+      |> flag "--experimental.run-post-inference-implicit-instantiation" (optional bool) ~doc:""
+      (* restarting to save time is a hack and should be removed. this should
+         not be part of our public API, so not included in the docs. *)
+      |> flag "--estimate-recheck-time" (optional bool) ~doc:"" ~env:"FLOW_ESTIMATE_RECHECK_TIME"
+      |> flag "--distributed" truthy ~doc:""
     )
 
 let saved_state_flags =
   let collect_saved_state_flags
-      main saved_state_fetcher saved_state_force_recheck saved_state_no_fallback =
+      main
+      saved_state_allow_reinit
+      saved_state_fetcher
+      saved_state_force_recheck
+      saved_state_no_fallback
+      saved_state_skip_version_check
+      saved_state_verify =
     main
-      { Saved_state_flags.saved_state_fetcher; saved_state_force_recheck; saved_state_no_fallback }
+      {
+        Saved_state_flags.saved_state_allow_reinit;
+        saved_state_fetcher;
+        saved_state_force_recheck;
+        saved_state_no_fallback;
+        saved_state_skip_version_check;
+        saved_state_verify;
+      }
   in
   fun prev ->
     CommandSpec.ArgSpec.(
       prev
       |> collect collect_saved_state_flags
+      |> flag "--saved-state-allow-reinit" no_arg ~doc:"" ~env:"FLOW_SAVED_STATE_ALLOW_REINIT"
       |> flag
            "--saved-state-fetcher"
            (enum
               [
                 ("none", Options.Dummy_fetcher);
                 ("local", Options.Local_fetcher);
+                ("scm", Options.Scm_fetcher);
                 ("fb", Options.Fb_fetcher);
               ]
            )
            ~doc:"Which saved state fetcher Flow should use (none, local) (default: none)"
       |> flag
            "--saved-state-force-recheck"
-           no_arg
+           truthy
            ~doc:"Force a lazy server to recheck the changes since the saved state was generated"
       |> flag
            "--saved-state-no-fallback"
-           no_arg
+           truthy
            ~doc:
              "If saved state fails to load, exit (normally fallback is to initialize from scratch)"
+      (* This is really unsafe! Saved state is marshal'd OCaml data and it's
+         easy to introduce serialization differences that would lead to
+         segfaults. This is only for debugging. *)
+      |> flag
+           "--saved-state-skip-version-check-DO_NOT_USE_OR_YOU_WILL_BE_FIRED"
+           truthy
+           ~doc:""
+           ~env:"FLOW_SAVED_STATE_SKIP_VERSION_CHECK_DO_NOT_USE_OR_YOU_WILL_BE_FIRED"
+      |> flag
+           "--saved-state-verify"
+           truthy
+           ~doc:"Verifies that the saved state matches what is on disk (for debugging only)"
     )
 
 let flowconfig_name_flag prev =
@@ -1065,6 +1092,7 @@ let flowconfig_name_flag prev =
               "Set the name of the flow configuration file. (default: %s)"
               Server_files_js.default_flowconfig_name
            )
+         ~env:"FLOW_CONFIG_NAME"
   )
 
 let base_flags =
@@ -1093,7 +1121,7 @@ let file_watcher_flag prev =
          )
   |> flag
        "--file-watcher-debug"
-       no_arg
+       truthy
        ~doc:"Enable debug logging for the file watcher. This is very noisy"
        ~env:"FLOW_FILE_WATCHER_DEBUG"
   |> flag
@@ -1188,7 +1216,13 @@ let no_cgroup_flag =
           | flow_exe :: command :: args -> flow_exe :: command :: "--no-cgroup" :: args
         in
         systemd_exe
-        :: "--quiet" :: "--user" :: "--scope" :: "--slice" :: "flow.slice" :: "--" :: flow_args
+        :: "--quiet"
+        :: "--user"
+        :: "--scope"
+        :: "--slice"
+        :: "flow.slice"
+        :: "--"
+        :: flow_args
         |> Array.of_list
         |> Unix.execv systemd_exe
   in
@@ -1202,9 +1236,11 @@ let no_cgroup_flag =
       |> CommandSpec.ArgSpec.collect collect_no_cgroup_flag
       |> flag
            "--no-cgroup"
-           no_arg
+           truthy
            ~doc:"Don't automatically run this command in a cgroup (if cgroups are available)"
     )
+
+let get_temp_dir cli_value = Base.Option.value cli_value ~default:Server_files_js.default_temp_dir
 
 let make_options
     ~flowconfig_name
@@ -1216,11 +1252,7 @@ let make_options
     ~saved_state_options_flags =
   let open Options_flags in
   let open Saved_state_flags in
-  let temp_dir =
-    options_flags.Options_flags.temp_dir
-    |> Base.Option.value ~default:(FlowConfig.temp_dir flowconfig)
-    |> Path.make
-  in
+  let temp_dir = Path.make (get_temp_dir options_flags.Options_flags.temp_dir) in
   let file_options =
     let no_flowlib = options_flags.no_flowlib in
     let { includes; ignores; libs; raw_lint_severities = _; untyped; declarations } =
@@ -1249,6 +1281,12 @@ let make_options
     | timeout -> timeout)
     |> Base.Option.map ~f:float_of_int
   in
+  let opt_saved_state_allow_reinit =
+    Base.Option.first_some
+      saved_state_options_flags.saved_state_allow_reinit
+      (FlowConfig.saved_state_allow_reinit flowconfig)
+    |> Base.Option.value ~default:false
+  in
   (* The CLI flag overrides the .flowconfig *)
   let opt_saved_state_fetcher =
     Base.Option.value
@@ -1262,10 +1300,11 @@ let make_options
     | Some FlowConfig.Non_lazy -> false
     | None -> false
   in
-  let opt_new_merge = options_flags.new_merge || FlowConfig.new_merge flowconfig in
   let opt_abstract_locations =
-    options_flags.abstract_locations
-    || Base.Option.value (FlowConfig.abstract_locations flowconfig) ~default:true
+    Base.Option.first_some
+      options_flags.abstract_locations
+      (FlowConfig.abstract_locations flowconfig)
+    |> Base.Option.value ~default:true
   in
   let opt_wait_for_recheck =
     Base.Option.value
@@ -1283,15 +1322,9 @@ let make_options
   let opt_direct_dependent_files_fix =
     Base.Option.value (FlowConfig.direct_dependent_files_fix flowconfig) ~default:true
   in
-  let opt_prioritize_dependency_checks =
-    Base.Option.first_some
-      options_flags.prioritize_dependency_checks
-      (FlowConfig.prioritize_dependency_checks flowconfig)
-    |> Base.Option.value ~default:false
-  in
   let strict_mode = FlowConfig.strict_mode flowconfig in
   let opt_temp_dir = Path.to_string temp_dir in
-  let opt_log_file = server_log_file ~flowconfig_name ~tmp_dir:opt_temp_dir root flowconfig in
+  let opt_log_file = server_log_file ~flowconfig_name ~tmp_dir:opt_temp_dir root in
   {
     Options.opt_flowconfig_name = flowconfig_name;
     opt_lazy_mode;
@@ -1315,33 +1348,46 @@ let make_options
     opt_node_main_fields = FlowConfig.node_main_fields flowconfig;
     opt_temp_dir;
     opt_max_workers =
-      Base.Option.value options_flags.max_workers ~default:(FlowConfig.max_workers flowconfig)
+      Base.Option.first_some options_flags.max_workers (FlowConfig.max_workers flowconfig)
+      |> Base.Option.value ~default:Sys_utils.nbr_procs
       |> min Sys_utils.nbr_procs;
     opt_suppress_types = FlowConfig.suppress_types flowconfig;
     opt_max_literal_length = FlowConfig.max_literal_length flowconfig;
     opt_direct_dependent_files_fix;
-    opt_enable_const_params = FlowConfig.enable_const_params flowconfig;
+    opt_enable_const_params =
+      Base.Option.value (FlowConfig.enable_const_params flowconfig) ~default:false;
     opt_enable_relay_integration = FlowConfig.relay_integration flowconfig;
     opt_enabled_rollouts = FlowConfig.enabled_rollouts flowconfig;
-    opt_enforce_local_inference_annotations =
-      FlowConfig.enforce_local_inference_annotations flowconfig;
-    opt_local_inference_annotation_dirs =
+    opt_array_literal_providers = FlowConfig.array_literal_providers flowconfig;
+    opt_array_literal_providers_includes =
       Base.List.map
         ~f:(fun s -> Files.expand_project_root_token ~root s)
-        (FlowConfig.local_inference_annotation_dirs flowconfig);
-    opt_enforce_this_annotations = FlowConfig.enforce_this_annotations flowconfig;
-    opt_experimental_infer_indexers = false;
-    opt_statement_reorder_checking = FlowConfig.statement_reorder_checking flowconfig;
+        (FlowConfig.array_literal_providers_includes flowconfig);
+    opt_conditional_type = Base.Option.value (FlowConfig.conditional_type flowconfig) ~default:false;
     opt_cycle_errors = FlowConfig.cycle_errors flowconfig;
+    opt_cycle_errors_includes =
+      Base.List.map
+        ~f:(fun s -> Files.expand_project_root_token ~root s)
+        (FlowConfig.cycle_errors_includes flowconfig);
     opt_run_post_inference_implicit_instantiation =
-      FlowConfig.run_post_inference_implicit_instantiation flowconfig;
+      Base.Option.value
+        options_flags.run_post_inference_implicit_instantiation
+        ~default:(FlowConfig.run_post_inference_implicit_instantiation flowconfig);
+    opt_enable_post_inference_targ_widened_check = false;
+    opt_save_implicit_instantiation_results = false;
     opt_enforce_strict_call_arity = FlowConfig.enforce_strict_call_arity flowconfig;
     opt_enums = FlowConfig.enums flowconfig;
-    opt_env_mode = Base.Option.value options_flags.env_mode ~default:(FlowConfig.env_mode flowconfig);
-    opt_env_mode_constrain_write_dirs =
+    opt_inference_mode =
+      Base.Option.value options_flags.inference_mode ~default:(FlowConfig.inference_mode flowconfig);
+    opt_inference_mode_lti_includes =
       Base.List.map
         ~f:(fun s -> Files.expand_project_root_token ~root s)
-        (FlowConfig.env_mode_constrain_write_dirs flowconfig);
+        (FlowConfig.inference_mode_lti_includes flowconfig);
+    opt_estimate_recheck_time =
+      Base.Option.first_some
+        options_flags.estimate_recheck_time
+        (FlowConfig.estimate_recheck_time flowconfig)
+      |> Base.Option.value ~default:true;
     opt_exact_by_default = FlowConfig.exact_by_default flowconfig;
     opt_facebook_fbs = FlowConfig.facebook_fbs flowconfig;
     opt_facebook_fbt = FlowConfig.facebook_fbt flowconfig;
@@ -1367,22 +1413,24 @@ let make_options
     opt_lint_severities = lint_severities;
     opt_strict_mode = strict_mode;
     opt_merge_timeout;
+    opt_missing_module_generators = FlowConfig.missing_module_generators flowconfig;
+    opt_saved_state_allow_reinit;
     opt_saved_state_fetcher;
-    opt_saved_state_load_sighashes = FlowConfig.saved_state_load_sighashes flowconfig;
     opt_saved_state_force_recheck = saved_state_options_flags.saved_state_force_recheck;
     opt_saved_state_no_fallback = saved_state_options_flags.saved_state_no_fallback;
+    opt_saved_state_skip_version_check = saved_state_options_flags.saved_state_skip_version_check;
+    opt_saved_state_verify = saved_state_options_flags.saved_state_verify;
     opt_node_resolver_allow_root_relative = FlowConfig.node_resolver_allow_root_relative flowconfig;
     opt_node_resolver_root_relative_dirnames =
       FlowConfig.node_resolver_root_relative_dirnames flowconfig;
-    opt_new_merge;
     opt_abstract_locations;
     opt_include_suppressions = options_flags.include_suppressions;
+    opt_distributed = options_flags.distributed;
     opt_trust_mode =
       Base.Option.value options_flags.trust_mode ~default:(FlowConfig.trust_mode flowconfig);
     opt_react_runtime = FlowConfig.react_runtime flowconfig;
     opt_react_server_component_exts = FlowConfig.react_server_component_exts flowconfig;
     opt_recursion_limit = FlowConfig.recursion_limit flowconfig;
-    opt_refactor = flowconfig |> FlowConfig.refactor |> Option.value ~default:true;
     opt_relay_integration_excludes =
       Base.List.map
         ~f:(fun pattern -> pattern |> Files.expand_project_root_token ~root |> Str.regexp)
@@ -1396,7 +1444,6 @@ let make_options
     opt_max_rss_bytes_for_check_per_worker =
       FlowConfig.max_rss_bytes_for_check_per_worker flowconfig;
     opt_max_seconds_for_check_per_worker = FlowConfig.max_seconds_for_check_per_worker flowconfig;
-    opt_type_asserts = FlowConfig.type_asserts flowconfig;
     opt_strict_es6_import_export = FlowConfig.strict_es6_import_export flowconfig;
     opt_strict_es6_import_export_excludes =
       Base.List.map
@@ -1406,8 +1453,9 @@ let make_options
       Base.Option.value (FlowConfig.automatic_require_default flowconfig) ~default:false;
     opt_format;
     opt_autoimports = Base.Option.value (FlowConfig.autoimports flowconfig) ~default:true;
+    opt_autoimports_ranked_by_usage =
+      Base.Option.value (FlowConfig.autoimports_ranked_by_usage flowconfig) ~default:false;
     opt_flowconfig_hash = flowconfig_hash;
-    opt_prioritize_dependency_checks;
     opt_gc_worker =
       {
         Options.gc_minor_heap_size =
@@ -1429,13 +1477,7 @@ let make_options
 
 let make_env flowconfig flowconfig_name connect_flags root =
   let normalize dir = Path.(dir |> make |> to_string) in
-  let tmp_dir =
-    Base.Option.value_map
-      ~f:normalize
-      ~default:(FlowConfig.temp_dir flowconfig)
-      connect_flags.temp_dir
-  in
-  let log_file = Path.to_string (server_log_file ~flowconfig_name ~tmp_dir root flowconfig) in
+  let tmp_dir = get_temp_dir connect_flags.temp_dir |> normalize in
   let retries = connect_flags.retries in
   let expiry =
     match connect_flags.timeout with
@@ -1468,7 +1510,6 @@ let make_env flowconfig flowconfig_name connect_flags root =
     tmp_dir;
     shm_hash_table_pow = connect_flags.shm_flags.shm_hash_table_pow;
     shm_log_level = connect_flags.shm_flags.shm_log_level;
-    log_file;
     ignore_version = connect_flags.ignore_version;
     emoji = Base.Option.value (FlowConfig.emoji flowconfig) ~default:false;
     quiet = connect_flags.quiet;
@@ -1593,7 +1634,7 @@ let get_file_from_filename_or_stdin ~cmd path = function
     else
       File_input.FileName (expand_path filename)
   | None ->
-    let contents = Sys_utils.read_stdin_to_string () in
+    let contents = Sys_utils.read_all stdin in
     let filename =
       match path with
       | Some ""
@@ -1670,8 +1711,9 @@ let rec connect_and_make_request flowconfig_name =
         if (not quiet) && Tty.spinner_used () then Tty.print_clear_line stderr;
         raise End_of_file
       | exn ->
+        let exn = Exception.wrap exn in
         if (not quiet) && Tty.spinner_used () then Tty.print_clear_line stderr;
-        raise exn
+        Exception.reraise exn
     in
     match response with
     | MonitorProt.Please_hold status ->
@@ -1686,7 +1728,7 @@ let rec connect_and_make_request flowconfig_name =
             Some (FileWatcherStatus.string_of_status watcher_status)
         | (server_status, _) -> Some (ServerStatus.string_of_status ~use_emoji server_status)
       in
-      Base.Option.iter status_string (fun status_string ->
+      Base.Option.iter status_string ~f:(fun status_string ->
           if not quiet then eprintf_with_spinner "Please wait. %s" status_string
       );
 
@@ -1809,23 +1851,27 @@ let choose_file_watcher ~flowconfig ~lazy_mode ~file_watcher ~file_watcher_debug
       | None -> FlowConfig.watchman_sync_timeout flowconfig
     in
     let defer_states = FlowConfig.watchman_defer_states flowconfig in
-    let survive_restarts =
-      Base.Option.value ~default:true (FlowConfig.watchman_survive_restarts flowconfig)
-    in
     FlowServerMonitorOptions.Watchman
-      {
-        FlowServerMonitorOptions.debug = file_watcher_debug;
-        defer_states;
-        survive_restarts;
-        sync_timeout;
-      }
+      { FlowServerMonitorOptions.debug = file_watcher_debug; defer_states; sync_timeout }
 
-let choose_file_watcher_mergebase_with ~flowconfig mergebase_with =
-  match
-    Base.Option.first_some mergebase_with (FlowConfig.file_watcher_mergebase_with flowconfig)
-  with
+let choose_file_watcher_mergebase_with ~flowconfig vcs mergebase_with =
+  match mergebase_with with
   | Some x -> x
-  | None -> default_file_watcher_mergebase_with
+  | None ->
+    let mergebase_with =
+      match vcs with
+      | Some Vcs.Git -> FlowConfig.file_watcher_mergebase_with_git flowconfig
+      | Some Vcs.Hg -> FlowConfig.file_watcher_mergebase_with_hg flowconfig
+      | None -> None
+    in
+    let mergebase_with =
+      match mergebase_with with
+      | Some x -> Some x
+      | None -> FlowConfig.file_watcher_mergebase_with flowconfig
+    in
+    (match mergebase_with with
+    | Some x -> x
+    | None -> default_file_watcher_mergebase_with)
 
 let choose_file_watcher_timeout ~flowconfig cli_timeout =
   match Base.Option.first_some cli_timeout (FlowConfig.file_watcher_timeout flowconfig) with
@@ -1942,8 +1988,8 @@ let codemod_flags prev =
     |> shm_flags
     |> from_flag
     |> ignore_version_flag
-    |> flag "--write" no_arg ~doc:"Edit files in place"
-    |> flag "--repeat" no_arg ~doc:"Run this codemod repeatedly until no more files change"
+    |> flag "--write" truthy ~doc:"Edit files in place"
+    |> flag "--repeat" truthy ~doc:"Run this codemod repeatedly until no more files change"
     |> flag
          "--log-level"
          (enum log_level_enum)

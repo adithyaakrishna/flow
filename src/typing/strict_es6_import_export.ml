@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -129,6 +129,7 @@ let gather_declarations ast =
         (match import with
         | {
          ImportDeclaration.specifiers = Some (ImportDeclaration.ImportNamespaceSpecifier specifier);
+         import_kind = ImportDeclaration.ImportValue;
          _;
         } ->
           add_import_star acc specifier
@@ -209,9 +210,16 @@ class import_export_visitor ~cx ~scope_info ~declarations =
 
     method add_exported_this_errors func =
       let open Ast.Function in
-      let this_visitor = new this_visitor in
-      let this_locs = this_visitor#eval this_visitor#function_body_any func.body in
-      List.iter this#add_this_in_exported_function_error this_locs
+      let { params; _ } = func in
+      let (_, { Params.this_; _ }) = params in
+      match this_ with
+      (* if the function has a this parameter, we don't want to report any errors because the user has
+         told us what this points at. *)
+      | Some _ -> ()
+      | None ->
+        let this_visitor = new this_visitor in
+        let this_locs = this_visitor#eval this_visitor#function_body_any func.body in
+        List.iter this#add_this_in_exported_function_error this_locs
 
     method! expression expr =
       let open Ast.Expression in

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -47,7 +47,16 @@ module type S = sig
            (L.t, L.t) Flow_ast.Statement.Switch.Case.t list ->
            (L.t, L.t) Flow_ast.Statement.Switch.Case.t list
 
+         method private class_identifier_opt :
+           class_loc:L.t -> (L.t, L.t) Flow_ast.Identifier.t option -> unit
+
+         method private this_binding_function_id_opt :
+           fun_loc:L.t -> has_this_annot:bool -> (L.t, L.t) Flow_ast.Identifier.t option -> unit
+
          method private lambda :
+           is_arrow:bool ->
+           fun_loc:L.t ->
+           generator_return_loc:L.t option ->
            (L.t, L.t) Flow_ast.Function.Params.t ->
            (L.t, L.t) Flow_ast.Type.Predicate.t option ->
            (L.t, L.t) Flow_ast.Function.body ->

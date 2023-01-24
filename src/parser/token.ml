@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -104,6 +104,9 @@ type t =
   | T_EXP_ASSIGN
   | T_MINUS_ASSIGN
   | T_PLUS_ASSIGN
+  | T_NULLISH_ASSIGN
+  | T_AND_ASSIGN
+  | T_OR_ASSIGN
   | T_ASSIGN
   | T_PLING_PERIOD
   | T_PLING_PLING
@@ -139,7 +142,10 @@ type t =
   | T_ERROR of string
   | T_EOF
   (* JSX *)
-  | T_JSX_IDENTIFIER of { raw: string }
+  | T_JSX_IDENTIFIER of {
+      raw: string;
+      loc: Loc.t;
+    }
   | T_JSX_TEXT of Loc.t * string * string (* loc, value, raw *)
   (* Type primitives *)
   | T_ANY_TYPE
@@ -155,13 +161,17 @@ type t =
     }
   | T_BIGINT_SINGLETON_TYPE of {
       kind: bigint_type;
-      approx_value: float;
-      (* Warning! Might lose precision! *)
+      value: int64 option;
       raw: string;
     }
   | T_STRING_TYPE
   | T_VOID_TYPE
   | T_SYMBOL_TYPE
+  | T_UNKNOWN_TYPE
+  | T_NEVER_TYPE
+  | T_UNDEFINED_TYPE
+  | T_KEYOF
+  | T_READONLY
 
 (* `bool` and `boolean` are equivalent annotations, but we need to track
    which one was used for when it might be an identifier, as in
@@ -281,6 +291,9 @@ let token_to_string = function
   | T_EXP_ASSIGN -> "T_EXP_ASSIGN"
   | T_MINUS_ASSIGN -> "T_MINUS_ASSIGN"
   | T_PLUS_ASSIGN -> "T_PLUS_ASSIGN"
+  | T_NULLISH_ASSIGN -> "T_NULLISH_ASSIGN"
+  | T_AND_ASSIGN -> "T_AND_ASSIGN"
+  | T_OR_ASSIGN -> "T_OR_ASSIGN"
   | T_ASSIGN -> "T_ASSIGN"
   | T_PLING_PERIOD -> "T_PLING_PERIOD"
   | T_PLING_PLING -> "T_PLING_PLING"
@@ -312,6 +325,8 @@ let token_to_string = function
   | T_BIT_NOT -> "T_BIT_NOT"
   | T_INCR -> "T_INCR"
   | T_DECR -> "T_DECR"
+  | T_KEYOF -> "T_KEYOF"
+  | T_READONLY -> "T_READONLY"
   (* Extra tokens *)
   | T_ERROR _ -> "T_ERROR"
   | T_EOF -> "T_EOF"
@@ -329,6 +344,9 @@ let token_to_string = function
   | T_STRING_TYPE -> "T_STRING_TYPE"
   | T_VOID_TYPE -> "T_VOID_TYPE"
   | T_SYMBOL_TYPE -> "T_SYMBOL_TYPE"
+  | T_UNKNOWN_TYPE -> "T_UNKNOWN_TYPE"
+  | T_NEVER_TYPE -> "T_NEVER_TYPE"
+  | T_UNDEFINED_TYPE -> "T_UNDEFINED_TYPE"
 
 let value_of_token = function
   | T_NUMBER { raw; _ } -> raw
@@ -416,6 +434,9 @@ let value_of_token = function
   | T_EXP_ASSIGN -> "**="
   | T_MINUS_ASSIGN -> "-="
   | T_PLUS_ASSIGN -> "+="
+  | T_NULLISH_ASSIGN -> "??="
+  | T_AND_ASSIGN -> "&&="
+  | T_OR_ASSIGN -> "||="
   | T_ASSIGN -> "="
   | T_PLING_PERIOD -> "?."
   | T_PLING_PLING -> "??"
@@ -447,21 +468,22 @@ let value_of_token = function
   | T_BIT_NOT -> "~"
   | T_INCR -> "++"
   | T_DECR -> "--"
+  | T_KEYOF -> "keyof"
+  | T_READONLY -> "readonly"
   (* Extra tokens *)
   | T_ERROR raw -> raw
   | T_EOF -> ""
-  | T_JSX_IDENTIFIER { raw } -> raw
+  | T_JSX_IDENTIFIER { raw; _ } -> raw
   | T_JSX_TEXT (_, _, raw) -> raw
   (* Type primitives *)
   | T_ANY_TYPE -> "any"
   | T_MIXED_TYPE -> "mixed"
   | T_EMPTY_TYPE -> "empty"
-  | T_BOOLEAN_TYPE kind ->
-    begin
-      match kind with
-      | BOOL -> "bool"
-      | BOOLEAN -> "boolean"
-    end
+  | T_BOOLEAN_TYPE kind -> begin
+    match kind with
+    | BOOL -> "bool"
+    | BOOLEAN -> "boolean"
+  end
   | T_NUMBER_TYPE -> "number"
   | T_BIGINT_TYPE -> "bigint"
   | T_NUMBER_SINGLETON_TYPE { raw; _ } -> raw
@@ -469,6 +491,9 @@ let value_of_token = function
   | T_STRING_TYPE -> "string"
   | T_VOID_TYPE -> "void"
   | T_SYMBOL_TYPE -> "symbol"
+  | T_UNKNOWN_TYPE -> "unknown"
+  | T_NEVER_TYPE -> "never"
+  | T_UNDEFINED_TYPE -> "undefined"
 
 let quote_token_value value = Printf.sprintf "token `%s`" value
 

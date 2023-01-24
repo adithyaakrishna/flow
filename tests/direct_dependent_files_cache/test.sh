@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -18,7 +18,6 @@ assert_ok "$FLOW" force-recheck src/unrelated.js
 
 assert_errors "$FLOW" status --no-auto-start src
 printf "\n"
-grep "Resolved requires" "$log_file" | tail -n 1 | cut -d"]" -f 2
 
 printf "\n== Restore unrelated.js and back to 2 errors ==\n"
 # Unchanged during `ResolvedRequires`
@@ -27,7 +26,6 @@ assert_ok "$FLOW" force-recheck src/unrelated.js
 
 assert_errors "$FLOW" status --no-auto-start src
 printf "\n"
-grep "Resolved requires" "$log_file" | tail -n 1 | cut -d"]" -f 2
 
 printf "\n== Delete src/node_modules/dependency.js changes an error ==\n"
 # Changed during `ResolvedRequires`
@@ -36,7 +34,6 @@ assert_ok "$FLOW" force-recheck src/node_modules/dependency.js
 
 assert_errors "$FLOW" status --no-auto-start src
 printf "\n"
-grep "Resolved requires" "$log_file" | tail -n 1 | cut -d"]" -f 2
 
 printf "\n== Restore src/node_modules/dependency.js change it back ==\n"
 # Changed during `ResolvedRequires`
@@ -45,7 +42,6 @@ assert_ok "$FLOW" force-recheck src/node_modules/dependency.js
 
 assert_errors "$FLOW" status --no-auto-start src
 printf "\n"
-grep "Resolved requires" "$log_file" | tail -n 1 | cut -d"]" -f 2
 
 printf "\n== Remove the import from dependent.js ==\n"
 # Changed during `ResolvedRequires`
@@ -55,7 +51,6 @@ assert_ok "$FLOW" force-recheck src/dependent.js
 
 assert_errors "$FLOW" status --no-auto-start src
 printf "\n"
-grep "Resolved requires" "$log_file" | tail -n 1 | cut -d"]" -f 2
 
 printf "\n== Add the import back to dependent.js ==\n"
 # Changed during `ResolvedRequires`
@@ -64,15 +59,13 @@ assert_ok "$FLOW" force-recheck src/dependent.js
 
 assert_errors "$FLOW" status --no-auto-start src
 printf "\n"
-grep "Resolved requires" "$log_file" | tail -n 1 | cut -d"]" -f 2
 
 printf "\n== Adding code that doesn't import has no effect on dep graph ==\n"
 # Unchanged during `ResolvedRequires`
-assert_ok echo "export var foo: bool = 123" >> src/node_modules/dependency.js
+assert_ok echo "export var foo: boolean = 123" >> src/node_modules/dependency.js
 assert_ok "$FLOW" force-recheck src/node_modules/dependency.js
 
 assert_errors "$FLOW" status --no-auto-start src
 printf "\n"
-grep "Resolved requires" "$log_file" | tail -n 1 | cut -d"]" -f 2
 
 "$FLOW" stop src 1> /dev/null 2>&1

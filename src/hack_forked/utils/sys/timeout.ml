@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -28,10 +28,10 @@ module Alarm_timeout = struct
       let ret =
         try do_ id with
         | exn ->
-          let stack = Printexc.get_raw_backtrace () in
+          let exn = Exception.wrap exn in
           (* Any uncaught exception will cancel the timeout *)
           Timer.cancel_timer timer;
-          Printexc.raise_with_backtrace exn stack
+          Exception.reraise exn
       in
       Timer.cancel_timer timer;
       ret
@@ -64,8 +64,9 @@ module Alarm_timeout = struct
      * http://caml.inria.fr/mantis/view.php?id=7142 *)
     try Stdlib.input_value ic with
     | Failure msg as e ->
+      let e = Exception.wrap e in
       if msg = "input_value: truncated object" then Stdlib.input_char ic |> ignore;
-      raise e
+      Exception.reraise e
 
   let input_value = ignore_timeout input_value_with_workaround
 
@@ -115,9 +116,10 @@ module Alarm_timeout = struct
     with_timeout ~timeout ~on_timeout ~do_:(fun timeout ->
         try reader timeout ic oc with
         | exn ->
+          let exn = Exception.wrap exn in
           close_in ic;
           close_out oc;
-          raise exn
+          Exception.reraise exn
     )
 
   let open_connection ?timeout:_ sockaddr =
@@ -422,11 +424,12 @@ module Select_timeout = struct
     with_timeout ~timeout ~on_timeout ~do_:(fun timeout ->
         try reader timeout tic oc with
         | exn ->
+          let exn = Exception.wrap exn in
           Base.Option.iter ~f:Sys_utils.terminate_process tic.pid;
           tic.pid <- None;
           close_in tic;
           close_out oc;
-          raise exn
+          Exception.reraise exn
     )
 
   (** Socket *)
@@ -445,19 +448,19 @@ module Select_timeout = struct
        * to use getsockopt to read the SO_ERROR option at level SOL_SOCKET to figure out if the
        * connect worked. However, this code is only used on Windows, so that's fine *)
       try Unix.connect sock sockaddr with
-      | Unix.Unix_error ((Unix.EINPROGRESS | Unix.EWOULDBLOCK), _, _) ->
-        begin
-          match select ?timeout [] [sock] [] no_select_timeout with
-          | (_, [], [exn_sock]) when exn_sock = sock -> failwith "Failed to connect to socket"
-          | (_, [], _) ->
-            failwith
-              "This should be unreachable. How did select return with no fd when there is no timeout?"
-          | (_, [_sock], _) -> ()
-          | (_, _, _) -> assert false
-        end
+      | Unix.Unix_error ((Unix.EINPROGRESS | Unix.EWOULDBLOCK), _, _) -> begin
+        match select ?timeout [] [sock] [] no_select_timeout with
+        | (_, [], [exn_sock]) when exn_sock = sock -> failwith "Failed to connect to socket"
+        | (_, [], _) ->
+          failwith
+            "This should be unreachable. How did select return with no fd when there is no timeout?"
+        | (_, [_sock], _) -> ()
+        | (_, _, _) -> assert false
+      end
       | exn ->
+        let exn = Exception.wrap exn in
         Unix.close sock;
-        raise exn
+        Exception.reraise exn
     in
     let sock = Unix.socket (Unix.domain_of_sockaddr sockaddr) Unix.SOCK_STREAM 0 in
     Unix.set_nonblock sock;
@@ -549,6 +552,7 @@ let read_connection ~timeout ~on_timeout ~reader sockaddr =
       let (tic, oc) = open_connection ~timeout sockaddr in
       try reader timeout tic oc with
       | exn ->
+        let exn = Exception.wrap exn in
         close_out oc;
-        raise exn
+        Exception.reraise exn
   )

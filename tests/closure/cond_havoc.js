@@ -3,8 +3,8 @@
 // from sam, https://github.com/facebook/flow/issues/780
 // call to f() within if should properly havoc x.
 //
-function example(b: bool): number {
-  var x = 0;
+function example(b: boolean): number {
+  var x: number | string = 0;
   function f() { x = "" }
   if (b) {
     f();

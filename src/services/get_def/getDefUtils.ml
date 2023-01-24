@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -71,30 +71,29 @@ let set_def_loc_hook ~reader prop_access_info literal_key_info target_loc =
     match !prop_access_info with
     | Error _ -> ()
     | Ok None -> prop_access_info := Ok (Some new_info)
-    | Ok (Some info) ->
-      begin
-        match (info, new_info) with
-        | (Use _, Use _)
-        | (Class_def _, Class_def _)
-        | (Obj_def _, Obj_def _) ->
-          (* If we see hooks firing multiple times for the same
-           * location, this is innocuous and we should take the last result.
-           * Previously, this would occur due to generate-tests.
-           *)
-          set_ok new_info
-        (* Literals can flow into multiple types. Include them all. *)
-        | (Use_in_literal (types, name), Use_in_literal (new_types, new_name)) ->
-          if name = new_name then
-            set_ok (Use_in_literal (Nel.rev_append new_types types, name))
-          else
-            set_err "Names did not match"
-        (* We should not see mismatches. *)
-        | (Use _, _)
-        | (Class_def _, _)
-        | (Obj_def _, _)
-        | (Use_in_literal _, _) ->
-          set_err "Unexpected mismatch between definition kind"
-      end
+    | Ok (Some info) -> begin
+      match (info, new_info) with
+      | (Use _, Use _)
+      | (Class_def _, Class_def _)
+      | (Obj_def _, Obj_def _) ->
+        (* If we see hooks firing multiple times for the same
+         * location, this is innocuous and we should take the last result.
+         * Previously, this would occur due to generate-tests.
+         *)
+        set_ok new_info
+      (* Literals can flow into multiple types. Include them all. *)
+      | (Use_in_literal (types, name), Use_in_literal (new_types, new_name)) ->
+        if name = new_name then
+          set_ok (Use_in_literal (Nel.rev_append new_types types, name))
+        else
+          set_err "Names did not match"
+      (* We should not see mismatches. *)
+      | (Use _, _)
+      | (Class_def _, _)
+      | (Obj_def _, _)
+      | (Use_in_literal _, _) ->
+        set_err "Unexpected mismatch between definition kind"
+    end
   in
   let use_hook ret _ctxt name loc ty =
     let loc = loc_of_aloc ~reader loc in
@@ -209,8 +208,8 @@ let extract_instancet cx ty : (Type.t, string) result =
   Type.(
     let resolved = Members.resolve_type cx ty in
     match resolved with
-    | ThisClassT (_, t, _)
-    | DefT (_, _, PolyT { t_out = ThisClassT (_, t, _); _ }) ->
+    | ThisClassT (_, t, _, _)
+    | DefT (_, _, PolyT { t_out = ThisClassT (_, t, _, _); _ }) ->
       Ok t
     | _ ->
       let type_string = string_of_ctor resolved in
@@ -355,17 +354,15 @@ let add_literal_properties literal_key_info def_info =
     else
       Ok (Some (Nel.cons (Object loc) defs, name1))
 
-let get_def_info ~reader ~options env profiling file_key ast_info loc :
-    (def_info option, string) result =
+let get_def_info ~reader ~options profiling file_key ast_info loc : (def_info option, string) result
+    =
   let props_access_info = ref (Ok None) in
   let (ast, file_sig, info) = ast_info in
   let literal_key_info : (Loc.t * Loc.t * string) option = ObjectKeyAtLoc.get ast loc in
   let cx =
     set_def_loc_hook ~reader props_access_info literal_key_info loc;
     Profiling_js.with_timer profiling ~timer:"MergeContents" ~f:(fun () ->
-        let () =
-          Type_contents.ensure_checked_dependencies ~options ~reader ~env file_key file_sig
-        in
+        let () = Type_contents.ensure_checked_dependencies ~options ~reader file_key file_sig in
         let (cx, _) =
           Merge_service.check_contents_context ~reader options file_key ast info file_sig
         in

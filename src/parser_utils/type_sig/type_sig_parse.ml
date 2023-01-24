@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -23,7 +23,6 @@ module Ast = Flow_ast
 module Option = Base.Option
 
 type options = {
-  type_asserts: bool;
   suppress_types: SSet.t;
   munge: bool;
   ignore_static_propTypes: bool;
@@ -337,6 +336,7 @@ let splice tbls id_loc f = Locs.splice id_loc (fun locs -> f { tbls with locs })
 
 let polarity = function
   | None -> Polarity.Neutral
+  | Some (_, Ast.Variance.{ kind = Readonly | In | Out | InOut; comments = _ }) -> Polarity.Neutral
   | Some (_, { Ast.Variance.kind = Ast.Variance.Plus; comments = _ }) -> Polarity.Positive
   | Some (_, { Ast.Variance.kind = Ast.Variance.Minus; comments = _ }) -> Polarity.Negative
 
@@ -359,12 +359,11 @@ let extract_string_literal =
   let module T = E.TemplateLiteral in
   function
   | E.Literal { L.value = L.String x; _ } -> Some x
-  | E.TemplateLiteral { T.quasis; expressions = []; comments = _ } ->
-    begin
-      match quasis with
-      | [(_, { T.Element.value = { T.Element.cooked = x; _ }; _ })] -> Some x
-      | _ -> None
-    end
+  | E.TemplateLiteral { T.quasis; expressions = []; comments = _ } -> begin
+    match quasis with
+    | [(_, { T.Element.value = { T.Element.cooked = x; _ }; _ })] -> Some x
+    | _ -> None
+  end
   | _ -> None
 
 let extract_number_literal =
@@ -557,11 +556,11 @@ module Scope = struct
     match scope with
     | Global { names; _ }
     | Module { names; _ } ->
-      SMap.find_opt name names
+      Base.Option.map ~f:(fun binding -> (binding, scope)) (SMap.find_opt name names)
     | DeclareModule { parent; names; _ }
     | Lexical { parent; names } ->
       (match SMap.find_opt name names with
-      | Some _ as x -> x
+      | Some binding -> Some (binding, scope)
       | None -> lookup parent name)
 
   let rec find_host scope b =
@@ -705,8 +704,12 @@ module Scope = struct
     fun prop_name prop ref_name scope ->
       match lookup scope ref_name with
       | None -> ()
-      | Some (RemoteBinding _) -> ()
-      | Some (LocalBinding node) -> Local_defs.modify node (f prop_name prop)
+      | Some (RemoteBinding _, _) -> ()
+      | Some (LocalBinding node, found_scope) ->
+        if scope == found_scope then
+          Local_defs.modify node (f prop_name prop)
+        else
+          ()
 
   let assign prop_name prop = function
     | Value (FunExpr fn) ->
@@ -1214,10 +1217,14 @@ and annot_with_loc opts scope tbls xs (loc, t) =
     | T.BigInt _ -> Annot (BigInt loc)
     | T.String _ -> Annot (String loc)
     | T.Boolean _ -> Annot (Boolean loc)
+    | T.Unknown _ -> Annot (Any loc)
+    | T.Never _ -> Annot (Any loc)
+    | T.Undefined _ -> Annot (Any loc)
     | T.StringLiteral { Ast.StringLiteral.value; _ } -> Annot (SingletonString (loc, value))
     | T.NumberLiteral { Ast.NumberLiteral.value; raw; _ } ->
       Annot (SingletonNumber (loc, value, raw))
-    | T.BigIntLiteral { Ast.BigIntLiteral.bigint; _ } -> Annot (SingletonBigInt (loc, bigint))
+    | T.BigIntLiteral { Ast.BigIntLiteral.value; raw; _ } ->
+      Annot (SingletonBigInt (loc, value, raw))
     | T.BooleanLiteral { Ast.BooleanLiteral.value; _ } -> Annot (SingletonBoolean (loc, value))
     | T.Nullable { T.Nullable.argument; _ } -> Annot (Maybe (loc, annot opts scope tbls xs argument))
     | T.Array { T.Array.argument; _ } -> Annot (Array (loc, annot opts scope tbls xs argument))
@@ -1245,9 +1252,29 @@ and annot_with_loc opts scope tbls xs (loc, t) =
     | T.OptionalIndexedAccess ia ->
       let (_, result) = optional_indexed_access opts scope tbls xs (loc, ia) in
       result
-    | T.Tuple { T.Tuple.types; _ } ->
-      let ts_rev = List.rev_map (annot opts scope tbls xs) types in
-      Annot (Tuple { loc; ts = List.rev ts_rev })
+    | T.Tuple { T.Tuple.elements; _ } ->
+      let elems_rev =
+        List.rev_map
+          (function
+            | (_, T.Tuple.UnlabeledElement t) ->
+              TupleElement
+                { name = None; t = annot opts scope tbls xs t; polarity = Polarity.Neutral }
+            | ( _,
+                T.Tuple.LabeledElement
+                  { T.Tuple.LabeledElement.annot = t; name; variance; optional = _ }
+              ) ->
+              TupleElement
+                {
+                  name = Some (id_name name);
+                  t = annot opts scope tbls xs t;
+                  polarity = polarity variance;
+                }
+            | (loc, T.Tuple.SpreadElement _) ->
+              let loc = push_loc tbls loc in
+              TupleElement { name = None; t = Annot (Any loc); polarity = Polarity.Neutral })
+          elements
+      in
+      Annot (Tuple { loc; elems_rev })
     | T.Union { T.Union.types = (t0, t1, ts); _ } ->
       let t0 = annot opts scope tbls xs t0 in
       let t1 = annot opts scope tbls xs t1 in
@@ -1259,6 +1286,8 @@ and annot_with_loc opts scope tbls xs (loc, t) =
       let ts_rev = List.rev_map (annot opts scope tbls xs) ts in
       Annot (Intersection { loc; t0; t1; ts = List.rev ts_rev })
     | T.Typeof { T.Typeof.argument = t; _ } -> typeof scope tbls loc t
+    | T.Keyof _ -> Annot (Any loc)
+    | T.ReadOnly _ -> Annot (Any loc)
     | T.Exists _ -> Annot (Exists loc)
   in
   (loc, annot)
@@ -1657,7 +1686,7 @@ and nominal_type opts scope tbls xs loc name = function
 
 and generic_id =
   let rec finish tbls tyname = function
-    | [] -> tyname
+    | [] -> Ok tyname
     | (loc, id_loc, name) :: chain ->
       let id_loc = push_loc tbls id_loc in
       let tyname = Qualified { loc; id_loc; name; qualification = tyname } in
@@ -1673,17 +1702,20 @@ and generic_id =
       generic_id scope tbls xs chain qualification
     | G.Identifier.Unqualified id ->
       let (ref_loc, { Ast.Identifier.name; comments = _ }) = id in
-      (* Type params in scope should be handled before generic_id. *)
-      assert (not (SSet.mem name xs));
       let ref_loc = push_loc tbls ref_loc in
-      let tyname = Unqualified (Ref { ref_loc; name; scope; resolved = None }) in
-      finish tbls tyname chain
+      (* Type params in scope should be handled before generic_id. *)
+      if SSet.mem name xs then
+        Error ref_loc
+      else
+        let tyname = Unqualified (Ref { ref_loc; name; scope; resolved = None }) in
+        finish tbls tyname chain
 
 and generic opts scope tbls xs loc g =
   let module G = T.Generic in
   let { G.id; targs; comments = _ } = g in
-  let tyname = generic_id scope tbls xs [] id in
-  nominal_type opts scope tbls xs loc tyname targs
+  match generic_id scope tbls xs [] id with
+  | Ok tyname -> nominal_type opts scope tbls xs loc tyname targs
+  | Error loc -> Err (loc, CheckError)
 
 and maybe_special_generic opts scope tbls xs loc g =
   let module G = T.Generic in
@@ -1692,8 +1724,9 @@ and maybe_special_generic opts scope tbls xs loc g =
   | G.Identifier.Qualified (qloc, { G.Identifier.qualification; id }) ->
     let (id_loc, { Ast.Identifier.name; comments = _ }) = id in
     let qloc = push_loc tbls qloc in
-    let tyname = generic_id scope tbls xs [(qloc, id_loc, name)] qualification in
-    nominal_type opts scope tbls xs loc tyname targs
+    (match generic_id scope tbls xs [(qloc, id_loc, name)] qualification with
+    | Ok tyname -> nominal_type opts scope tbls xs loc tyname targs
+    | Error loc -> Err (loc, CheckError))
   | G.Identifier.Unqualified (ref_loc, { Ast.Identifier.name; comments = _ }) ->
     let ref_loc = push_loc tbls ref_loc in
     maybe_special_unqualified_generic opts scope tbls xs loc targs ref_loc name
@@ -1701,514 +1734,427 @@ and maybe_special_generic opts scope tbls xs loc g =
 and maybe_special_unqualified_generic opts scope tbls xs loc targs ref_loc =
   let open Ast.Type.TypeArgs in
   function
-  | "Array" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Array (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "Class" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ClassT (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
+  | "Array" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Array (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "Class" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ClassT (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
   | "Function"
   | "function"
-  | "Object" ->
-    begin
-      match targs with
-      | None -> Annot (Any loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "Function$Prototype$Apply" ->
-    begin
-      match targs with
-      | None -> Annot (Function_apply loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "Function$Prototype$Bind" ->
-    begin
-      match targs with
-      | None -> Annot (Function_bind loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "Function$Prototype$Call" ->
-    begin
-      match targs with
-      | None -> Annot (Function_call loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "Object$Assign" ->
-    begin
-      match targs with
-      | None -> Annot (Object_assign loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "Object$GetPrototypeOf" ->
-    begin
-      match targs with
-      | None -> Annot (Object_getPrototypeOf loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "Object$SetPrototypeOf" ->
-    begin
-      match targs with
-      | None -> Annot (Object_setPrototypeOf loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$TEMPORARY$number" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [(loc, T.NumberLiteral { Ast.NumberLiteral.value; raw; _ })]; _ }) ->
-        let loc = push_loc tbls loc in
-        Annot (TEMPORARY_Number (loc, value, raw))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$TEMPORARY$string" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [(loc, T.StringLiteral { Ast.StringLiteral.value = s; _ })]; _ }) ->
-        let loc = push_loc tbls loc in
-        if opts.max_literal_len = 0 || String.length s <= opts.max_literal_len then
-          Annot (TEMPORARY_String (loc, s))
-        else
-          Annot (TEMPORARY_LongString loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$TEMPORARY$boolean" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [(loc, T.BooleanLiteral { Ast.BooleanLiteral.value; _ })]; _ }) ->
-        let loc = push_loc tbls loc in
-        Annot (TEMPORARY_Boolean (loc, value))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$TEMPORARY$object" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (TEMPORARY_Object t)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$TEMPORARY$array" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (TEMPORARY_Array (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$ReadOnlyArray" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReadOnlyArray (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Supertype" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (AnyWithLowerBound (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Subtype" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (AnyWithUpperBound (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$PropertyType" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [obj; (_, T.StringLiteral { Ast.StringLiteral.value; _ })]; _ }) ->
-        let obj = annot opts scope tbls xs obj in
-        Annot (PropertyType { loc; obj; prop = value })
-      | Some (_, { arguments = [_; (loc, _)]; _ }) ->
-        let loc = push_loc tbls loc in
-        Err (loc, CheckError)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$ElementType" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [obj; elem]; _ }) ->
-        let obj = annot opts scope tbls xs obj in
-        let elem = annot opts scope tbls xs elem in
-        Annot (ElementType { loc; obj; elem })
-      | _ -> Err (loc, CheckError)
-    end
-  | "$NonMaybeType" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (NonMaybeType (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Shape" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Shape (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Diff" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t1; t2]; _ }) ->
-        let t1 = annot opts scope tbls xs t1 in
-        let t2 = annot opts scope tbls xs t2 in
-        Annot (Diff (loc, t1, t2))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$ReadOnly" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReadOnly (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Partial" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Partial (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
+  | "Object" -> begin
+    match targs with
+    | None -> Annot (Any loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "Function$Prototype$Apply" -> begin
+    match targs with
+    | None -> Annot (Function_apply loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "Function$Prototype$Bind" -> begin
+    match targs with
+    | None -> Annot (Function_bind loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "Function$Prototype$Call" -> begin
+    match targs with
+    | None -> Annot (Function_call loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "Object$Assign" -> begin
+    match targs with
+    | None -> Annot (Object_assign loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "Object$GetPrototypeOf" -> begin
+    match targs with
+    | None -> Annot (Object_getPrototypeOf loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "Object$SetPrototypeOf" -> begin
+    match targs with
+    | None -> Annot (Object_setPrototypeOf loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$TEMPORARY$number" -> begin
+    match targs with
+    | Some (_, { arguments = [(loc, T.NumberLiteral { Ast.NumberLiteral.value; raw; _ })]; _ }) ->
+      let loc = push_loc tbls loc in
+      Annot (TEMPORARY_Number (loc, value, raw))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$TEMPORARY$string" -> begin
+    match targs with
+    | Some (_, { arguments = [(loc, T.StringLiteral { Ast.StringLiteral.value = s; _ })]; _ }) ->
+      let loc = push_loc tbls loc in
+      if opts.max_literal_len = 0 || String.length s <= opts.max_literal_len then
+        Annot (TEMPORARY_String (loc, s))
+      else
+        Annot (TEMPORARY_LongString loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$TEMPORARY$boolean" -> begin
+    match targs with
+    | Some (_, { arguments = [(loc, T.BooleanLiteral { Ast.BooleanLiteral.value; _ })]; _ }) ->
+      let loc = push_loc tbls loc in
+      Annot (TEMPORARY_Boolean (loc, value))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$TEMPORARY$object" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (TEMPORARY_Object t)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$TEMPORARY$array" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (TEMPORARY_Array (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$ReadOnlyArray" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReadOnlyArray (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$PropertyType" -> begin
+    match targs with
+    | Some (_, { arguments = [obj; (_, T.StringLiteral { Ast.StringLiteral.value; _ })]; _ }) ->
+      let obj = annot opts scope tbls xs obj in
+      Annot (PropertyType { loc; obj; prop = value })
+    | Some (_, { arguments = [_; (loc, _)]; _ }) ->
+      let loc = push_loc tbls loc in
+      Err (loc, CheckError)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$ElementType" -> begin
+    match targs with
+    | Some (_, { arguments = [obj; elem]; _ }) ->
+      let obj = annot opts scope tbls xs obj in
+      let elem = annot opts scope tbls xs elem in
+      Annot (ElementType { loc; obj; elem })
+    | _ -> Err (loc, CheckError)
+  end
+  | "$NonMaybeType" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (NonMaybeType (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Shape" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Shape (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Diff" -> begin
+    match targs with
+    | Some (_, { arguments = [t1; t2]; _ }) ->
+      let t1 = annot opts scope tbls xs t1 in
+      let t2 = annot opts scope tbls xs t2 in
+      Annot (Diff (loc, t1, t2))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$ReadOnly" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReadOnly (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Partial" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Partial (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
   | "$Keys"
-  | "$Enum" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Keys (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Values" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Values (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Exact" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Exact (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Rest" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t1; t2]; _ }) ->
-        let t1 = annot opts scope tbls xs t1 in
-        let t2 = annot opts scope tbls xs t2 in
-        Annot (Rest (loc, t1, t2))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Exports" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [(_, T.StringLiteral { Ast.StringLiteral.value; _ })]; _ }) ->
-        Annot (ExportsT (loc, value))
-      | Some (_, { arguments = [(loc, _)]; _ }) -> Err (push_loc tbls loc, CheckError)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Call" ->
-    begin
-      match targs with
-      | Some (_, { arguments = fn :: args; _ }) ->
-        let fn = annot opts scope tbls xs fn in
-        let args = List.map (annot opts scope tbls xs) args in
-        Annot (Call { loc; fn; args })
-      | _ -> Err (loc, CheckError)
-    end
-  | "$TupleMap" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [tup; fn]; _ }) ->
-        let tup = annot opts scope tbls xs tup in
-        let fn = annot opts scope tbls xs fn in
-        Annot (TupleMap { loc; tup; fn })
-      | _ -> Err (loc, CheckError)
-    end
-  | "$ObjMap" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [obj; fn]; _ }) ->
-        let obj = annot opts scope tbls xs obj in
-        let fn = annot opts scope tbls xs fn in
-        Annot (ObjMap { loc; obj; fn })
-      | _ -> Err (loc, CheckError)
-    end
-  | "$ObjMapi" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [obj; fn]; _ }) ->
-        let obj = annot opts scope tbls xs obj in
-        let fn = annot opts scope tbls xs fn in
-        Annot (ObjMapi { loc; obj; fn })
-      | _ -> Err (loc, CheckError)
-    end
-  | "$KeyMirror" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [obj]; _ }) ->
-        let obj = annot opts scope tbls xs obj in
-        Annot (ObjKeyMirror { loc; obj })
-      | _ -> Err (loc, CheckError)
-    end
-  | "$ObjMapConst" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [obj; t]; _ }) ->
-        let obj = annot opts scope tbls xs obj in
-        let t = annot opts scope tbls xs t in
-        Annot (ObjMapConst { loc; obj; t })
-      | _ -> Err (loc, CheckError)
-    end
-  | "$CharSet" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [(_, T.StringLiteral { Ast.StringLiteral.value; _ })]; _ }) ->
-        Annot (CharSet (loc, value))
-      | Some (_, { arguments = [(loc, _)]; _ }) ->
-        let loc = push_loc tbls loc in
-        Err (loc, CheckError)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$AbstractComponent" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [config; instance]; _ }) ->
-        let config = annot opts scope tbls xs config in
-        let instance = annot opts scope tbls xs instance in
-        Annot (ReactAbstractComponent { loc; config; instance })
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$Config" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [props; default]; _ }) ->
-        let props = annot opts scope tbls xs props in
-        let default = annot opts scope tbls xs default in
-        Annot (ReactConfig { loc; props; default })
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$Primitive" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReactPropTypePrimitive (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$Primitive$Required" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReactPropTypePrimitiveRequired (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$ArrayOf" ->
-    begin
-      match targs with
-      | None -> Annot (ReactPropTypeArrayOf loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$InstanceOf" ->
-    begin
-      match targs with
-      | None -> Annot (ReactPropTypeInstanceOf loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$ObjectOf" ->
-    begin
-      match targs with
-      | None -> Annot (ReactPropTypeObjectOf loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$OneOf" ->
-    begin
-      match targs with
-      | None -> Annot (ReactPropTypeOneOf loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$OneOfType" ->
-    begin
-      match targs with
-      | None -> Annot (ReactPropTypeOneOfType loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$PropType$Shape" ->
-    begin
-      match targs with
-      | None -> Annot (ReactPropTypeShape loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$CreateClass" ->
-    begin
-      match targs with
-      | None -> Annot (ReactCreateClass loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$CreateElement" ->
-    begin
-      match targs with
-      | None -> Annot (ReactCreateElement loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$CloneElement" ->
-    begin
-      match targs with
-      | None -> Annot (ReactCloneElement loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$ElementFactory" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReactElementFactory (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$ElementProps" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReactElementProps (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$ElementConfig" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReactElementConfig (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "React$ElementRef" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (ReactElementRef (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Compose" ->
-    begin
-      match targs with
-      | None -> Annot (Compose loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$ComposeReverse" ->
-    begin
-      match targs with
-      | None -> Annot (ComposeReverse loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Facebookism$Idx" ->
-    begin
-      match targs with
-      | None -> Annot (FacebookismIdx loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Facebookism$TypeAssertIs" when opts.type_asserts ->
-    begin
-      match targs with
-      | None -> Annot (FacebookismTypeAssertIs loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Facebookism$TypeAssertThrows" when opts.type_asserts ->
-    begin
-      match targs with
-      | None -> Annot (FacebookismTypeAssertThrows loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Facebookism$TypeAssertWraps" when opts.type_asserts ->
-    begin
-      match targs with
-      | None -> Annot (FacebookismTypeAssertWraps loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Flow$DebugPrint" ->
-    begin
-      match targs with
-      | None -> Annot (FlowDebugPrint loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Flow$DebugThrow" ->
-    begin
-      match targs with
-      | None -> Annot (FlowDebugThrow loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Flow$DebugSleep" ->
-    begin
-      match targs with
-      | None -> Annot (FlowDebugSleep loc)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Pred" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [(_, T.NumberLiteral { Ast.NumberLiteral.value; _ })]; _ }) ->
-        let n = Base.Int.of_float value in
-        Annot (Pred (loc, n))
-      | Some (_, { arguments = [(loc, _)]; _ }) ->
-        let loc = push_loc tbls loc in
-        Err (loc, CheckError)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Refine" ->
-    begin
-      match targs with
-      | Some
-          (_, { arguments = [base; pred; (_, T.NumberLiteral { Ast.NumberLiteral.value; _ })]; _ })
-        ->
-        let base = annot opts scope tbls xs base in
-        let fn_pred = annot opts scope tbls xs pred in
-        Annot (Refine { loc; base; fn_pred; index = Base.Int.of_float value })
-      | Some (_, { arguments = [_; _; (loc, _)]; _ }) ->
-        let loc = push_loc tbls loc in
-        Err (loc, CheckError)
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Trusted" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Trusted (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
-  | "$Private" ->
-    begin
-      match targs with
-      | Some (_, { arguments = [t]; _ }) ->
-        let t = annot opts scope tbls xs t in
-        Annot (Private (loc, t))
-      | _ -> Err (loc, CheckError)
-    end
+  | "$Enum" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Keys (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Values" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Values (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Exact" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Exact (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Rest" -> begin
+    match targs with
+    | Some (_, { arguments = [t1; t2]; _ }) ->
+      let t1 = annot opts scope tbls xs t1 in
+      let t2 = annot opts scope tbls xs t2 in
+      Annot (Rest (loc, t1, t2))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Exports" -> begin
+    match targs with
+    | Some (_, { arguments = [(_, T.StringLiteral { Ast.StringLiteral.value; _ })]; _ }) ->
+      Annot (ExportsT (loc, value))
+    | Some (_, { arguments = [(loc, _)]; _ }) -> Err (push_loc tbls loc, CheckError)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Call" -> begin
+    match targs with
+    | Some (_, { arguments = fn :: args; _ }) ->
+      let fn = annot opts scope tbls xs fn in
+      let args = List.map (annot opts scope tbls xs) args in
+      Annot (Call { loc; fn; args })
+    | _ -> Err (loc, CheckError)
+  end
+  | "$TupleMap" -> begin
+    match targs with
+    | Some (_, { arguments = [tup; fn]; _ }) ->
+      let tup = annot opts scope tbls xs tup in
+      let fn = annot opts scope tbls xs fn in
+      Annot (TupleMap { loc; tup; fn })
+    | _ -> Err (loc, CheckError)
+  end
+  | "$ObjMap" -> begin
+    match targs with
+    | Some (_, { arguments = [obj; fn]; _ }) ->
+      let obj = annot opts scope tbls xs obj in
+      let fn = annot opts scope tbls xs fn in
+      Annot (ObjMap { loc; obj; fn })
+    | _ -> Err (loc, CheckError)
+  end
+  | "$ObjMapi" -> begin
+    match targs with
+    | Some (_, { arguments = [obj; fn]; _ }) ->
+      let obj = annot opts scope tbls xs obj in
+      let fn = annot opts scope tbls xs fn in
+      Annot (ObjMapi { loc; obj; fn })
+    | _ -> Err (loc, CheckError)
+  end
+  | "$KeyMirror" -> begin
+    match targs with
+    | Some (_, { arguments = [obj]; _ }) ->
+      let obj = annot opts scope tbls xs obj in
+      Annot (ObjKeyMirror { loc; obj })
+    | _ -> Err (loc, CheckError)
+  end
+  | "$ObjMapConst" -> begin
+    match targs with
+    | Some (_, { arguments = [obj; t]; _ }) ->
+      let obj = annot opts scope tbls xs obj in
+      let t = annot opts scope tbls xs t in
+      Annot (ObjMapConst { loc; obj; t })
+    | _ -> Err (loc, CheckError)
+  end
+  | "$CharSet" -> begin
+    match targs with
+    | Some (_, { arguments = [(_, T.StringLiteral { Ast.StringLiteral.value; _ })]; _ }) ->
+      Annot (CharSet (loc, value))
+    | Some (_, { arguments = [(loc, _)]; _ }) ->
+      let loc = push_loc tbls loc in
+      Err (loc, CheckError)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$AbstractComponent" -> begin
+    match targs with
+    | Some (_, { arguments = [config; instance]; _ }) ->
+      let config = annot opts scope tbls xs config in
+      let instance = annot opts scope tbls xs instance in
+      Annot (ReactAbstractComponent { loc; config; instance })
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$Config" -> begin
+    match targs with
+    | Some (_, { arguments = [props; default]; _ }) ->
+      let props = annot opts scope tbls xs props in
+      let default = annot opts scope tbls xs default in
+      Annot (ReactConfig { loc; props; default })
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$Primitive" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReactPropTypePrimitive (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$Primitive$Required" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReactPropTypePrimitiveRequired (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$ArrayOf" -> begin
+    match targs with
+    | None -> Annot (ReactPropTypeArrayOf loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$InstanceOf" -> begin
+    match targs with
+    | None -> Annot (ReactPropTypeInstanceOf loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$ObjectOf" -> begin
+    match targs with
+    | None -> Annot (ReactPropTypeObjectOf loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$OneOf" -> begin
+    match targs with
+    | None -> Annot (ReactPropTypeOneOf loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$OneOfType" -> begin
+    match targs with
+    | None -> Annot (ReactPropTypeOneOfType loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$PropType$Shape" -> begin
+    match targs with
+    | None -> Annot (ReactPropTypeShape loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$CreateClass" -> begin
+    match targs with
+    | None -> Annot (ReactCreateClass loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$CreateElement" -> begin
+    match targs with
+    | None -> Annot (ReactCreateElement loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$CloneElement" -> begin
+    match targs with
+    | None -> Annot (ReactCloneElement loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$ElementFactory" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReactElementFactory (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$ElementProps" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReactElementProps (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$ElementConfig" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReactElementConfig (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "React$ElementRef" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (ReactElementRef (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Facebookism$IdxUnwrapper" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (FacebookismIdxUnwrapper (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Facebookism$IdxWrapper" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (FacebookismIdxWrapper (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Compose" -> begin
+    match targs with
+    | None -> Annot (Compose loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$ComposeReverse" -> begin
+    match targs with
+    | None -> Annot (ComposeReverse loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Flow$DebugPrint" -> begin
+    match targs with
+    | None -> Annot (FlowDebugPrint loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Flow$DebugThrow" -> begin
+    match targs with
+    | None -> Annot (FlowDebugThrow loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Flow$DebugSleep" -> begin
+    match targs with
+    | None -> Annot (FlowDebugSleep loc)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Pred" -> begin
+    match targs with
+    | Some (_, { arguments = [(_, T.NumberLiteral { Ast.NumberLiteral.value; _ })]; _ }) ->
+      let n = Base.Int.of_float value in
+      Annot (Pred (loc, n))
+    | Some (_, { arguments = [(loc, _)]; _ }) ->
+      let loc = push_loc tbls loc in
+      Err (loc, CheckError)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Refine" -> begin
+    match targs with
+    | Some (_, { arguments = [base; pred; (_, T.NumberLiteral { Ast.NumberLiteral.value; _ })]; _ })
+      ->
+      let base = annot opts scope tbls xs base in
+      let fn_pred = annot opts scope tbls xs pred in
+      Annot (Refine { loc; base; fn_pred; index = Base.Int.of_float value })
+    | Some (_, { arguments = [_; _; (loc, _)]; _ }) ->
+      let loc = push_loc tbls loc in
+      Err (loc, CheckError)
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Trusted" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Trusted (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
+  | "$Private" -> begin
+    match targs with
+    | Some (_, { arguments = [t]; _ }) ->
+      let t = annot opts scope tbls xs t in
+      Annot (Private (loc, t))
+    | _ -> Err (loc, CheckError)
+  end
   | name when SSet.mem name opts.suppress_types -> Annot (Any loc)
   | name ->
     if SSet.mem name xs then
@@ -2233,6 +2179,7 @@ and tparams =
           {
             T.name = (name_loc, { Ast.Identifier.name; comments = _ });
             bound = b;
+            bound_kind = _;
             variance = v;
             default = d;
           }
@@ -2352,7 +2299,7 @@ let setter_def opts scope tbls xs id_loc f =
 
 let string_literal opts tbls loc s =
   match opts.module_ref_prefix with
-  | Some prefix when String_utils.string_starts_with s prefix ->
+  | Some prefix when String.starts_with ~prefix s ->
     let name = String_utils.lstrip s prefix in
     let mref = push_module_ref tbls name in
     ModuleRef { loc; mref }
@@ -2367,10 +2314,7 @@ let literal opts tbls loc value raw =
   match value with
   | L.String s -> string_literal opts tbls loc s
   | L.Number n -> Value (NumberLit (loc, n, raw))
-  | L.BigInt _ ->
-    (* There's no reason we can't support these in signatures, but they are also
-     * not supported in type checker. *)
-    Err (loc, CheckError)
+  | L.BigInt n -> Value (BigIntLit (loc, n, raw))
   | L.Boolean b -> Value (BooleanLit (loc, b))
   | L.Null -> Value (NullLit loc)
   | L.RegExp _ ->
@@ -2446,9 +2390,9 @@ let jsx_element opts tbls loc elem =
           (Signature_error.UnexpectedExpression (loc, Flow_ast_utils.ExpressionSort.JSXElement))
       )
 
-let binary loc =
+let binary loc lhs_t rhs_t op =
   let open Ast.Expression.Binary in
-  function
+  match op with
   | Equal
   | NotEqual
   | StrictEqual
@@ -2470,20 +2414,9 @@ let binary loc =
   | Mod
   | BitOr
   | Xor
-  | BitAnd ->
-    Value (NumberVal loc)
+  | BitAnd
   | Plus ->
-    Err
-      ( loc,
-        SigError (Signature_error.UnexpectedExpression (loc, Flow_ast_utils.ExpressionSort.Binary))
-      )
-
-let update loc =
-  let open Ast.Expression.Update in
-  function
-  | Increment
-  | Decrement ->
-    Value (NumberVal loc)
+    Eval (loc, lhs_t, Arith (op, rhs_t))
 
 let rec expression opts scope tbls (loc, expr) =
   let module E = Ast.Expression in
@@ -2506,19 +2439,18 @@ let rec expression opts scope tbls (loc, expr) =
     val_ref scope id_loc name
   | E.Member { E.Member._object; property; comments = _ } ->
     member opts scope tbls _object loc property
-  | E.Class c ->
-    begin
-      match c.Ast.Class.id with
-      | Some (id_loc, { Ast.Identifier.name; comments = _ }) ->
-        let id_loc = push_loc tbls id_loc in
-        let scope = Scope.push_lex scope in
-        let def = lazy (splice tbls id_loc (fun tbls -> class_def opts scope tbls c)) in
-        Scope.bind_class scope tbls id_loc name def ignore2;
-        val_ref scope id_loc name
-      | None ->
-        let def = class_def opts scope tbls c in
-        Value (ClassExpr (loc, def))
-    end
+  | E.Class c -> begin
+    match c.Ast.Class.id with
+    | Some (id_loc, { Ast.Identifier.name; comments = _ }) ->
+      let id_loc = push_loc tbls id_loc in
+      let scope = Scope.push_lex scope in
+      let def = lazy (splice tbls id_loc (fun tbls -> class_def opts scope tbls c)) in
+      Scope.bind_class scope tbls id_loc name def ignore2;
+      val_ref scope id_loc name
+    | None ->
+      let def = class_def opts scope tbls c in
+      Value (ClassExpr (loc, def))
+  end
   | E.Function f ->
     let { Ast.Function.id; async; generator; sig_loc; _ } = f in
     let sig_loc = push_loc tbls sig_loc in
@@ -2544,40 +2476,41 @@ let rec expression opts scope tbls (loc, expr) =
     Value (FunExpr { loc; async; generator; def; statics })
   | E.TypeCast { E.TypeCast.expression = _; annot = (_, t); comments = _ } ->
     annot opts scope tbls SSet.empty t
+  | E.TSTypeCast _ -> Annot (Any loc)
   | E.Object { E.Object.properties; comments = _ } ->
-    if properties = [] then
-      Err (loc, SigError (Signature_error.EmptyObject loc))
-    else
-      object_literal opts scope tbls loc ~frozen:false properties
+    object_literal opts scope tbls loc ~frozen:false properties
   | E.Array { E.Array.elements; comments = _ } -> array_literal opts scope tbls loc elements
-  | E.Unary { E.Unary.operator; argument; comments = _ } ->
-    begin
-      match operator with
-      | E.Unary.Await ->
-        (* This is already a parse error *)
-        let e = Signature_error.UnexpectedExpression (loc, Flow_ast_utils.ExpressionSort.Unary) in
-        Err (loc, SigError e)
-      | _ ->
-        let t = expression opts scope tbls argument in
-        Eval (loc, t, Unary operator)
-    end
-  | E.Binary { E.Binary.operator; left = _; right = _; comments = _ } -> binary loc operator
-  | E.Update { E.Update.operator; argument = _; prefix = _; comments = _ } -> update loc operator
+  | E.Unary { E.Unary.operator; argument; comments = _ } -> begin
+    match operator with
+    | E.Unary.Await ->
+      (* This is already a parse error *)
+      let e = Signature_error.UnexpectedExpression (loc, Flow_ast_utils.ExpressionSort.Unary) in
+      Err (loc, SigError e)
+    | _ ->
+      let t = expression opts scope tbls argument in
+      Eval (loc, t, Unary operator)
+  end
+  | E.Binary { E.Binary.operator; left; right; comments = _ } ->
+    let lhs_t = expression opts scope tbls left in
+    let rhs_t = expression opts scope tbls right in
+    binary loc lhs_t rhs_t operator
+  | E.Update { E.Update.operator = _; argument; prefix = _; comments = _ } ->
+    let t = expression opts scope tbls argument in
+    Eval (loc, t, Update)
   | E.Sequence { E.Sequence.expressions; comments = _ } ->
     sequence (expression opts scope tbls) expressions
-  | E.Assignment { E.Assignment.operator; right; _ } ->
-    begin
-      match operator with
-      | None ->
-        (* This is sketchy: the RHS may have side effects that are not tracked! *)
-        expression opts scope tbls right
-      | Some _ ->
-        Err
-          ( loc,
-            SigError
-              (Signature_error.UnexpectedExpression (loc, Flow_ast_utils.ExpressionSort.Assignment))
-          )
-    end
+  | E.Assignment { E.Assignment.operator; right; _ } -> begin
+    match operator with
+    | None ->
+      (* This is sketchy: the RHS may have side effects that are not tracked! *)
+      expression opts scope tbls right
+    | Some _ ->
+      Err
+        ( loc,
+          SigError
+            (Signature_error.UnexpectedExpression (loc, Flow_ast_utils.ExpressionSort.Assignment))
+        )
+  end
   | E.Call
       {
         E.Call.callee = (_, E.Identifier (_, { Ast.Identifier.name = "require"; comments = _ }));
@@ -2655,16 +2588,15 @@ let rec expression opts scope tbls (loc, expr) =
     let obj_loc = push_loc tbls obj_loc in
     key_mirror tbls obj_loc properties
   | E.JSXElement elem -> jsx_element opts tbls loc elem
-  | E.Import { E.Import.argument = (_, e); comments = _ } ->
-    begin
-      match extract_string_literal e with
-      | None ->
-        (* error case: non-literal require *)
-        Annot (Any loc)
-      | Some mref ->
-        let mref = push_module_ref tbls mref in
-        ImportDynamic { loc; mref }
-    end
+  | E.Import { E.Import.argument = (_, e); comments = _ } -> begin
+    match extract_string_literal e with
+    | None ->
+      (* error case: non-literal require *)
+      Annot (Any loc)
+    | Some mref ->
+      let mref = push_module_ref tbls mref in
+      ImportDynamic { loc; mref }
+  end
   | E.Call _ ->
     Err
       ( loc,
@@ -2778,7 +2710,7 @@ and member =
   in
   (fun opts scope tbls obj loc prop -> loop ~toplevel_loc:loc opts scope tbls [(loc, prop)] obj)
 
-and function_def =
+and function_def_helper =
   let module F = Ast.Function in
   let param opts scope tbls xs (loc, p) =
     let module P = Ast.Pattern in
@@ -2864,7 +2796,15 @@ and function_def =
         None)
     (* unexpected rest param pattern *)
   in
-  let return opts scope tbls xs ~async ~generator body = function
+  let return opts scope tbls xs ~async ~generator ~constructor body =
+    if constructor then
+      function
+    | Ast.Type.Available (loc, _)
+    | Ast.Type.Missing loc ->
+      let loc = push_loc tbls loc in
+      Annot (Void loc)
+    else
+      function
     | Ast.Type.Available (_, t) -> annot opts scope tbls xs t
     | Ast.Type.Missing loc ->
       let loc = push_loc tbls loc in
@@ -2892,7 +2832,8 @@ and function_def =
       | F.BodyBlock
           ( _,
             {
-              S.Block.body = [(loc, S.Return { S.Return.argument = Some expr; comments = _ })];
+              S.Block.body =
+                [(loc, S.Return { S.Return.argument = Some expr; comments = _; return_out = _ })];
               comments = _;
             }
           )
@@ -2913,7 +2854,7 @@ and function_def =
         Some (loc, predicate opts scope tbls pnames expr)
       | _ -> None)
   in
-  fun opts scope tbls xs f ->
+  fun opts scope tbls xs ~constructor f ->
     let {
       F.id = _;
       tparams = tps;
@@ -2932,9 +2873,13 @@ and function_def =
     let this_param = this_param opts scope tbls xs this_ in
     let params = params opts scope tbls xs [] ps in
     let rest_param = rest_param opts scope tbls xs rp in
-    let return = return opts scope tbls xs ~async ~generator body r in
+    let return = return opts scope tbls xs ~async ~generator ~constructor body r in
     let predicate = predicate opts scope tbls ps body p in
     FunSig { tparams; params; rest_param; this_param; return; predicate }
+
+and function_def = function_def_helper ~constructor:false
+
+and constructor_def = function_def_helper ~constructor:true
 
 and predicate opts scope tbls pnames =
   let open Option.Let_syntax in
@@ -2955,6 +2900,7 @@ and predicate opts scope tbls pnames =
     | "boolean" -> Some `Boolean
     | "function" -> Some `Function
     | "number" -> Some `Number
+    | "bigint" -> Some `BigInt
     | "object" -> Some `Object
     | "string" -> Some `String
     | "symbol" -> Some `Symbol
@@ -2964,7 +2910,7 @@ and predicate opts scope tbls pnames =
   let refine_id test id =
     let%map key = refinement_key id in
     match test with
-    | `Exists loc -> ExistsP (key, Some loc)
+    | `Exists -> ExistsP key
     | `Instanceof right ->
       let t = expression opts scope tbls right in
       InstanceofP (key, t)
@@ -2975,12 +2921,14 @@ and predicate opts scope tbls pnames =
         | `Typeof `Boolean -> BoolP (key, eq_loc)
         | `Typeof `Function -> FunP key
         | `Typeof `Number -> NumP (key, eq_loc)
+        | `Typeof `BigInt -> BigIntP (key, eq_loc)
         | `Typeof `Object -> ObjP key
         | `Typeof `String -> StrP (key, eq_loc)
         | `Typeof `Symbol -> SymbolP (key, eq_loc)
         | `Typeof `Undefined -> VoidP key
         | `String (loc, x) -> SingletonStrP (key, loc, sense, x)
         | `Number (loc, x, raw) -> SingletonNumP (key, loc, sense, x, raw)
+        | `BigInt (loc, x, raw) -> SingletonBigIntP (key, loc, sense, x, raw)
         | `Bool (loc, x) -> SingletonBoolP (key, loc, x)
         | `Null _ -> NullP key
         | `Void _ -> VoidP key
@@ -2995,7 +2943,7 @@ and predicate opts scope tbls pnames =
     let%bind key = refinement_key id in
     let%bind prop = refinement_prop prop in
     match test with
-    | `Exists _ -> None
+    | `Exists -> None
     | `Instanceof _ -> None
     | `IsArray -> None
     | `Eq (_, sense, eq_test) ->
@@ -3004,6 +2952,7 @@ and predicate opts scope tbls pnames =
         | `Typeof _ -> None
         | `String (loc, x) -> Some (SentinelStrP (key, prop, loc, x))
         | `Number (loc, x, raw) -> Some (SentinelNumP (key, prop, loc, x, raw))
+        | `BigInt (loc, x, raw) -> Some (SentinelBigIntP (key, prop, loc, x, raw))
         | `Bool (loc, x) -> Some (SentinelBoolP (key, prop, loc, x))
         | `Null loc -> Some (SentinelNullP (key, prop, loc))
         | `Void loc -> Some (SentinelVoidP (key, prop, loc))
@@ -3048,7 +2997,11 @@ and predicate opts scope tbls pnames =
         Some (`Number (loc, x, raw))
       else
         None
-    | L.BigInt _ -> None
+    | L.BigInt x ->
+      if strict then
+        Some (`BigInt (loc, x, raw))
+      else
+        None
     | L.RegExp _ -> None
   in
   let eq_test ~strict ~sense eq_loc left right =
@@ -3196,7 +3149,7 @@ and predicate opts scope tbls pnames =
   fun (loc, expr) ->
     let loc = push_loc tbls loc in
     match expr with
-    | E.Identifier id -> refine_id (`Exists loc) id
+    | E.Identifier id -> refine_id `Exists id
     | E.Logical { E.Logical.operator; left; right; comments = _ } -> logical left right operator
     | E.Unary { E.Unary.operator; argument; comments = _ } -> unary argument operator
     | E.Binary { E.Binary.operator; left; right; comments = _ } -> binary loc left right operator
@@ -3237,12 +3190,17 @@ and class_def =
             acc
           else begin
             match kind with
-            | C.Method.Method
-            | C.Method.Constructor ->
+            | C.Method.Method ->
               let { Ast.Function.async; generator; _ } = fn in
               let fn_loc = push_loc tbls fn_loc in
               let id_loc = push_loc tbls id_loc in
               let def = function_def opts scope tbls xs fn in
+              Acc.add_method ~static name id_loc fn_loc ~async ~generator def acc
+            | C.Method.Constructor ->
+              let { Ast.Function.async; generator; _ } = fn in
+              let fn_loc = push_loc tbls fn_loc in
+              let id_loc = push_loc tbls id_loc in
+              let def = constructor_def opts scope tbls xs fn in
               Acc.add_method ~static name id_loc fn_loc ~async ~generator def acc
             | C.Method.Get ->
               let id_loc = push_loc tbls id_loc in
@@ -3930,9 +3888,17 @@ let enum_decl =
     else
       truthy
   in
+  let bigint_rep truthy init =
+    let (_, { Ast.BigIntLiteral.value; _ }) = init in
+    if value = Some 0L then
+      false
+    else
+      truthy
+  in
   let boolean_member = initialized_member boolean_rep in
   let string_member = initialized_member string_rep in
   let number_member = initialized_member number_rep in
+  let bigint_member = initialized_member bigint_rep in
   let defaulted_members tbls = List.fold_left (defaulted_member tbls) SMap.empty in
   let initialized_members tbls f rep = List.fold_left (f tbls) (rep, SMap.empty) in
   let string_enum_def tbls has_unknown_members = function
@@ -3955,6 +3921,9 @@ let enum_decl =
     | E.SymbolBody { E.SymbolBody.members; has_unknown_members; _ } ->
       let members = defaulted_members tbls members in
       (SymbolRep, members, has_unknown_members)
+    | E.BigIntBody { E.BigIntBody.members; has_unknown_members; _ } ->
+      let (truthy, members) = initialized_members tbls bigint_member true members in
+      (BigIntRep { truthy }, members, has_unknown_members)
   in
   fun opts scope tbls decl ->
     let { E.id; body = (_, body); comments = _ } = decl in
@@ -3996,6 +3965,7 @@ let declare_export_decl opts scope tbls default =
     declare_variable_decl opts scope tbls v (Scope.export_binding scope S.ExportValue)
   | D.Function (_, f) -> declare_function_decl opts scope tbls f export_maybe_default_binding
   | D.Class (_, c) -> declare_class_decl opts scope tbls c export_maybe_default_binding
+  | D.Enum (_, enum) -> enum_decl opts scope tbls enum (Scope.export_binding scope S.ExportValue)
   | D.DefaultType t ->
     let default_loc = Base.Option.value_exn default in
     let def = annot opts scope tbls SSet.empty t in
@@ -4280,7 +4250,9 @@ let rec statement opts scope tbls (loc, stmt) =
     let (_, { S.Block.body = stmts; comments = _ }) = body in
     List.iter (statement opts scope tbls) stmts;
     Scope.finalize_declare_module_exports_exn scope
-  | S.EnumDeclaration decl -> enum_decl opts scope tbls decl ignore2
+  | S.DeclareEnum decl
+  | S.EnumDeclaration decl ->
+    enum_decl opts scope tbls decl ignore2
   (* unsupported *)
   | S.With _ -> ()
   (* statements that won't introduce a top-level type or name in module scope *)

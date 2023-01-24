@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -56,3 +56,21 @@ echo "-----------------------------"
 echo
 assert_ok "$FLOW" coverage --show-trust --strip-root --pretty trust.js
 assert_ok "$FLOW" coverage --show-trust trust.js
+
+"$FLOW" stop
+"$FLOW" start --trust-mode=check
+echo "-----------------------------"
+echo "tparam.js"
+echo "-----------------------------"
+echo
+assert_ok "$FLOW" coverage --show-trust --strip-root --pretty tparam.js
+assert_ok "$FLOW" coverage --show-trust tparam.js
+
+"$FLOW" stop
+"$FLOW" start --trust-mode=check
+echo "-----------------------------"
+echo "tparam_import.js"
+echo "-----------------------------"
+echo
+assert_ok "$FLOW" coverage --show-trust --strip-root --pretty tparam_import.js
+assert_ok "$FLOW" coverage --show-trust tparam_import.js

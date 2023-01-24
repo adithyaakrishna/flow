@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -186,9 +186,11 @@ module Object
                 (tparams, params, return))
               env
           in
-          let (body, strict) = Declaration.function_body env ~async ~generator ~expression:false in
-          let simple = Declaration.is_simple_function_params params in
-          Declaration.strict_post_check env ~strict ~simple None params;
+          let simple_params = is_simple_parameter_list params in
+          let (body, contains_use_strict) =
+            Declaration.function_body env ~async ~generator ~expression:false ~simple_params
+          in
+          Declaration.strict_post_check env ~contains_use_strict None params;
           {
             Function.id = None;
             params;
@@ -239,7 +241,7 @@ module Object
           (loc, Ast.Expression.Literal lit)
         | Identifier ((loc, { Identifier.name; comments = _ }) as id) ->
           (* #sec-identifiers-static-semantics-early-errors *)
-          if is_reserved name && name <> "yield" && name <> "await" then
+          if is_reserved name then
             (* it is a syntax error if `name` is a reserved word other than await or yield *)
             error_at env (loc, Parse_error.UnexpectedReserved)
           else if is_strict_reserved name then
@@ -280,11 +282,11 @@ module Object
                   (tparams, params, return))
                 env
             in
-            let (body, strict) =
-              Declaration.function_body env ~async ~generator ~expression:false
+            let simple_params = is_simple_parameter_list params in
+            let (body, contains_use_strict) =
+              Declaration.function_body env ~async ~generator ~expression:false ~simple_params
             in
-            let simple = Declaration.is_simple_function_params params in
-            Declaration.strict_post_check env ~strict ~simple None params;
+            Declaration.strict_post_check env ~contains_use_strict None params;
             {
               Function.id = None;
               params;
@@ -361,10 +363,17 @@ module Object
             let (value, errs) = parse_assignment_pattern ~key env in
             let prop = Init { key; value; shorthand = true } in
             (prop, errs)
-          | _ ->
+          | T_COLON ->
             let (value, errs) = parse_value env in
             let prop = Init { key; value; shorthand = false } in
             (prop, errs)
+          | _ ->
+            (* error. we recover by treating it as a shorthand property so as to not
+               consume any more tokens and make the error worse. we don't error here
+               because we'll expect a comma before the next token. *)
+            let value = parse_shorthand env key in
+            let prop = Init { key; value; shorthand = true } in
+            (prop, Pattern_cover.empty_errors)
       in
       fun env start_loc key async generator leading ->
         let (loc, (prop, errs)) =
@@ -464,12 +473,27 @@ module Object
             Some (Peek.loc env)
           | _ -> None
         in
-        (match Peek.token env with
-        | T_RCURLY
-        | T_EOF ->
-          ()
-        | _ -> Expect.token env T_COMMA);
         let errs = Pattern_cover.rev_append_errors new_errs errs in
+        let errs =
+          match Peek.token env with
+          | T_RCURLY
+          | T_EOF ->
+            errs
+          | T_COMMA ->
+            Eat.token env;
+            errs
+          | _ ->
+            (* we could use [Expect.error env T_COMMA], but we're in a weird
+               cover grammar situation where we're storing errors in
+               [Pattern_cover]. if we used [Expect.error], the errors would
+               end up out of order. *)
+            let err = Expect.get_error env T_COMMA in
+            (* if the unexpected token is a semicolon, consume it to aid
+               recovery. using a semicolon instead of a comma is a common
+               mistake. *)
+            let _ = Eat.maybe env T_SEMICOLON in
+            Pattern_cover.cons_error err errs
+        in
         properties env ~rest_trailing_comma (prop :: props, errs)
     in
     fun env ->
@@ -702,19 +726,12 @@ module Object
           ~start_loc
           (fun env ->
             let annot = Type.annotation_opt env in
-            let options = parse_options env in
             let value =
               match (declare, Peek.token env) with
               | (None, T_ASSIGN) ->
-                if
-                  (static && options.esproposal_class_static_fields)
-                  || ((not static) && options.esproposal_class_instance_fields)
-                then (
-                  Expect.token env T_ASSIGN;
-                  Ast.Class.Property.Initialized
-                    (Parse.expression (env |> with_allow_super Super_prop))
-                ) else
-                  Ast.Class.Property.Uninitialized
+                Eat.token env;
+                Ast.Class.Property.Initialized
+                  (Parse.expression (env |> with_allow_super Super_prop))
               | (Some _, T_ASSIGN) ->
                 error env Parse_error.DeclareClassFieldInitializer;
                 Eat.token env;
@@ -734,6 +751,13 @@ module Object
       | _ ->
         Ast.Class.(Body.Property (loc, { Property.key; value; annot; static; variance; comments }))
     in
+    let is_asi env =
+      match Peek.token env with
+      | T_LESS_THAN -> false
+      | T_LPAREN -> false
+      | _ when Peek.is_implicit_semicolon env -> true
+      | _ -> false
+    in
     let rec init env start_loc decorators key ~async ~generator ~static ~declare variance leading =
       match Peek.token env with
       | T_COLON
@@ -747,7 +771,7 @@ module Object
         error_unexpected env;
         Eat.token env;
         init env start_loc decorators key ~async ~generator ~static ~declare variance leading
-      | _ when Peek.is_implicit_semicolon env ->
+      | _ when is_asi env ->
         (* an uninitialized, unannotated property *)
         property env start_loc key static declare variance leading
       | _ ->
@@ -807,11 +831,11 @@ module Object
                     (tparams, params, return))
                   env
               in
-              let (body, strict) =
-                Declaration.function_body env ~async ~generator ~expression:false
+              let simple_params = is_simple_parameter_list params in
+              let (body, contains_use_strict) =
+                Declaration.function_body env ~async ~generator ~expression:false ~simple_params
               in
-              let simple = Declaration.is_simple_function_params params in
-              Declaration.strict_post_check env ~strict ~simple None params;
+              Declaration.strict_post_check env ~contains_use_strict None params;
               {
                 Function.id = None;
                 params;
@@ -865,9 +889,18 @@ module Object
         | _ -> (None, [])
       in
       let static =
-        Peek.ith_token ~i:1 env <> T_LPAREN
-        && Peek.ith_token ~i:1 env <> T_LESS_THAN
-        && Peek.token env = T_STATIC
+        Peek.token env = T_STATIC
+        &&
+        match Peek.ith_token ~i:1 env with
+        | T_ASSIGN (* static = 123 *)
+        | T_COLON (* static: T *)
+        | T_EOF (* incomplete property *)
+        | T_LESS_THAN (* static<T>() {} *)
+        | T_LPAREN (* static() {} *)
+        | T_RCURLY (* end of class *)
+        | T_SEMICOLON (* explicit semicolon *) ->
+          false
+        | _ -> true
       in
       let leading_static =
         if static then (
@@ -892,7 +925,10 @@ module Object
           []
       in
       let (generator, leading_generator) = Declaration.generator env in
-      let variance = Declaration.variance env async generator in
+      let parse_readonly =
+        Peek.ith_is_identifier ~i:1 env || Peek.ith_token ~i:1 env = T_LBRACKET
+      in
+      let variance = Declaration.variance env ~parse_readonly async generator in
       let (generator, leading_generator) =
         match (generator, variance) with
         | (false, Some _) -> Declaration.generator env
@@ -1030,11 +1066,17 @@ module Object
       let tmp_env = env |> with_no_let true in
       match (optional_id, Peek.token tmp_env) with
       | (true, (T_EXTENDS | T_IMPLEMENTS | T_LESS_THAN | T_LCURLY)) -> None
-      | _ ->
+      | _ when Peek.is_identifier env ->
         let id = Parse.identifier tmp_env in
         let { remove_trailing; _ } = trailing_and_remover env in
         let id = remove_trailing id (fun remover id -> remover#identifier id) in
         Some id
+      | _ ->
+        (* error, but don't consume a token like Parse.identifier does. this helps
+           with recovery, and the parser won't get stuck because we consumed the
+           `class` token above. *)
+        error_nameless_declaration env "class";
+        Some (Peek.loc env, { Identifier.name = ""; comments = None })
     in
     let tparams =
       match Type.type_params env with
@@ -1051,7 +1093,7 @@ module Object
   let class_declaration env decorators =
     with_loc
       (fun env ->
-        let optional_id = in_export env in
+        let optional_id = in_export_default env in
         Ast.Statement.ClassDeclaration (_class env ~decorators ~optional_id ~expression:false))
       env
 

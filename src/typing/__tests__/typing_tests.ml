@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,7 +7,7 @@
 
 open OUnit2
 
-let tests = "typing" >::: [Typed_ast_test.tests]
+let tests = "typing" >::: [Type_hint_test.tests]
 
 let _handle =
   let one_gig = 1024 * 1024 * 1024 in

@@ -4,13 +4,8 @@
  (libraries collections disk str unix utils_core)
  (foreign_stubs
   (language c)
-  (names
-   files
-   gc_profiling
-   getrusage
-   handle_stubs
-   nproc
-   priorities
-   processor_info
-   realpath
-   sysinfo)))
+  (names gc_profiling handle_stubs nproc processor_info sysinfo))
+ (js_of_ocaml (javascript_files handle_stubs.js nproc.js sysinfo.js)))
+
+(dirs
+ (:standard __tests__))

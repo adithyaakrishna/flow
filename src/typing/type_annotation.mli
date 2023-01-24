@@ -1,109 +1,38 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-(** services for producing types from annotations,
-    called during AST traversal.
- *)
+open Reason
 
-module Make : functor
-  (Env : Env_sig.S)
-  (_ : Abnormal_sig.S with module Env := Env)
-  (_ : Statement_sig.S with module Env := Env)
-  -> sig
-  module Class_type_sig : Class_sig.S
+module type C = sig
+  val mk_typeof_annotation : Context.t -> ?trace:Type.trace -> Reason.t -> Type.t -> Type.t
 
-  val convert :
-    Context.t ->
-    Type.t SMap.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.t ->
-    (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.t
+  val mk_instance : Context.t -> ?trace:Type.trace -> reason -> ?use_desc:bool -> Type.t -> Type.t
 
-  val convert_list :
-    Context.t ->
-    Type.t SMap.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.t list ->
-    Type.t list * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.t list
+  val cjs_require : Context.t -> Type.t -> Reason.t -> bool -> Type.t
 
-  val convert_opt :
-    Context.t ->
-    Type.t SMap.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.t option ->
-    Type.t option * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.t option
+  val get_prop :
+    Context.t -> Type.use_op -> Reason.t -> ?op_reason:Reason.t -> Reason.name -> Type.t -> Type.t
 
-  val convert_qualification :
-    ?lookup_mode:Env_sig.LookupMode.t ->
-    Context.t ->
-    string ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.Generic.Identifier.t ->
-    Type.t * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.Generic.Identifier.t
+  val reposition : Context.t -> ALoc.t -> ?annot_loc:ALoc.t -> Type.t -> Type.t
 
-  val mk_super :
-    Context.t ->
-    Type.t SMap.t ->
-    ALoc.t ->
-    Type.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.TypeArgs.t option ->
-    (ALoc.t * Type.t * Type.t list option)
-    * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.TypeArgs.t option
+  val get_builtin : Context.t -> ?trace:Type.trace -> name -> reason -> Type.t
 
-  val mk_type_annotation :
-    Context.t ->
-    Type.t SMap.t ->
-    Reason.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.annotation_or_hint ->
-    Type.annotated_or_inferred * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.annotation_or_hint
+  val obj_test_proto : Context.t -> Reason.t -> Type.t -> Type.t
 
-  val mk_return_type_annotation :
-    Context.t ->
-    Type.t SMap.t ->
-    Reason.t ->
-    definitely_returns_void:bool ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.annotation_or_hint ->
-    Type.annotated_or_inferred * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.annotation_or_hint
+  val widen_obj_type :
+    Context.t -> ?trace:Type.trace -> use_op:Type.use_op -> Reason.reason -> Type.t -> Type.t
 
-  val mk_type_available_annotation :
-    Context.t ->
-    Type.t SMap.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.annotation ->
-    Type.t * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.annotation
+  val mixin : Context.t -> Reason.t -> Type.t -> Type.t
 
-  val mk_nominal_type :
-    Context.t ->
-    Reason.t ->
-    Type.t SMap.t ->
-    Type.t * (ALoc.t, ALoc.t) Flow_ast.Type.TypeArgs.t option ->
-    Type.t * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.TypeArgs.t option
-
-  val mk_type_param_declarations :
-    Context.t ->
-    ?tparams_map:Type.t SMap.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.TypeParams.t option ->
-    Type.typeparams * Type.t SMap.t * (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.TypeParams.t option
-
-  val mk_interface_sig :
-    Context.t ->
-    Reason.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Statement.Interface.t ->
-    Class_type_sig.t * Type.t * (ALoc.t, ALoc.t * Type.t) Flow_ast.Statement.Interface.t
-
-  val mk_declare_class_sig :
-    Context.t ->
-    Reason.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Statement.DeclareClass.t ->
-    Class_type_sig.t * Type.t * (ALoc.t, ALoc.t * Type.t) Flow_ast.Statement.DeclareClass.t
-
-  val polarity : 'a Flow_ast.Variance.t option -> Polarity.t
-
-  val qualified_name : (ALoc.t, ALoc.t) Flow_ast.Type.Generic.Identifier.t -> string
-
-  val error_type :
-    Context.t ->
-    ALoc.t ->
-    Error_message.t ->
-    (ALoc.t, ALoc.t) Flow_ast.Type.t ->
-    (ALoc.t, ALoc.t * Type.t) Flow_ast.Type.t
+  val subtype_check : Context.t -> Type.t -> Type.t -> unit
 end
+
+module FlowJS : C
+
+module Annot : C
+
+module Make (_ : C) (_ : Statement_sig.S) : Type_annotation_sig.S

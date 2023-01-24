@@ -1,14 +1,11 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-THIS_DIR=$(cd -P "$(dirname "$(readlink "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")" && pwd)
-export THIS_DIR
-
 show_help() {
-  printf "Usage: runtests.sh [-ehlqrv] [-d DIR] [-t TEST] [-b] FLOW_BINARY [[-f] TEST_FILTER]\n\n"
+  printf "Usage: runtests.sh [-hlnqrv] [-d DIR] [-t TEST] [-b] FLOW_BINARY [[-f] TEST_FILTER]\n\n"
   printf "Runs Flow's tests.\n\n"
   echo "    [-b] FLOW_BINARY"
   echo "        path to Flow binary (the -b is optional)"
@@ -20,16 +17,16 @@ show_help() {
   echo "        run tests in DIR/tests/"
   echo "    -t TEST"
   echo "        run the test DIR/tests/TEST, equivalent to a filter of \"^TEST$\""
-  echo "    -e"
-  echo "        test using new implementation of the type environment"
+  echo "    -c"
+  echo "        only run check tests"
+  echo "    -n"
+  echo "        test using sealed tvars environment"
   echo "    -r"
   echo "        re-record failing tests to update expected output"
   echo "    -q"
   echo "        quiet output (hides status, just prints results)"
   echo "    -s"
   echo "        test saved state"
-  echo "    -m"
-  echo "        test new merge"
   echo "    -v"
   echo "        verbose output (shows skipped tests)"
   echo "    -h"
@@ -40,16 +37,22 @@ export IN_FLOW_TEST=1
 export FLOW_LOG_LEVEL=debug
 export FLOW_NODE_BINARY=${FLOW_NODE_BINARY:-${NODE_BINARY:-$(which node)}}
 
+# find git. to skip git tests even when git is available,
+# set FLOW_GIT_BINARY to empty string
+if [ -n "${FLOW_GIT_BINARY-unset}" ]; then
+  export FLOW_GIT_BINARY=${FLOW_GIT_BINARY:-$(which git)}
+fi
+
 OPTIND=1
 record=0
 saved_state=0
-new_merge=0
 verbose=0
 quiet=0
-relative="$THIS_DIR"
-new_env=0
-export saved_state filter new_env new_merge
-while getopts "b:d:f:elmqrst:vh?" opt; do
+relative="."
+lti=0
+check_only=0
+export saved_state filter check_only lti
+while getopts "b:d:f:clqxnrst:vh?" opt; do
   case "$opt" in
   b)
     FLOW="$OPTARG"
@@ -60,8 +63,11 @@ while getopts "b:d:f:elmqrst:vh?" opt; do
   f)
     filter="$OPTARG"
     ;;
-  e)
-    new_env=1
+  c)
+    check_only=1
+    ;;
+  n)
+    lti=1
     ;;
   l)
     list_tests=1
@@ -78,9 +84,6 @@ while getopts "b:d:f:elmqrst:vh?" opt; do
   s)
     saved_state=1
     printf "Testing saved state by running all tests using saved state\\n"
-    ;;
-  m)
-    new_merge=1
     ;;
   v)
     verbose=1
@@ -99,8 +102,6 @@ shift $((OPTIND-1))
 if [ -n "$specific_test" ]; then
   if [[ "$saved_state" -eq 1 ]]; then
     specific_test=$(echo $specific_test | sed 's/\(.*\)-saved-state$/\1/')
-  elif [[ "$new_merge" -eq 1 ]]; then
-    specific_test=$(echo $specific_test | sed 's/\(.*\)-new-merge$/\1/')
   fi
 
   filter="^$specific_test$"
@@ -170,11 +171,16 @@ print_failure() {
         cat "$diff_file"
       fi
     fi
+    # Default expected file extension is .exp
+    ext=".exp"
+    if [[ "$lti" -eq 1 ]] && [ -f "${dir}${name}${ext}.lti" ]; then
+      ext="${ext}.lti"
+    fi
 
     if [[ "$record" -eq 1 ]]; then
       # Copy .out to .exp, replacing the current version, if present, with
       # <VERSION>, so that the .exp doesn't have to be updated on each release.
-      sed 's/'"${VERSION//./\\.}"'/<VERSION>/g' "${dir}${name}.out" > "${dir}${name}.exp"
+      sed 's/'"${VERSION//./\\.}"'/<VERSION>/g' "${dir}${name}.out" > "${dir}${name}${ext}"
       rm "${dir}${name}.out"
       rm -f "$err_file"
       rm "$diff_file"
@@ -236,7 +242,7 @@ skipped=0
 errored=0
 
 # shellcheck source=fbcode/flow/scripts/lib/runtests-common.sh
-. "$THIS_DIR/scripts/lib/runtests-common.sh"
+. "./scripts/lib/runtests-common.sh"
 
 if [ -z "$FLOW_MAX_WORKERS" ]; then
   export FLOW_MAX_WORKERS=2
@@ -276,7 +282,7 @@ parallel_run_tests() {
             echo "$(( i++ )):$dir"
         done
     ) | xargs -P"$num_to_run_in_parallel" -n1 \
-          "$THIS_DIR/scripts/run-one-test"
+          "./scripts/run-one-test"
 }
 
 # Kick off all tests, reporting results over a pipe to our fd 3
@@ -334,12 +340,12 @@ while (( next_test_to_print < ${#dirs[@]} )); do
     (( next_test_to_print++ ))
 done
 
-if [ $failed -eq 0 ]; then
+if [ "$failed" -eq 0 ]; then
   FAILED_COLOR="$COLOR_DEFAULT_BOLD"
 else
   FAILED_COLOR="$COLOR_WHITE_ON_RED_BOLD"
 fi
-if [ $errored -eq 0 ]; then
+if [ "$errored" -eq 0 ]; then
   ERRORED_COLOR="$COLOR_DEFAULT_BOLD"
 else
   ERRORED_COLOR="$COLOR_WHITE_ON_RED_BOLD"
@@ -355,4 +361,6 @@ if [[ "$quiet" -eq 0 ]]; then
     "$COLOR_RESET"
 fi
 
-exit $((failed + errored))
+if [[ "$failed" -gt 0 || "$errored" -gt 0 ]]; then
+  exit 1
+fi

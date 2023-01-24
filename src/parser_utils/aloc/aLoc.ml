@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -41,6 +41,8 @@ module Repr : sig
 
   val kind : t -> kind
 
+  val kind_ignore_source : t -> kind
+
   (* Raises unless `kind` returns `Keyed` *)
   val get_key_exn : t -> key
 
@@ -75,7 +77,7 @@ end = struct
     key: key;
   }
 
-  let of_loc : Loc.t -> t = Obj.magic
+  let of_loc loc = loc
 
   let of_key (source : File_key.t option) (key : key) : t =
     let loc : keyed_t = { keyed_source = source; key } in
@@ -92,7 +94,15 @@ end = struct
   let kind (loc : t) : kind =
     if is_keyed loc then
       Keyed
-    else if Loc.is_none (Obj.magic loc) then
+    else if Loc.is_none loc then
+      ALocNone
+    else
+      Concrete
+
+  let kind_ignore_source (loc : t) : kind =
+    if is_keyed loc then
+      Keyed
+    else if Loc.is_none_ignore_source loc then
       ALocNone
     else
       Concrete
@@ -108,7 +118,7 @@ end = struct
     if is_keyed loc then
       invalid_arg "loc must be concrete"
     else
-      (Obj.magic loc : Loc.t)
+      loc
 
   let update_source f loc =
     if is_keyed loc then
@@ -187,7 +197,7 @@ let debug_to_string ?(include_source = false) loc =
 let compare loc1 loc2 =
   let source_compare = File_key.compare_opt (Repr.source loc1) (Repr.source loc2) in
   if source_compare = 0 then
-    match (Repr.kind loc1, Repr.kind loc2) with
+    match (Repr.kind_ignore_source loc1, Repr.kind_ignore_source loc2) with
     | (Repr.Keyed, Repr.Keyed) ->
       let k1 = Repr.get_key_exn loc1 in
       let k2 = Repr.get_key_exn loc2 in
@@ -195,11 +205,7 @@ let compare loc1 loc2 =
     | (Repr.Concrete, Repr.Concrete) ->
       let l1 = Repr.to_loc_exn loc1 in
       let l2 = Repr.to_loc_exn loc2 in
-      let k = Loc.pos_cmp l1.Loc.start l2.Loc.start in
-      if k = 0 then
-        Loc.pos_cmp l1.Loc._end l2.Loc._end
-      else
-        k
+      Loc.compare_ignore_source l1 l2
     | (Repr.ALocNone, Repr.ALocNone) -> 0
     | (Repr.ALocNone, (Repr.Keyed | Repr.Concrete)) -> -1
     | ((Repr.Keyed | Repr.Concrete), Repr.ALocNone) -> 1
@@ -256,15 +262,14 @@ let concretize_if_possible available_tables loc =
     (* We shouldn't end up with a location with no source and a keyed representation. It may be
      * worth asserting here at some point. *)
     | None -> loc
-    | Some source ->
-      begin
-        match Utils_js.FilenameMap.find_opt source available_tables with
-        (* We don't have the right table, so just return the loc *)
-        | None -> loc
-        | Some table ->
-          (* Concretize by converting to a Loc.t, then back to an ALoc.t *)
-          of_loc (to_loc table loc)
-      end
+    | Some source -> begin
+      match Utils_js.FilenameMap.find_opt source available_tables with
+      (* We don't have the right table, so just return the loc *)
+      | None -> loc
+      | Some table ->
+        (* Concretize by converting to a Loc.t, then back to an ALoc.t *)
+        of_loc (to_loc table loc)
+    end
   else
     loc
 
@@ -298,12 +303,11 @@ let id_of_aloc table aloc =
     let (lazy { locs; _ }) = table in
     let loc = Repr.to_loc_exn aloc in
     (match Base.Array.binary_search locs ~compare:Packed_locs.compare_locs `First_equal_to loc with
-    | Some key ->
-      begin
-        match Repr.source aloc with
-        | Some _ as source -> Repr.of_key source key
-        | None -> failwith "Unexpectedly encountered a location without a source"
-      end
+    | Some key -> begin
+      match Repr.source aloc with
+      | Some _ as source -> Repr.of_key source key
+      | None -> failwith "Unexpectedly encountered a location without a source"
+    end
     | None -> aloc)
 
 let equal_id a b = quick_compare a b = 0

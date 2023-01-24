@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -22,7 +22,7 @@ let spec =
         |> options_and_json_flags
         |> saved_state_flags
         |> log_file_flags
-        |> flag "--wait" no_arg ~doc:"Wait for the server to finish initializing"
+        |> flag "--wait" truthy ~doc:"Wait for the server to finish initializing"
         |> lazy_flags
         |> autostop_flag
         |> shm_flags
@@ -87,11 +87,7 @@ let main
     match server_log_file with
     | Some s -> s
     | None ->
-      CommandUtils.server_log_file
-        ~flowconfig_name
-        ~tmp_dir:(Options.temp_dir options)
-        root
-        flowconfig
+      CommandUtils.server_log_file ~flowconfig_name ~tmp_dir:(Options.temp_dir options) root
       |> Path.to_string
   in
   let monitor_log_file =
@@ -130,8 +126,9 @@ let main
       ~file_watcher_debug
       ~sync_timeout:file_watcher_sync_timeout
   in
+  let vcs = Vcs.find root in
   let file_watcher_mergebase_with =
-    choose_file_watcher_mergebase_with ~flowconfig file_watcher_mergebase_with
+    choose_file_watcher_mergebase_with ~flowconfig vcs file_watcher_mergebase_with
   in
   let file_watcher_timeout = choose_file_watcher_timeout ~flowconfig file_watcher_timeout in
   let monitor_options =

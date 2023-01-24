@@ -1,3 +1,4 @@
 [options]
-experimental.env_mode=constrain_writes
+inference_mode=constrain_writes
+experimental.cycle_errors=true
 no_flowlib=false

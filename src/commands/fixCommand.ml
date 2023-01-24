@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,7 +8,7 @@
 open Utils_js
 
 (* transformable errors are a subset of all errors; specifically,
- * the errors for which Code_action_service.ast_transform_of_error = Some _ *)
+ * the errors for which Code_action_service.ast_transforms_of_error is non-empty *)
 type transformable_error = Loc.t Error_message.t'
 
 (* Codemod-specific shared mem heap *)
@@ -43,7 +43,13 @@ module FixCodemod (Opts : FIX_CODEMOD_OPTIONS) = struct
 
   let prepass_init () = ()
 
-  let prepass_run cx () _file _reader _file_sig _typed_ast =
+  let mod_prepass_options options = options
+
+  let check_options options = options
+
+  let include_dependents_in_prepass = false
+
+  let prepass_run cx () _file _ _reader _file_sig _typed_ast =
     let should_include_error =
       match Opts.error_codes with
       | None
@@ -64,8 +70,9 @@ module FixCodemod (Opts : FIX_CODEMOD_OPTIONS) = struct
           |> Flow_error.msg_of_error
           |> Error_message.map_loc_of_error_message (Parsing_heaps.Reader.loc_of_aloc ~reader)
         in
-        match Code_action_service.ast_transform_of_error error_message with
-        | Some Code_action_service.{ target_loc; _ } when should_include_error error_message ->
+        match Code_action_service.ast_transforms_of_error error_message with
+        (* TODO(T138883537): There should be a way to configure which fix to apply *)
+        | [Code_action_service.{ target_loc; _ }] when should_include_error error_message ->
           let file_key = Base.Option.value_exn (Loc.source target_loc) in
           let transformable_error_map = FilenameMap.singleton file_key [error_message] in
           union_transformable_errors_maps transformable_error_map acc
@@ -99,8 +106,8 @@ module FixCodemod (Opts : FIX_CODEMOD_OPTIONS) = struct
                | Some transformable_errors ->
                  Base.List.fold transformable_errors ~init:ast ~f:(fun acc_ast error_message ->
                      let Code_action_service.{ transform; target_loc; _ } =
-                       Base.Option.value_exn
-                         (Code_action_service.ast_transform_of_error error_message)
+                       (* TODO(T138883537): There should be a way to configure which fix to apply *)
+                       Base.List.hd_exn (Code_action_service.ast_transforms_of_error error_message)
                      in
                      transform acc_ast target_loc
                  )
@@ -109,23 +116,21 @@ module FixCodemod (Opts : FIX_CODEMOD_OPTIONS) = struct
 end
 
 let spec =
-  CommandSpec.
-    {
-      name = "fix";
-      doc = "Apply all known error fixes";
-      usage = Printf.sprintf "%s fix [OPTION]... [FILE]\n" CommandUtils.exe_name;
-      args =
-        (ArgSpec.empty
-        |> CommandUtils.codemod_flags
-        |> ArgSpec.(
-             flag
-               "--error-codes"
-               (list_of string)
-               ~doc:"Codes of errors to fix. If omitted, all fixable errors will be fixed."
-           )
-        );
-    }
-  
+  {
+    CommandSpec.name = "fix";
+    doc = "Apply all known error fixes";
+    usage = Printf.sprintf "%s fix [OPTION]... [FILE]\n" CommandUtils.exe_name;
+    args =
+      (CommandSpec.ArgSpec.empty
+      |> CommandUtils.codemod_flags
+      |> CommandSpec.ArgSpec.(
+           flag
+             "--error-codes"
+             (list_of string)
+             ~doc:"Codes of errors to fix. If omitted, all fixable errors will be fixed."
+         )
+      );
+  }
 
 let main (CommandUtils.Codemod_params ({ anon; _ } as codemod_params)) error_codes () =
   let komodo_flags =

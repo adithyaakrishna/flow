@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -21,7 +21,7 @@ const {
 } = require('../errors');
 const getAst = require('../comment/getAst').default;
 
-const {readFile, writeFile} = require('../utils/async');
+const {readFile, writeFile} = require('fs').promises;
 const {
   removeUnusedErrorSuppressionFromText,
   isLintSuppression,
@@ -259,7 +259,7 @@ async function updateSuppressions(
   comment: string,
   flowBinPath: string,
 ): Promise<void> {
-  const contentsString = await readFile(filename);
+  const contentsString = await readFile(filename, 'utf8');
   const contents = await updateSuppressionsInText(
     Buffer.from(contentsString, 'utf8'),
     allRoots,
@@ -357,7 +357,7 @@ async function updateSuppressionsInText(
 /* A flowtest is a file that ends in -flowtest.js or which is in a directory
  * named __flowtests__
  */
-function isFlowtest(filename) {
+function isFlowtest(filename: string) {
   return (
     filename.match(/-flowtest\.js$/) ||
     filename.match(/[/\\]__flowtests__[/\\]/)

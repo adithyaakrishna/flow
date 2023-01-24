@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -13,7 +13,7 @@ open Utils_js
    definition site for `this`.) *)
 type generic = {
   id: ALoc.id;
-  name: string;
+  name: Subst_name.t;
 }
 
 (* A bound corresponds to the upper bound annotated on a type variable,
@@ -65,8 +65,9 @@ type spread_id = bound list
 let rec bound_to_string =
   let open Utils_js in
   function
-  | { generic = { name; _ }; super = None } -> name
-  | { generic = { name; _ }; super = Some id } -> spf "%s:%s" name (to_string id)
+  | { generic = { name; _ }; super = None } -> Subst_name.string_of_subst_name name
+  | { generic = { name; _ }; super = Some id } ->
+    spf "%s:%s" (Subst_name.string_of_subst_name name) (to_string id)
 
 and to_string id =
   let open Utils_js in
@@ -74,6 +75,21 @@ and to_string id =
   | Bound bound -> bound_to_string bound
   | Spread ids ->
     spf "{ ...%s }" (String.concat ", ..." (Base.List.map ~f:bound_to_string (Nel.to_list ids)))
+
+let rec all_subst_names_of_id = function
+  | Bound bound -> all_subst_names_of_bound bound
+  | Spread bounds -> Base.List.concat_map ~f:all_subst_names_of_bound (Nel.to_list bounds)
+
+and all_subst_names_of_bound = function
+  | { generic = { name = Subst_name.Synthetic (_, names); _ }; super = None } -> names
+  | { generic = { name; _ }; super = None } -> [name]
+  | { generic = { name = Subst_name.Synthetic (_, names); _ }; super = Some super } ->
+    names @ all_subst_names_of_id super
+  | { generic = { name; _ }; super = Some super } -> name :: all_subst_names_of_id super
+
+let subst_name_of_id = function
+  | Bound { generic = { name; _ }; super = None } -> name
+  | id -> Subst_name.Synthetic (to_string id, all_subst_names_of_id id)
 
 let rec equal_bound
     { generic = { id = id1; _ }; super = super1 } { generic = { id = id2; _ }; super = super2 } =
@@ -191,7 +207,6 @@ type sat_result =
      }
 
    The rules below show examples of what scenario triggers them.
-
 *)
 
 let rec satisfies ~printer id1 id2 =
@@ -365,13 +380,12 @@ module ArraySpread = struct
     | (Top, _) ->
       Top
     | (Generic (id, _), Some id') when equal_id id id' -> merge_ro t ro'
-    | (Generic (id, ro), Some id') ->
-      begin
-        match (satisfies ~printer id' id, satisfies ~printer id id') with
-        | (Upper _, Upper _) -> Top
-        | (Upper _, _) -> merge_ro (Generic (id', ro')) ro
-        | _ -> merge_ro t ro'
-      end
+    | (Generic (id, ro), Some id') -> begin
+      match (satisfies ~printer id' id, satisfies ~printer id id') with
+      | (Upper _, Upper _) -> Top
+      | (Upper _, _) -> merge_ro (Generic (id', ro')) ro
+      | _ -> merge_ro t ro'
+    end
     | _ -> Top
 
   let to_option = function

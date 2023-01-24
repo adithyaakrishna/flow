@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -65,20 +65,25 @@ let func_details ~jsdoc ~exact_by_default params rest_param return =
   let param_tys =
     match rest_param with
     | None -> param_tys
-    | Some (name, t) ->
+    | Some (rest_param_name, t) ->
       let rest =
         (* show the rest param's docs for all of the expanded params *)
-        let param_documentation = documentation_of_param name in
+        let param_documentation = documentation_of_param rest_param_name in
         match t with
         | Ty.Tup ts ->
           Base.List.mapi
-            ~f:(fun i t ->
-              let param_name = Printf.sprintf "%s[%d]" (Base.Option.value name ~default:"arg") i in
+            ~f:(fun i (Ty.TupleElement { name; t; polarity = _ }) ->
+              let param_name =
+                match name with
+                | Some name -> name
+                | None ->
+                  Printf.sprintf "%s[%d]" (Base.Option.value rest_param_name ~default:"arg") i
+              in
               let param_ty = string_of_ty ~exact_by_default t in
               { ServerProt.Response.param_name; param_ty; param_documentation })
             ts
         | _ ->
-          let param_name = "..." ^ parameter_name false name in
+          let param_name = "..." ^ parameter_name false rest_param_name in
           let param_ty = string_of_ty ~exact_by_default t in
           [{ ServerProt.Response.param_name; param_ty; param_documentation }]
       in
@@ -187,20 +192,7 @@ module Callee_finder = struct
     | Found None -> None
 end
 
-let ty_normalizer_options =
-  Ty_normalizer_env.
-    {
-      expand_internal_types = false;
-      flag_shadowed_type_params = false;
-      preserve_inferred_literal_types = false;
-      evaluate_type_destructors = false;
-      optimize_types = true;
-      omit_targ_defaults = false;
-      merge_bot_and_any_kinds = true;
-      verbose_normalizer = false;
-      max_depth = Some 50;
-    }
-  
+let ty_normalizer_options = Ty_normalizer_env.default_options
 
 let rec collect_functions ~jsdoc ~exact_by_default acc = function
   | Ty.Fun { Ty.fun_params; fun_rest_param; fun_return; _ } ->
@@ -210,7 +202,7 @@ let rec collect_functions ~jsdoc ~exact_by_default acc = function
     Base.List.fold_left ~init:acc ~f:(collect_functions ~jsdoc ~exact_by_default) (t1 :: t2 :: ts)
   | _ -> acc
 
-let find_signatures ~options ~reader ~cx ~file_sig ~typed_ast loc =
+let find_signatures ~options ~reader ~cx ~file_sig ~ast ~typed_ast loc =
   match Callee_finder.find_opt ~reader ~typed_ast loc with
   | Some (scheme, active_parameter, callee_loc) ->
     let ty =
@@ -221,7 +213,7 @@ let find_signatures ~options ~reader ~cx ~file_sig ~typed_ast loc =
     in
     let jsdoc =
       let open GetDef_js.Get_def_result in
-      match GetDef_js.get_def ~options ~reader ~cx ~file_sig ~typed_ast callee_loc with
+      match GetDef_js.get_def ~options ~reader ~cx ~file_sig ~ast ~typed_ast callee_loc with
       | Def getdef_loc
       | Partial (getdef_loc, _) ->
         Find_documentation.jsdoc_of_getdef_loc ~current_ast:typed_ast ~reader getdef_loc

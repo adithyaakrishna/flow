@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -23,13 +23,11 @@ let lsp_position_to_flow_position p =
   Loc.{ line; column }
 
 let lsp_range_to_flow_loc ?source (range : Lsp.range) =
-  Lsp.
-    {
-      Loc.source;
-      start = lsp_position_to_flow_position range.start;
-      _end = lsp_position_to_flow_position range.end_;
-    }
-  
+  {
+    Loc.source;
+    start = lsp_position_to_flow_position range.Lsp.start;
+    _end = lsp_position_to_flow_position range.Lsp.end_;
+  }
 
 let loc_to_lsp_range (loc : Loc.t) : Lsp.range =
   Loc.(
@@ -86,60 +84,88 @@ let flow_signature_help_to_lsp
 
 let flow_completion_item_to_lsp
     ?token
+    ?autocomplete_session_length
+    ?typed_len
     ~is_snippet_supported:(_ : bool)
+    ~(is_tags_supported : Lsp.CompletionItemTag.t -> bool)
     ~(is_preselect_supported : bool)
     ~(is_label_detail_supported : bool)
+    ~(is_insert_replace_supported : bool)
+    ~index
     (item : ServerProt.Response.Completion.completion_item) : Lsp.Completion.completionItem =
   let open ServerProt.Response.Completion in
-  let detail =
-    let trunc n s =
-      if String.length s < n then
-        s
-      else
-        String.sub s 0 n ^ "..."
-    in
-    let column_width = 80 in
-    Some (trunc column_width item.detail)
+  let textEdit =
+    Base.Option.map
+      ~f:(fun { ServerProt.Response.newText; insert; replace } ->
+        if is_insert_replace_supported && not (Loc.equal insert replace) then
+          `InsertReplaceEdit
+            {
+              Lsp.InsertReplaceEdit.newText;
+              insert = loc_to_lsp_range insert;
+              replace = loc_to_lsp_range replace;
+            }
+        else
+          `TextEdit { Lsp.TextEdit.range = loc_to_lsp_range insert; newText })
+      item.text_edit
   in
-  let insertTextFormat = Some Lsp.Completion.PlainText in
-  let textEdits =
+  let additionalTextEdits =
     Base.List.map
       ~f:(fun (loc, newText) -> { Lsp.TextEdit.range = loc_to_lsp_range loc; newText })
-      item.text_edits
+      item.additional_text_edits
   in
   let documentation = Base.Option.map item.documentation ~f:(fun doc -> [Lsp.MarkedString doc]) in
+  let tags = Base.Option.map item.tags ~f:(List.filter is_tags_supported) in
   let command =
+    let open Lsp.Command in
     Some
-      Lsp.Command.
-        {
-          title = "";
-          command = Command "log";
-          arguments =
-            Hh_json.
-              [
-                JSON_String "textDocument/completion";
-                JSON_String item.log_info;
-                JSON_Object
-                  [
-                    ( "token",
-                      match token with
-                      | None -> JSON_Null
-                      | Some token -> JSON_String token
-                    );
-                    ("completion", JSON_String item.name);
-                  ];
-              ]
-            ;
-        }
-      
+      {
+        title = "";
+        command = Command "log";
+        arguments =
+          Hh_json.
+            [
+              JSON_String "textDocument/completion";
+              JSON_String item.log_info;
+              JSON_Object
+                [
+                  ( "token",
+                    match token with
+                    | None -> JSON_Null
+                    | Some token -> JSON_String token
+                  );
+                  ("index", JSON_Number (string_of_int index));
+                  ( "session_requests",
+                    match autocomplete_session_length with
+                    | None -> JSON_Null
+                    | Some autocomplete_session_length ->
+                      JSON_Number (string_of_int autocomplete_session_length)
+                  );
+                  ( "typed_length",
+                    match typed_len with
+                    | None -> JSON_Null
+                    | Some typed_length -> JSON_Number (string_of_int typed_length)
+                  );
+                  ("completion", JSON_String item.name);
+                ];
+            ];
+      }
   in
-
   let labelDetails =
     if
       is_label_detail_supported
-      && (Base.Option.is_some item.source || Base.Option.is_some item.type_)
+      && (Base.Option.is_some item.labelDetail || Base.Option.is_some item.description)
     then
-      Some { Lsp.CompletionItemLabelDetails.description = item.source; detail = item.type_ }
+      let detail =
+        let trunc n s =
+          if String.length s < n then
+            s
+          else
+            String.sub s 0 n ^ "..."
+        in
+        let column_width = 80 in
+        Base.Option.map ~f:(trunc column_width) item.labelDetail
+      in
+      Some { Lsp.CompletionItemLabelDetails.detail; description = item.description }
     else
       None
   in
@@ -147,34 +173,46 @@ let flow_completion_item_to_lsp
     Lsp.Completion.label = item.name;
     labelDetails;
     kind = item.kind;
-    detail;
+    detail = item.itemDetail;
     documentation;
+    tags;
     preselect = is_preselect_supported && item.preselect;
     sortText = item.sort_text;
     filterText = None;
     insertText = None (* deprecated and should not be used *);
-    insertTextFormat;
-    textEdits;
+    insertTextFormat = Some item.insert_text_format;
+    textEdit;
+    additionalTextEdits;
     command;
     data = None;
   }
 
 let flow_completions_to_lsp
     ?token
+    ?autocomplete_session_length
+    ?typed_len
     ~(is_snippet_supported : bool)
+    ~(is_tags_supported : Lsp.CompletionItemTag.t -> bool)
     ~(is_preselect_supported : bool)
     ~(is_label_detail_supported : bool)
+    ~(is_insert_replace_supported : bool)
     (completions : ServerProt.Response.Completion.t) : Lsp.Completion.result =
   let { ServerProt.Response.Completion.items; is_incomplete } = completions in
+  let open ServerProt.Response.Completion in
   let items =
-    Base.List.map
-      ~f:
-        (flow_completion_item_to_lsp
-           ?token
-           ~is_snippet_supported
-           ~is_preselect_supported
-           ~is_label_detail_supported
-        )
+    Base.List.mapi
+      ~f:(fun index item ->
+        flow_completion_item_to_lsp
+          ?token
+          ?autocomplete_session_length
+          ?typed_len
+          ~is_snippet_supported
+          ~is_tags_supported
+          ~is_preselect_supported
+          ~is_label_detail_supported
+          ~is_insert_replace_supported
+          ~index
+          { item with sort_text = Option.some (Printf.sprintf "%020u" index) })
       items
   in
   { Lsp.Completion.isIncomplete = is_incomplete; items }

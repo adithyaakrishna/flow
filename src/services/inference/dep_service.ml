@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -83,115 +83,68 @@ open Utils_js
    which have new providers.
 
    Return the subset of candidates directly dependent on root_modules / root_files.
-
-   TODO: Scanning the dependency graph to find reverse dependencies like this is not good! To avoid
-   this, we should maintain the reverse dependency graph carefully as well. The existing reverse
-   dependency graph stored in the server's OCaml heap is not enough:
-     - It does not track reverse dependencies for non-checked files
-     - It does not track reverse dependencies for no-provider modules
-     - It does not track reverse dependencies for "phantom" files
-
-   IMPORTANT!!! The only state this function can read is the resolved requires! If you need this
-                function to read any other state, make sure to update the DirectDependentFilesCache!
 *)
-let calc_direct_dependents_job acc (root_files, root_modules) =
-  (* The MultiWorker API is weird. All jobs get the `neutral` value as their
-   * accumulator argument. We can exploit this to return a set from workers
-   * while the server accumulates lists of sets. *)
-  assert (acc = []);
-  let open Module_heaps in
-  let root_files =
-    List.fold_left
-      (fun acc f ->
-        match f with
-        | File_key.SourceFile s
-        | File_key.JsonFile s
-        | File_key.ResourceFile s ->
-          SSet.add s acc
-        | File_key.LibFile _
-        | File_key.Builtins ->
-          acc)
-      SSet.empty
-      root_files
+let calc_unchanged_dependents =
+  let module Heap = SharedMem.NewAPI in
+  let job acc ms =
+    (* The MultiWorker API is weird. All jobs get the `neutral` value as their
+     * accumulator argument. We can exploit this to return a set from workers
+     * while the server accumulates lists of sets. *)
+    assert (acc = []);
+    let open Parsing_heaps in
+    let acc = ref FilenameSet.empty in
+    let iter_f file =
+      (* Skip dependents which have themselves changed, since changed files will
+       * already be part of the recheck set. *)
+      if not (Heap.file_changed file) then acc := FilenameSet.add (read_file_key file) !acc
+    in
+    let iter_m = iter_dependents iter_f in
+    List.iter iter_m ms;
+    !acc
   in
-  let root_modules = Modulename.Set.of_list root_modules in
-  let dependents = ref FilenameSet.empty in
-  Module_heaps.iter_resolved_requires (fun { file_key; resolved_modules; phantom_dependents; _ } ->
-      if not (SSet.disjoint root_files phantom_dependents) then
-        dependents := FilenameSet.add file_key !dependents
-      else if SMap.exists (fun _ m -> Modulename.Set.mem m root_modules) resolved_modules then
-        dependents := FilenameSet.add file_key !dependents
-  );
-  !dependents
-
-let calc_direct_dependents workers ~candidates ~root_files ~root_modules =
-  if FilenameSet.is_empty root_files && Modulename.Set.is_empty root_modules then
-    (* If root_files and root_modules are empty then we can immediately return.
-     * We know that the empty set has no direct or transitive dependencies. This
-     * can save us a lot of time on very large repositories *)
-    Lwt.return FilenameSet.empty
-  else
-    (* Find direct dependents via parallel heap scans, searching for dependents
-     * of the changed files and modules. Note that we accumulate a list of sets
-     * during the call, then merge the sets after. List.cons is much faster than
-     * FilenameSet.union, so we can avoid blocking worker SEND this way. *)
-    let next =
-      MultiWorkerLwt.next2
-        workers
-        ~max_size:2000
-        (FilenameSet.elements root_files)
-        (Modulename.Set.elements root_modules)
-    in
-    let%lwt dependent_sets =
-      MultiWorkerLwt.call workers ~job:calc_direct_dependents_job ~merge:List.cons ~neutral:[] ~next
-    in
-    let dependents = List.fold_left FilenameSet.union FilenameSet.empty dependent_sets in
-    (* We are only interested in dependents which are also in `candidates` *)
-    Lwt.return (FilenameSet.inter candidates dependents)
+  fun workers changed_modules ->
+    let next = MultiWorkerLwt.next workers (Modulename.Set.elements changed_modules) in
+    let%lwt dependent_sets = MultiWorkerLwt.call workers ~job ~merge:List.cons ~neutral:[] ~next in
+    Lwt.return (List.fold_left FilenameSet.union FilenameSet.empty dependent_sets)
 
 (* Calculate module dependencies. Since this involves a lot of reading from
    shared memory, it is useful to parallelize this process (leading to big
    savings in init and recheck times). *)
 
-let checked_module ~reader ~audit m =
-  m
-  |> Module_heaps.Mutator_reader.get_file_unsafe ~reader ~audit
-  |> Module_js.checked_file ~reader:(Abstract_state_reader.Mutator_state_reader reader) ~audit
-
 (* A file is considered to implement a required module r only if the file is
    registered to provide r and the file is checked. Such a file must be merged
    before any file that requires module r, so this notion naturally gives rise
    to a dependency ordering among files for merging. *)
-let implementation_file ~reader ~audit r =
-  if Module_heaps.Mutator_reader.module_exists ~reader r && checked_module ~reader ~audit r then
-    Some (Module_heaps.Mutator_reader.get_file_unsafe ~reader ~audit r)
-  else
-    None
+let implementation_file ~reader = function
+  | Error _ -> None
+  | Ok m ->
+    (match Parsing_heaps.Mutator_reader.get_provider ~reader m with
+    | Some f when Parsing_heaps.Mutator_reader.is_typed_file ~reader f ->
+      Some (Parsing_heaps.read_file_key f)
+    | _ -> None)
 
-let file_dependencies ~audit ~reader file =
-  let file_sig = Parsing_heaps.Mutator_reader.get_file_sig_unsafe reader file in
-  let require_set = File_sig.With_Loc.(require_set file_sig.module_sig) in
+let file_dependencies ~reader file =
+  let file_addr = Parsing_heaps.get_file_addr_unsafe file in
+  let parse = Parsing_heaps.Mutator_reader.get_typed_parse_unsafe ~reader file file_addr in
   let sig_require_set =
     let module Heap = SharedMem.NewAPI in
     let module Bin = Type_sig_bin in
-    let file_addr = Parsing_heaps.Mutator_reader.get_checked_file_addr_unsafe reader file in
-    let buf = Heap.type_sig_buf (Heap.file_type_sig file_addr) in
+    let buf = Heap.type_sig_buf (Option.get (Heap.get_type_sig parse)) in
     Bin.fold_tbl Bin.read_str SSet.add buf (Bin.module_refs buf) SSet.empty
   in
-  let { Module_heaps.resolved_modules; _ } =
-    Module_heaps.Mutator_reader.get_resolved_requires_unsafe ~reader ~audit file
+  let resolved_modules =
+    Parsing_heaps.Mutator_reader.get_resolved_modules_unsafe ~reader file parse
   in
-  SSet.fold
-    (fun mref (sig_files, all_files) ->
-      let m = SMap.find mref resolved_modules in
-      match implementation_file ~reader m ~audit:Expensive.ok with
+  SMap.fold
+    (fun mref m (sig_files, all_files) ->
+      match implementation_file ~reader m with
       | Some f ->
         if SSet.mem mref sig_require_set then
           (FilenameSet.add f sig_files, FilenameSet.add f all_files)
         else
           (sig_files, FilenameSet.add f all_files)
       | None -> (sig_files, all_files))
-    require_set
+    resolved_modules
     (FilenameSet.empty, FilenameSet.empty)
 
 (* Calculates the dependency graph as a map from files to their dependencies.
@@ -202,7 +155,7 @@ let calc_partial_dependency_graph ~reader workers files ~parsed =
       workers
       ~job:
         (List.fold_left (fun dependency_info file ->
-             let dependencies = file_dependencies ~audit:Expensive.ok ~reader file in
+             let dependencies = file_dependencies ~reader file in
              FilenameMap.add file dependencies dependency_info
          )
         )

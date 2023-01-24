@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,7 +18,7 @@ module Procedure_decider = struct
 
       method! return _loc (stmt : (Loc.t, Loc.t) Flow_ast.Statement.Return.t) =
         let open Flow_ast.Statement.Return in
-        let { argument; comments = _ } = stmt in
+        let { argument; comments = _; return_out = _ } = stmt in
         begin
           match argument with
           | None -> ()
@@ -56,6 +56,14 @@ module This_finder = struct
 
       method! this_expression _ node =
         this#set_acc true;
+        node
+
+      method! type_identifier node =
+        begin
+          match node with
+          | (_, { Flow_ast.Identifier.name = "this"; _ }) -> this#set_acc true
+          | _ -> ()
+        end;
         node
 
       (* Any mentions of `this` in these constructs would reference

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -26,7 +26,6 @@ type t
 
    On Unix, the type `in_channel` is in fact an alias for
    `Stdlib.in_channel`.
-
 *)
 val with_timeout : timeout:int -> on_timeout:(unit -> 'a) -> do_:(t -> 'a) -> 'a
 

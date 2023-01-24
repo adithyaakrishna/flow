@@ -1,44 +1,9 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
-
-module FreeVars = struct
-  type env = {
-    is_toplevel: bool;
-    skip: ISet.t;
-  }
-
-  let searcher =
-    object
-      inherit [_] Ty.reduce_ty as super
-
-      method zero = ISet.empty
-
-      method plus = ISet.union
-
-      method! on_t env t =
-        Ty.(
-          match t with
-          | TVar (RVar i, _) when not (ISet.mem i env.skip) -> ISet.singleton i
-          | Mu (v, t) ->
-            let env = { env with skip = ISet.add v env.skip } in
-            super#on_t env t
-          | t -> super#on_t env t
-        )
-    end
-
-  (* Computes the set of variables appearing free in the input. *)
-  let of_type ~is_toplevel t =
-    let env = { is_toplevel; skip = ISet.empty } in
-    searcher#on_t env t
-end
-
-let tvar_appears_in_type ~is_toplevel v t =
-  let (Ty.RVar v) = v in
-  ISet.mem v (FreeVars.of_type ~is_toplevel t)
 
 module Size = struct
   exception SizeCutOff
@@ -101,6 +66,47 @@ module Simplify = struct
     sort: bool;
   }
 
+  class comparator_base =
+    object
+      inherit [unit] Ty.comparator_ty as super
+
+      method! on_aloc _env loc1 loc2 =
+        (* This comparator uses [ALoc.quick_compare] instead of the default
+         * [ALoc.compare]. The latter may throw "Unable to compare a keyed
+         * location with a concrete one" exceptions, which, despite being rare,
+         * are typically hard to address. The tradeoff here is that we're giving
+         * up some completeness in the case where a concrete location is compared
+         * against an abstract one and the two locations correspond to the same
+         * source location. This case is exercised in tests/type_at_pos_comp_concr_loc_to_aloc.
+         * This test causes a type to be compared with itself through a cyclic
+         * dependency.
+         *
+         * NOTE: completeness can be recovered if the caller to the comparator
+         * transform all locations to concrete (or abstract) before running the
+         * comparison.
+         *)
+        let n = ALoc.quick_compare loc1 loc2 in
+        if n = 0 then
+          ()
+        else
+          raise (Ty.Difference n)
+
+      method! on_symbol env name1 name2 =
+        let open Ty_symbol in
+        (* It's possible for two symbols to have the same provenance and name but different locations
+           due to certain hardcoded fixes, e.g. FbtElement -> Fbt. We should consider these
+           to be the same symbol regardless. *)
+        if
+          name1.sym_name = name2.sym_name
+          && ALoc.source name1.sym_def_loc = ALoc.source name2.sym_def_loc
+        then
+          match (name1.sym_provenance, name2.sym_provenance) with
+          | (Library l1, Library l2) when l1 = l2 -> ()
+          | _ -> super#on_symbol env name1 name2
+        else
+          super#on_symbol env name1 name2
+    end
+
   (* When merge_kinds is set to true then all kinds of Any (resp. Bot) types
    * are considered equivalent when comparing types. Specifically for the Bot type
    * we implement a predicate 'is_bot' that determines when the type should be
@@ -136,7 +142,7 @@ module Simplify = struct
       let comparator =
         if merge_kinds then
           object
-            inherit [unit] Ty.comparator_ty
+            inherit comparator_base
 
             (* All Bot kinds are equivalent *)
             method! private on_bot_kind () _ _ = ()
@@ -144,7 +150,7 @@ module Simplify = struct
             method! private on_any_kind () _ _ = ()
           end
         else
-          new Ty.comparator_ty
+          new comparator_base
       in
       comparator#compare ()
     in

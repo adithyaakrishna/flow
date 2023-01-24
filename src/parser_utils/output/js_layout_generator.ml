@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -163,32 +163,32 @@ let precedence_of_expression expr =
   | (_, E.Update { E.Update.prefix = true; _ })
   | (_, E.Unary _) ->
     17
-  | (_, E.Binary { E.Binary.operator; _ }) ->
-    begin
-      match operator with
-      | E.Binary.Exp -> 16
-      | E.Binary.Mult -> 15
-      | E.Binary.Div -> 15
-      | E.Binary.Mod -> 15
-      | E.Binary.Plus -> 14
-      | E.Binary.Minus -> 14
-      | E.Binary.LShift -> 13
-      | E.Binary.RShift -> 13
-      | E.Binary.RShift3 -> 13
-      | E.Binary.LessThan -> 12
-      | E.Binary.LessThanEqual -> 12
-      | E.Binary.GreaterThan -> 12
-      | E.Binary.GreaterThanEqual -> 12
-      | E.Binary.In -> 12
-      | E.Binary.Instanceof -> 12
-      | E.Binary.Equal -> 11
-      | E.Binary.NotEqual -> 11
-      | E.Binary.StrictEqual -> 11
-      | E.Binary.StrictNotEqual -> 11
-      | E.Binary.BitAnd -> 10
-      | E.Binary.Xor -> 9
-      | E.Binary.BitOr -> 8
-    end
+  | (_, E.TSTypeCast _) -> 12
+  | (_, E.Binary { E.Binary.operator; _ }) -> begin
+    match operator with
+    | E.Binary.Exp -> 16
+    | E.Binary.Mult -> 15
+    | E.Binary.Div -> 15
+    | E.Binary.Mod -> 15
+    | E.Binary.Plus -> 14
+    | E.Binary.Minus -> 14
+    | E.Binary.LShift -> 13
+    | E.Binary.RShift -> 13
+    | E.Binary.RShift3 -> 13
+    | E.Binary.LessThan -> 12
+    | E.Binary.LessThanEqual -> 12
+    | E.Binary.GreaterThan -> 12
+    | E.Binary.GreaterThanEqual -> 12
+    | E.Binary.In -> 12
+    | E.Binary.Instanceof -> 12
+    | E.Binary.Equal -> 11
+    | E.Binary.NotEqual -> 11
+    | E.Binary.StrictEqual -> 11
+    | E.Binary.StrictNotEqual -> 11
+    | E.Binary.BitAnd -> 10
+    | E.Binary.Xor -> 9
+    | E.Binary.BitOr -> 8
+  end
   | (_, E.Logical { E.Logical.operator = E.Logical.And; _ }) -> 7
   | (_, E.Logical { E.Logical.operator = E.Logical.Or; _ }) -> 6
   | (_, E.Logical { E.Logical.operator = E.Logical.NullishCoalesce; _ }) -> 5
@@ -209,65 +209,59 @@ let definitely_needs_parens =
   let module E = Ast.Expression in
   let context_needs_parens ctxt expr =
     match ctxt with
-    | { group = In_arrow_func; _ } ->
+    | { group = In_arrow_func; _ } -> begin
       (* an object body expression in an arrow function needs parens to not
          make it become a block with label statement. *)
-      begin
-        match expr with
-        | (_, E.Object _) -> true
-        | _ -> false
-      end
-    | { group = In_for_init; _ } ->
+      match expr with
+      | (_, E.Object _) -> true
+      | _ -> false
+    end
+    | { group = In_for_init; _ } -> begin
       (* an `in` binary expression in the init of a for loop needs parens to not
          make the for loop become a for-in loop. *)
-      begin
-        match expr with
-        | (_, E.Binary { E.Binary.operator = E.Binary.In; _ }) -> true
-        | _ -> false
-      end
-    | { left = In_expression_statement; _ } ->
+      match expr with
+      | (_, E.Binary { E.Binary.operator = E.Binary.In; _ }) -> true
+      | _ -> false
+    end
+    | { left = In_expression_statement; _ } -> begin
       (* functions (including async functions, but not arrow functions) and
          classes must be wrapped in parens to avoid ambiguity with function and
          class declarations. objects must be also, to not be confused with
          blocks.
 
          https://tc39.github.io/ecma262/#prod-ExpressionStatement *)
-      begin
-        match expr with
-        | (_, E.Class _)
-        | (_, E.Function _)
-        | (_, E.Object _)
-        | (_, E.Assignment { E.Assignment.left = (_, Ast.Pattern.Object _); _ }) ->
-          true
-        | _ -> false
-      end
-    | { left = In_tagged_template; _ } ->
-      begin
-        match expr with
-        | (_, E.Class _)
-        | (_, E.Function _)
-        | (_, E.New _)
-        | (_, E.Import _)
-        | (_, E.Object _) ->
-          true
-        | _ -> false
-      end
-    | { left = In_minus_op; _ } ->
-      begin
-        match expr with
-        | (_, E.Unary { E.Unary.operator = E.Unary.Minus; _ })
-        | (_, E.Update { E.Update.operator = E.Update.Decrement; prefix = true; _ }) ->
-          true
-        | _ -> false
-      end
-    | { left = In_plus_op; _ } ->
-      begin
-        match expr with
-        | (_, E.Unary { E.Unary.operator = E.Unary.Plus; _ })
-        | (_, E.Update { E.Update.operator = E.Update.Increment; prefix = true; _ }) ->
-          true
-        | _ -> false
-      end
+      match expr with
+      | (_, E.Class _)
+      | (_, E.Function _)
+      | (_, E.Object _)
+      | (_, E.Assignment { E.Assignment.left = (_, Ast.Pattern.Object _); _ }) ->
+        true
+      | _ -> false
+    end
+    | { left = In_tagged_template; _ } -> begin
+      match expr with
+      | (_, E.Class _)
+      | (_, E.Function _)
+      | (_, E.New _)
+      | (_, E.Import _)
+      | (_, E.Object _) ->
+        true
+      | _ -> false
+    end
+    | { left = In_minus_op; _ } -> begin
+      match expr with
+      | (_, E.Unary { E.Unary.operator = E.Unary.Minus; _ })
+      | (_, E.Update { E.Update.operator = E.Update.Decrement; prefix = true; _ }) ->
+        true
+      | _ -> false
+    end
+    | { left = In_plus_op; _ } -> begin
+      match expr with
+      | (_, E.Unary { E.Unary.operator = E.Unary.Plus; _ })
+      | (_, E.Update { E.Update.operator = E.Update.Increment; prefix = true; _ }) ->
+        true
+      | _ -> false
+    end
     | { left = Normal_left; group = Normal_group } -> false
   in
   fun ~precedence ctxt expr ->
@@ -350,69 +344,68 @@ let utf8_escape =
   in
   let f ~quote ~next buf _i = function
     | Wtf8.Malformed -> buf
-    | Wtf8.Point cp ->
-      begin
-        match cp with
-        (* SingleEscapeCharacter: http://www.ecma-international.org/ecma-262/6.0/#table-34 *)
-        | 0x0 ->
-          let zero =
-            match next with
-            | Some (_i, Wtf8.Point n) when 0x30 <= n && n <= 0x39 -> "\\x00"
-            | _ -> "\\0"
-          in
-          Buffer.add_string buf zero;
-          buf
-        | 0x8 ->
-          Buffer.add_string buf "\\b";
-          buf
-        | 0x9 ->
-          Buffer.add_string buf "\\t";
-          buf
-        | 0xA ->
-          Buffer.add_string buf "\\n";
-          buf
-        | 0xB ->
-          Buffer.add_string buf "\\v";
-          buf
-        | 0xC ->
-          Buffer.add_string buf "\\f";
-          buf
-        | 0xD ->
-          Buffer.add_string buf "\\r";
-          buf
-        | 0x22 when quote = "\"" ->
-          Buffer.add_string buf "\\\"";
-          buf
-        | 0x27 when quote = "'" ->
-          Buffer.add_string buf "\\'";
-          buf
-        | 0x5C ->
-          Buffer.add_string buf "\\\\";
-          buf
-        (* printable ascii *)
-        | n when 0x1F < n && n < 0x7F ->
-          Buffer.add_char buf (Char.unsafe_chr cp);
-          buf
-        (* basic multilingual plane, 2 digits *)
-        | n when n < 0x100 ->
-          Printf.bprintf buf "\\x%02x" n;
-          buf
-        (* basic multilingual plane, 4 digits *)
-        | n when n < 0x10000 ->
-          Printf.bprintf buf "\\u%04x" n;
-          buf
-        (* supplemental planes *)
-        | n ->
-          (* ES5 does not support the \u{} syntax, so print surrogate pairs
-             "\ud83d\udca9" instead of "\u{1f4A9}". if we add a flag to target
-             ES6, we should change this. *)
-          let n' = n - 0x10000 in
-          let hi = 0xD800 lor (n' lsr 10) in
-          let lo = 0xDC00 lor (n' land 0x3FF) in
-          Printf.bprintf buf "\\u%4x" hi;
-          Printf.bprintf buf "\\u%4x" lo;
-          buf
-      end
+    | Wtf8.Point cp -> begin
+      match cp with
+      (* SingleEscapeCharacter: http://www.ecma-international.org/ecma-262/6.0/#table-34 *)
+      | 0x0 ->
+        let zero =
+          match next with
+          | Some (_i, Wtf8.Point n) when 0x30 <= n && n <= 0x39 -> "\\x00"
+          | _ -> "\\0"
+        in
+        Buffer.add_string buf zero;
+        buf
+      | 0x8 ->
+        Buffer.add_string buf "\\b";
+        buf
+      | 0x9 ->
+        Buffer.add_string buf "\\t";
+        buf
+      | 0xA ->
+        Buffer.add_string buf "\\n";
+        buf
+      | 0xB ->
+        Buffer.add_string buf "\\v";
+        buf
+      | 0xC ->
+        Buffer.add_string buf "\\f";
+        buf
+      | 0xD ->
+        Buffer.add_string buf "\\r";
+        buf
+      | 0x22 when quote = "\"" ->
+        Buffer.add_string buf "\\\"";
+        buf
+      | 0x27 when quote = "'" ->
+        Buffer.add_string buf "\\'";
+        buf
+      | 0x5C ->
+        Buffer.add_string buf "\\\\";
+        buf
+      (* printable ascii *)
+      | n when 0x1F < n && n < 0x7F ->
+        Buffer.add_char buf (Char.unsafe_chr cp);
+        buf
+      (* basic multilingual plane, 2 digits *)
+      | n when n < 0x100 ->
+        Printf.bprintf buf "\\x%02x" n;
+        buf
+      (* basic multilingual plane, 4 digits *)
+      | n when n < 0x10000 ->
+        Printf.bprintf buf "\\u%04x" n;
+        buf
+      (* supplemental planes *)
+      | n ->
+        (* ES5 does not support the \u{} syntax, so print surrogate pairs
+           "\ud83d\udca9" instead of "\u{1f4A9}". if we add a flag to target
+           ES6, we should change this. *)
+        let n' = n - 0x10000 in
+        let hi = 0xD800 lor (n' lsr 10) in
+        let lo = 0xDC00 lor (n' land 0x3FF) in
+        Printf.bprintf buf "\\u%4x" hi;
+        Printf.bprintf buf "\\u%4x" lo;
+        buf
+    end
   in
   fun ~quote str ->
     str |> lookahead_fold_wtf_8 (f ~quote) (Buffer.create (String.length str)) |> Buffer.contents
@@ -673,7 +666,7 @@ and statement ?(pretty_semicolon = false) ~opts (root_stmt : (Loc.t, Loc.t) Ast.
                statement_with_test "with" (expression ~opts _object); statement_after_test ~opts body;
              ]
           )
-      | S.Switch { S.Switch.discriminant; cases; comments } ->
+      | S.Switch { S.Switch.discriminant; cases; comments; exhaustive_out = _ } ->
         let case_nodes =
           let rec helper acc =
             let open Comment_attachment in
@@ -703,7 +696,7 @@ and statement ?(pretty_semicolon = false) ~opts (root_stmt : (Loc.t, Loc.t) Ast.
                statement_with_test "switch" (expression ~opts discriminant); pretty_space; cases_node;
              ]
           )
-      | S.Return { S.Return.argument; comments } ->
+      | S.Return { S.Return.argument; comments; return_out = _ } ->
         let s_return = Atom "return" in
         layout_node_with_comments_opt loc comments
         @@ with_semicolon
@@ -854,7 +847,7 @@ and statement ?(pretty_semicolon = false) ~opts (root_stmt : (Loc.t, Loc.t) Ast.
         in
         variable_declaration ?semicolon ~opts (loc, decl)
       | S.ClassDeclaration class_ -> class_base ~opts loc class_
-      | S.EnumDeclaration enum -> enum_declaration loc enum
+      | S.EnumDeclaration enum -> enum_declaration ~def:(Atom "enum") loc enum
       | S.ForOf { S.ForOf.left; right; body; await; comments } ->
         layout_node_with_comments_opt loc comments
         @@ fuse
@@ -867,16 +860,26 @@ and statement ?(pretty_semicolon = false) ~opts (root_stmt : (Loc.t, Loc.t) Ast.
                );
                pretty_space;
                wrap_in_parens
-                 (fuse
+                 (fuse_with_space
                     [
                       begin
                         match left with
                         | S.ForOf.LeftDeclaration decl -> variable_declaration ~opts decl
+                        | S.ForOf.LeftPattern
+                            ( ( _,
+                                Ast.Pattern.Identifier
+                                  {
+                                    Ast.Pattern.Identifier.name =
+                                      (_, { Ast.Identifier.name = "async"; _ });
+                                    annot = Ast.Type.Missing _;
+                                    _;
+                                  }
+                              ) as patt
+                            ) ->
+                          wrap_in_parens (pattern ~opts patt)
                         | S.ForOf.LeftPattern patt -> pattern ~opts patt
                       end;
-                      space;
                       Atom "of";
-                      space;
                       expression ~opts right;
                     ]
                  );
@@ -889,6 +892,7 @@ and statement ?(pretty_semicolon = false) ~opts (root_stmt : (Loc.t, Loc.t) Ast.
       | S.OpaqueType opaqueType -> opaque_type ~opts ~declare:false loc opaqueType
       | S.InterfaceDeclaration interface -> interface_declaration ~opts loc interface
       | S.DeclareClass interface -> declare_class ~opts loc interface
+      | S.DeclareEnum enum -> declare_enum loc enum
       | S.DeclareFunction func -> declare_function ~opts loc func
       | S.DeclareInterface interface -> declare_interface ~opts loc interface
       | S.DeclareVariable var -> declare_variable ~opts loc var
@@ -1082,7 +1086,7 @@ and expression ?(ctxt = normal_context) ~opts (root_expr : (Loc.t, Loc.t) Ast.Ex
                end;
              ]
       | E.Call c -> call ~precedence ~ctxt ~opts c loc
-      | E.OptionalCall { E.OptionalCall.call = c; optional } ->
+      | E.OptionalCall { E.OptionalCall.call = c; optional; filtered_out = _ } ->
         call ~optional ~precedence ~ctxt ~opts c loc
       | E.Conditional { E.Conditional.test; consequent; alternate; comments } ->
         let test_layout =
@@ -1137,7 +1141,7 @@ and expression ?(ctxt = normal_context) ~opts (root_expr : (Loc.t, Loc.t) Ast.Ex
         layout_node_with_comments_opt loc comments
         @@ Group [left; pretty_space; operator; Indent (fuse [right_separator; right])]
       | E.Member m -> member ~precedence ~ctxt ~opts m loc
-      | E.OptionalMember { E.OptionalMember.member = m; optional } ->
+      | E.OptionalMember { E.OptionalMember.member = m; optional; filtered_out = _ } ->
         member ~optional ~precedence ~ctxt ~opts m loc
       | E.New { E.New.callee; targs; arguments; comments } ->
         let callee_layout =
@@ -1209,7 +1213,7 @@ and expression ?(ctxt = normal_context) ~opts (root_expr : (Loc.t, Loc.t) Ast.Ex
              fuse [expression ~ctxt ~opts argument; s_operator]
           )
       | E.Class class_ -> class_base ~opts loc class_
-      | E.Yield { E.Yield.argument; delegate; comments } ->
+      | E.Yield { E.Yield.argument; delegate; comments; result_out = _ } ->
         layout_node_with_comments_opt loc comments
         @@ fuse
              [
@@ -1247,6 +1251,7 @@ and expression ?(ctxt = normal_context) ~opts (root_expr : (Loc.t, Loc.t) Ast.Ex
       | E.JSXElement el -> jsx_element ~opts loc el
       | E.JSXFragment fr -> jsx_fragment ~opts loc fr
       | E.TypeCast cast -> type_cast ~opts loc cast
+      | E.TSTypeCast cast -> ts_type_cast ~opts loc cast
       | E.Import { E.Import.argument; comments } ->
         layout_node_with_comments_opt loc comments
         @@ fuse [Atom "import"; wrap_in_parens (expression ~opts argument)]
@@ -1368,8 +1373,8 @@ and literal ~opts loc { Ast.Literal.raw; value; comments } =
 and string_literal_type loc { Ast.StringLiteral.value = _; raw; comments } =
   layout_node_with_comments_opt loc comments (Atom raw)
 
-and bigint_literal_type loc { Ast.BigIntLiteral.approx_value = _; bigint; comments } =
-  layout_node_with_comments_opt loc comments (Atom bigint)
+and bigint_literal_type loc { Ast.BigIntLiteral.value = _; raw; comments } =
+  layout_node_with_comments_opt loc comments (Atom raw)
 
 and boolean_literal_type loc { Ast.BooleanLiteral.value; comments } =
   layout_node_with_comments_opt
@@ -1468,6 +1473,18 @@ and type_cast ~opts loc cast =
   in
   layout_node_with_comments_opt loc comments
   @@ wrap_in_parens (fuse [expr_layout; type_annotation ~opts annot])
+
+and ts_type_cast ~opts loc cast =
+  let open Ast.Expression.TSTypeCast in
+  let { expression = expr; kind; comments } = cast in
+  let expr_layout = expression ~opts expr in
+  let rhs =
+    match kind with
+    | AsConst -> [Atom "as"; space; Atom "const"]
+    | As annot -> [Atom "as"; space; type_ ~opts annot]
+    | Satisfies annot -> [Atom "satisfies"; space; type_ ~opts annot]
+  in
+  layout_node_with_comments_opt loc comments @@ fuse [expr_layout; space; fuse rhs]
 
 and pattern_object_property_key ~opts =
   let open Ast.Pattern.Object in
@@ -1836,7 +1853,7 @@ and function_ ~opts loc func =
     else
       id
   in
-  function_base ~opts ~prefix ~params ~body ~predicate ~return ~tparams ~loc ~comments
+  function_base ~opts ~prefix ~params ~body:(Some body) ~predicate ~return ~tparams ~loc ~comments
 
 and function_base ~opts ~prefix ~params ~body ~predicate ~return ~tparams ~loc ~comments =
   let (params_loc, { Ast.Function.Params.comments = params_comments; _ }) = params in
@@ -1854,11 +1871,11 @@ and function_base ~opts ~prefix ~params ~body ~predicate ~return ~tparams ~loc ~
              function_return ~opts ~arrow:false return predicate;
            ];
          pretty_space;
-         begin
-           match body with
-           | Ast.Function.BodyBlock b -> block ~opts b
-           | Ast.Function.BodyExpression _ -> failwith "Only arrows should have BodyExpressions"
-         end;
+         option
+           (function
+             | Ast.Function.BodyBlock b -> block ~opts b
+             | Ast.Function.BodyExpression _ -> failwith "Only arrows should have BodyExpressions")
+           body;
        ]
 
 and function_param ~ctxt ~opts (loc, { Ast.Function.Param.argument; default }) : Layout.layout_node
@@ -1870,6 +1887,23 @@ and function_param ~ctxt ~opts (loc, { Ast.Function.Param.argument; default }) :
     | None -> node
   in
   source_location_with_comments (loc, node)
+
+and function_params_and_return
+    ~opts (loc, { Ast.Function.params; predicate; return; tparams; comments; _ }) =
+  source_location_with_comments
+    ?comments
+    ( loc,
+      function_base
+        ~opts
+        ~prefix:Empty
+        ~params
+        ~body:None
+        ~predicate
+        ~return
+        ~tparams
+        ~loc
+        ~comments
+    )
 
 and list_add_internal_comments list list_layout comments =
   match internal_comments comments with
@@ -2024,7 +2058,16 @@ and class_method
   source_location_with_comments
     ?comments
     ( loc,
-      let s_key = object_property_key ~opts key in
+      let s_key =
+        match key with
+        | Ast.Expression.Object.Property.PrivateName
+            (ident_loc, { Ast.PrivateName.name; comments = key_comments }) ->
+          layout_node_with_comments_opt
+            ident_loc
+            key_comments
+            (identifier (Flow_ast_utils.ident_of_source (ident_loc, "#" ^ name)))
+        | _ -> object_property_key ~opts key
+      in
       let s_key =
         if generator then
           fuse [Atom "*"; s_key]
@@ -2061,7 +2104,7 @@ and class_method
                 ~opts
                 ~prefix
                 ~params
-                ~body
+                ~body:(Some body)
                 ~predicate
                 ~return
                 ~tparams
@@ -2254,7 +2297,7 @@ and class_base
   in
   group [decorator_parts; source_location_with_comments ?comments (loc, group parts)]
 
-and enum_declaration loc { Ast.Statement.EnumDeclaration.id; body; comments } =
+and enum_declaration ~def loc { Ast.Statement.EnumDeclaration.id; body; comments } =
   let open Ast.Statement.EnumDeclaration in
   let representation_type name explicit =
     if explicit then
@@ -2291,6 +2334,10 @@ and enum_declaration loc { Ast.Statement.EnumDeclaration.id; body; comments } =
   in
   let string_member
       (_, { InitializedMember.id; init = (loc, { Ast.StringLiteral.raw; comments; _ }) }) =
+    initialized_member id (layout_node_with_comments_opt loc comments (Atom raw))
+  in
+  let bigint_member
+      (_, { InitializedMember.id; init = (loc, { Ast.BigIntLiteral.raw; comments; _ }) }) =
     initialized_member id (layout_node_with_comments_opt loc comments (Atom raw))
   in
   let unknown_members has_unknown_members =
@@ -2359,8 +2406,22 @@ and enum_declaration loc { Ast.Statement.EnumDeclaration.id; body; comments } =
           @ enum_internal_comments comments
           @ unknown_members has_unknown_members;
         ]
+    | (loc, BigIntBody { BigIntBody.members; explicit_type; has_unknown_members; comments }) ->
+      fuse
+        [
+          representation_type "bigint" explicit_type;
+          pretty_space;
+          layout_node_with_comments_opt loc comments
+          @@ wrap_body
+          @@ Base.List.map ~f:bigint_member members
+          @ enum_internal_comments comments
+          @ unknown_members has_unknown_members;
+        ]
   in
-  layout_node_with_comments_opt loc comments (fuse [Atom "enum"; space; identifier id; body])
+  layout_node_with_comments_opt loc comments (fuse [def; space; identifier id; body])
+
+and declare_enum loc enum =
+  enum_declaration ~def:(fuse [Atom "declare"; space; Atom "enum"]) loc enum
 
 (* given a list of (loc * layout node) pairs, insert newlines between the nodes when necessary *)
 and list_with_newlines
@@ -2397,6 +2458,8 @@ and list_with_newlines
         match (prev_loc, node) with
         (* empty line, don't add anything *)
         | (_, Empty) when skip_empty -> acc
+        (* Location is empty, default to no line break *)
+        | (Some loc, node) when loc = Loc.none -> fuse [node; sep] :: acc
         (* Lines are offset by more than one, let's add a line break. *)
         | (Some { Loc._end; _ }, node) when _end.line + 1 < loc.start.line ->
           fuse [pretty_hardline; node; sep] :: acc
@@ -2498,7 +2561,7 @@ and object_property ~opts property =
               ~opts
               ~prefix
               ~params
-              ~body
+              ~body:(Some body)
               ~predicate
               ~return
               ~tparams
@@ -2540,7 +2603,7 @@ and object_property ~opts property =
               ~opts
               ~prefix
               ~params
-              ~body
+              ~body:(Some body)
               ~predicate
               ~return
               ~tparams
@@ -2582,7 +2645,7 @@ and object_property ~opts property =
               ~opts
               ~prefix
               ~params
-              ~body
+              ~body:(Some body)
               ~predicate
               ~return
               ~tparams
@@ -2804,12 +2867,11 @@ and jsx_child ~opts (loc, child) =
   | Ast.JSX.Fragment frag -> Some (loc, jsx_fragment ~opts loc frag)
   | Ast.JSX.ExpressionContainer express -> Some (loc, jsx_expression_container ~opts loc express)
   | Ast.JSX.SpreadChild spread -> Some (loc, jsx_spread_child ~opts loc spread)
-  | Ast.JSX.Text { Ast.JSX.Text.raw; _ } ->
-    begin
-      match Utils_jsx.trim_jsx_text loc raw with
-      | Some (loc, txt) -> Some (loc, Atom txt)
-      | None -> None
-    end
+  | Ast.JSX.Text { Ast.JSX.Text.raw; _ } -> begin
+    match Utils_jsx.trim_jsx_text loc raw with
+    | Some (loc, txt) -> Some (loc, Atom txt)
+    | None -> None
+  end
 
 and partition_specifiers ~opts default specifiers =
   let open Ast.Statement.ImportDeclaration in
@@ -3018,6 +3080,10 @@ and variance (loc, { Ast.Variance.kind; comments }) =
       match kind with
       | Ast.Variance.Plus -> Atom "+"
       | Ast.Variance.Minus -> Atom "-"
+      | Ast.Variance.Readonly -> fuse [Atom "readonly"; space]
+      | Ast.Variance.In -> fuse [Atom "in"; space]
+      | Ast.Variance.Out -> fuse [Atom "out"; space]
+      | Ast.Variance.InOut -> fuse [Atom "in out"; space]
     )
 
 and switch_case ~opts ~last (loc, { Ast.Statement.Switch.Case.test; consequent; comments }) =
@@ -3044,6 +3110,7 @@ and type_param
       {
         Ast.Type.TypeParam.name = (loc, { Ast.Identifier.name; comments });
         bound;
+        bound_kind;
         variance = variance_;
         default;
       }
@@ -3052,7 +3119,14 @@ and type_param
     [
       option variance variance_;
       source_location_with_comments ?comments (loc, Atom name);
-      hint (type_annotation ~opts) bound;
+      hint
+        (fun t ->
+          match bound_kind with
+          | Ast.Type.TypeParam.Colon -> type_annotation ~opts t
+          | Ast.Type.TypeParam.Extends ->
+            let (_, t) = t in
+            fuse [space; Atom "extends"; space; type_ ~opts t])
+        bound;
       begin
         match default with
         | Some t -> fuse [pretty_space; Atom "="; pretty_space; type_ ~opts t]
@@ -3733,12 +3807,56 @@ and type_typeof ~opts:_ loc { Ast.Type.Typeof.argument; comments } =
     comments
     (fuse [Atom "typeof"; space; generic_identifier argument])
 
-and type_tuple ~opts loc { Ast.Type.Tuple.types; comments } =
+and type_keyof ~opts loc { Ast.Type.Keyof.argument; comments } =
+  layout_node_with_comments_opt loc comments (fuse [Atom "keyof"; space; type_ ~opts argument])
+
+and type_readonly ~opts loc { Ast.Type.ReadOnly.argument; comments } =
+  layout_node_with_comments_opt loc comments (fuse [Atom "readonly"; space; type_ ~opts argument])
+
+and type_tuple ~opts loc { Ast.Type.Tuple.elements; comments } =
   layout_node_with_comments_opt
     loc
     comments
     (group
-       [new_list ~wrap:(Atom "[", Atom "]") ~sep:(Atom ",") (Base.List.map ~f:(type_ ~opts) types)]
+       [
+         new_list
+           ~wrap:(Atom "[", Atom "]")
+           ~sep:(Atom ",")
+           (Base.List.map
+              ~f:(function
+                | (_, Ast.Type.Tuple.UnlabeledElement annot) -> type_ ~opts annot
+                | (loc, Ast.Type.Tuple.LabeledElement e) -> type_tuple_labeled_element ~opts loc e
+                | (loc, Ast.Type.Tuple.SpreadElement e) -> type_tuple_spread_element ~opts loc e)
+              elements
+           );
+       ]
+    )
+
+and type_tuple_labeled_element
+    ~opts loc { Ast.Type.Tuple.LabeledElement.name; annot; variance = variance_; optional } =
+  source_location_with_comments
+    ( loc,
+      fuse
+        [
+          option variance variance_;
+          identifier name;
+          ( if optional then
+            Atom "?"
+          else
+            Empty
+          );
+          Atom ":";
+          pretty_space;
+          type_ ~opts annot;
+        ]
+    )
+
+and type_tuple_spread_element ~opts loc { Ast.Type.Tuple.SpreadElement.name; annot } =
+  source_location_with_comments
+    ( loc,
+      match name with
+      | Some name -> fuse [Atom "..."; identifier name; Atom ":"; pretty_space; type_ ~opts annot]
+      | None -> fuse [Atom "..."; type_ ~opts annot]
     )
 
 and type_array ~opts loc { Ast.Type.Array.argument; comments } =
@@ -3779,7 +3897,16 @@ and type_ ~opts ((loc, t) : (Loc.t, Loc.t) Ast.Type.t) =
       | T.Number comments -> layout_node_with_comments_opt loc comments (Atom "number")
       | T.BigInt comments -> layout_node_with_comments_opt loc comments (Atom "bigint")
       | T.String comments -> layout_node_with_comments_opt loc comments (Atom "string")
-      | T.Boolean comments -> layout_node_with_comments_opt loc comments (Atom "boolean")
+      | T.Boolean { raw; comments } ->
+        let raw =
+          match raw with
+          | `Boolean -> "boolean"
+          | `Bool -> "bool"
+        in
+        layout_node_with_comments_opt loc comments (Atom raw)
+      | T.Unknown comments -> layout_node_with_comments_opt loc comments (Atom "unknown")
+      | T.Never comments -> layout_node_with_comments_opt loc comments (Atom "never")
+      | T.Undefined comments -> layout_node_with_comments_opt loc comments (Atom "undefined")
       | T.Nullable t -> type_nullable ~opts loc t
       | T.Function func -> type_function ~opts ~sep:(fuse [pretty_space; Atom "=>"]) loc func
       | T.Object obj -> type_object ~opts loc obj
@@ -3792,6 +3919,8 @@ and type_ ~opts ((loc, t) : (Loc.t, Loc.t) Ast.Type.t) =
       | T.Union t -> type_union ~opts loc t
       | T.Intersection t -> type_intersection ~opts loc t
       | T.Typeof t -> type_typeof ~opts loc t
+      | T.Keyof t -> type_keyof ~opts loc t
+      | T.ReadOnly t -> type_readonly ~opts loc t
       | T.Tuple t -> type_tuple ~opts loc t
       | T.StringLiteral lit -> string_literal_type loc lit
       | T.NumberLiteral lit -> number_literal_type loc lit
@@ -4028,7 +4157,12 @@ and declare_export_declaration
     | Interface (loc, interface) ->
       source_location_with_comments
         ?comments
-        (loc, fuse [Atom "declare"; space; s_export; interface_declaration ~opts loc interface]))
+        (loc, fuse [Atom "declare"; space; s_export; interface_declaration ~opts loc interface])
+    (* declare export enum *)
+    | Enum (loc, enum) ->
+      source_location_with_comments
+        ?comments
+        (loc, fuse [Atom "declare"; space; s_export; enum_declaration ~def:(Atom "enum") loc enum]))
   | (None, Some specifier) ->
     source_location_with_comments
       ?comments

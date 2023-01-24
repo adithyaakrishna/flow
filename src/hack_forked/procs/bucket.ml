@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -41,7 +41,7 @@ let make_ progress_fn bucket_size jobs =
   fun () ->
     let bucket_size = min (Array.length jobs - !i) bucket_size in
     progress_fn ~start:!i ~length:bucket_size;
-    let result = Array.sub jobs !i bucket_size in
+    let result = Array.sub jobs ~pos:!i ~len:bucket_size in
     i := bucket_size + !i;
     Array.to_list result
 

@@ -4,7 +4,7 @@ Cannot return `g(...)` because `any` may have been passed into number [1] and `a
 number [2]. [incompatible-trust]
 
    t2.js:12:10
-   12|   return g(x)
+   12|   return g(x) // Fails.
                 ^^^^
 
 References:
@@ -73,7 +73,7 @@ Cannot assign `a` to `b` because `any` may have been passed into number [1] and 
 number [2]. [incompatible-trust]
 
    t3.js:15:27
-   15| var b: $Trusted<number> = a;
+   15| var b: $Trusted<number> = a; // Fails. 
                                  ^
 
 References:
@@ -81,7 +81,7 @@ References:
    14| var a: number = composenum(id, id)((42: any));
               ^^^^^^ [1]
    t3.js:15:8
-   15| var b: $Trusted<number> = a;
+   15| var b: $Trusted<number> = a; // Fails. 
               ^^^^^^^^^^^^^^^^ [2]
 
 

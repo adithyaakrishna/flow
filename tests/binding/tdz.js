@@ -27,7 +27,7 @@ function f0() {
   const c = 0;
 }
 
-function f1(b) {
+function f1(b: boolean) {
   x = 10;         // error, attempt to write to let before decl
   let x = 0;
   if (b) {
@@ -75,8 +75,8 @@ function f5() {
 // phasing of AST traversal, and will be fixed.
 //
 
-var x: C;       // ok
-
+var x1: C;       // ok
+var x2: typeof C // error
 var y = new C(); // error: let ref before decl from value position
 
 class C {}
@@ -98,3 +98,6 @@ f(a); // error: undefined ~/> number
 a = 10;
 
 f(a); // ok, a: number (not ?number)
+
+// --- classes ---
+class A extends A {} // error

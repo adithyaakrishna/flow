@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -47,13 +47,17 @@ val literal_eq : 'a -> 'a Type.literal -> bool
 
 val number_literal_eq : Type.number_literal -> Type.number_literal Type.literal -> bool
 
+val bigint_literal_eq : Type.bigint_literal -> Type.bigint_literal Type.literal -> bool
+
 val boolean_literal_eq : bool -> bool option -> bool
 
 val quick_subtype : bool -> Type.t -> Type.t -> bool
 
 val reason_of_propref : Type.propref -> reason
 
-val tuple_length : reason -> Trust.trust_rep -> Type.t list -> Type.t
+val tuple_length : reason -> Trust.trust_rep -> Type.tuple_element list -> Type.t
+
+val tuple_ts_of_elements : Type.tuple_element list -> Type.t list
 
 val optional : ?annot_loc:ALoc.t -> ?use_desc:bool -> Type.t -> Type.t
 
@@ -64,7 +68,7 @@ val make_exact_object :
 
 val class_type : ?structural:bool -> ?annot_loc:ALoc.t -> Type.t -> Type.t
 
-val this_class_type : Type.t -> bool -> Type.t
+val this_class_type : Type.t -> bool -> Subst_name.t -> Type.t
 
 val extends_type : reason -> Type.t -> Type.t -> Type.t
 
@@ -98,3 +102,5 @@ val union_of_ts : reason -> Type.t list -> Type.t
 val annotated_or_inferred_of_option : default:Type.t -> Type.t option -> Type.annotated_or_inferred
 
 val subtype_this_of_function : Type.funtype -> Type.t
+
+val all_explicit_targs : Type.targ Base.List.t option -> Type.targ list option

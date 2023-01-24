@@ -1,4 +1,4 @@
-function foo(b) {
+function foo(b: boolean) {
     var x = b ? null: false;
     var z;
     while(b) {
@@ -8,7 +8,7 @@ function foo(b) {
     var w:number = z; // 2 errors: ?string !~> number
 }
 
-function bar(b) {
+function bar(b: boolean) {
     var x = b ? null: false;
     if (x == null) return;
     switch ("") {
@@ -23,7 +23,7 @@ function bar(b) {
     var w:number = x; // 2 errors: (boolean | string) !~> number
 }
 
-function bar2(b) {
+function bar2(b: boolean) {
     var x = b ? null: false;
     if (x == null) return;
     switch ("") {
@@ -40,8 +40,8 @@ function bar2(b) {
     var w:number = x; // 2 errors: (boolean | string) !~> number
 }
 
-function qux(b) {
-    var z = 0;
+function qux(b: boolean) {
+    var z: number | string = 0;
     while(b) {
         var y:number = z;
         if (b) { z = ""; continue; } // error: string !~> number

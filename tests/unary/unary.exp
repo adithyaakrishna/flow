@@ -1,10 +1,10 @@
-Error ---------------------------------------------------------------------------------------------------- unary.js:8:10
+Error ---------------------------------------------------------------------------------------------------- unary.js:8:11
 
-string [1] is not a number. [incompatible-use]
+Cannot perform arithmetic operation because string [1] is not a number or bigint. [unsafe-arithmetic]
 
-   unary.js:8:10
+   unary.js:8:11
    8|   return -y; // error, we don't allow coercion here
-               ^^
+                ^
 
 References:
    unary.js:7:16
@@ -14,7 +14,7 @@ References:
 
 Error --------------------------------------------------------------------------------------------------- unary.js:12:11
 
-string [1] is incompatible with number [2]. [incompatible-type]
+Cannot perform arithmetic operation because string [1] is not a number or bigint. [unsafe-arithmetic]
 
    unary.js:12:11
    12|   return ~y;  // error, we don't allow coercion here
@@ -24,9 +24,6 @@ References:
    unary.js:11:16
    11| function x3(y: string) {
                       ^^^^^^ [1]
-   unary.js:12:10
-   12|   return ~y;  // error, we don't allow coercion here
-                ^^ [2]
 
 
 Error ---------------------------------------------------------------------------------------------------- unary.js:19:2
@@ -73,9 +70,37 @@ References:
                                       ^^^^^ [2]
 
 
+Error --------------------------------------------------------------------------------------------------- unary.js:64:11
+
+Cannot perform unary plus because a bigint [1] cannot be coerced to number. [bigint-num-coerce]
+
+   unary.js:64:11
+   64|   return +y; // error, bigint cannot be coerced to number
+                 ^
+
+References:
+   unary.js:63:17
+   63| function x15(y: bigint) {
+                       ^^^^^^ [1]
+
+
+Error ---------------------------------------------------------------------------------------------------- unary.js:73:4
+
+Cannot cast `+y` to bigint because number [1] is incompatible with bigint [2]. [incompatible-cast]
+
+   unary.js:73:4
+   73|   (+y: bigint); // error, bigint ~> number
+          ^^ [1]
+
+References:
+   unary.js:73:8
+   73|   (+y: bigint); // error, bigint ~> number
+              ^^^^^^ [2]
+
+
 Error --------------------------------------------------------------------------------------------------- update.js:12:5
 
-Cannot perform arithmetic operation because string [1] is not a number. [unsafe-addition]
+Cannot perform arithmetic operation because string [1] is not a number or bigint. [unsafe-arithmetic]
 
    update.js:12:5
    12|     y++; // error, we don't allow coercion here
@@ -87,37 +112,9 @@ References:
                      ^^^^^^ [1]
 
 
-Error --------------------------------------------------------------------------------------------------- update.js:12:5
-
-Cannot assign number to `y` because number [1] is incompatible with string [2]. [incompatible-type]
-
-   update.js:12:5
-   12|     y++; // error, we don't allow coercion here
-           ^^^ [1]
-
-References:
-   update.js:11:15
-   11|   function(y: string) {
-                     ^^^^^^ [2]
-
-
-Error --------------------------------------------------------------------------------------------------- update.js:14:5
-
-Cannot assign number to `y` because number [1] is incompatible with string [2]. [incompatible-type]
-
-   update.js:14:5
-   14|     y++; // error, but you still can't write a number to a string
-           ^^^ [1]
-
-References:
-   update.js:11:15
-   11|   function(y: string) {
-                     ^^^^^^ [2]
-
-
 Error --------------------------------------------------------------------------------------------------- update.js:18:5
 
-Cannot perform arithmetic operation because string [1] is not a number. [unsafe-addition]
+Cannot perform arithmetic operation because string [1] is not a number or bigint. [unsafe-arithmetic]
 
    update.js:18:5
    18|     y--; // error, we don't allow coercion here
@@ -127,39 +124,11 @@ References:
    update.js:17:15
    17|   function(y: string) {
                      ^^^^^^ [1]
-
-
-Error --------------------------------------------------------------------------------------------------- update.js:18:5
-
-Cannot assign number to `y` because number [1] is incompatible with string [2]. [incompatible-type]
-
-   update.js:18:5
-   18|     y--; // error, we don't allow coercion here
-           ^^^ [1]
-
-References:
-   update.js:17:15
-   17|   function(y: string) {
-                     ^^^^^^ [2]
-
-
-Error --------------------------------------------------------------------------------------------------- update.js:22:5
-
-Cannot assign number to `y` because number [1] is incompatible with string [2]. [incompatible-type]
-
-   update.js:22:5
-   22|     ++y; // error, we don't allow coercion here
-           ^^^ [1]
-
-References:
-   update.js:21:15
-   21|   function(y: string) {
-                     ^^^^^^ [2]
 
 
 Error --------------------------------------------------------------------------------------------------- update.js:22:7
 
-Cannot perform arithmetic operation because string [1] is not a number. [unsafe-addition]
+Cannot perform arithmetic operation because string [1] is not a number or bigint. [unsafe-arithmetic]
 
    update.js:22:7
    22|     ++y; // error, we don't allow coercion here
@@ -171,23 +140,9 @@ References:
                      ^^^^^^ [1]
 
 
-Error --------------------------------------------------------------------------------------------------- update.js:26:5
-
-Cannot assign number to `y` because number [1] is incompatible with string [2]. [incompatible-type]
-
-   update.js:26:5
-   26|     --y; // error, we don't allow coercion here
-           ^^^ [1]
-
-References:
-   update.js:25:15
-   25|   function(y: string) {
-                     ^^^^^^ [2]
-
-
 Error --------------------------------------------------------------------------------------------------- update.js:26:7
 
-Cannot perform arithmetic operation because string [1] is not a number. [unsafe-addition]
+Cannot perform arithmetic operation because string [1] is not a number or bigint. [unsafe-arithmetic]
 
    update.js:26:7
    26|     --y; // error, we don't allow coercion here
@@ -268,4 +223,4 @@ Cannot update `xs[0]` because read-only arrays cannot be written to. [cannot-wri
 
 
 
-Found 21 errors
+Found 18 errors

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -176,29 +176,24 @@ let merge_targets ~env ~options ~profiling ~get_dependent_files roots =
   in
   let roots = CheckedSet.all to_merge in
   let components = Sort_js.topsort ~roots (Utils_js.FilenameGraph.to_map sig_dependency_graph) in
-  let%lwt (sig_dependency_graph, component_map) =
-    Types_js.calc_deps ~options ~profiling ~sig_dependency_graph ~components roots
-  in
-  Lwt.return (sig_dependency_graph, component_map, roots, to_check)
+  let%lwt components = Types_js.calc_deps ~options ~profiling ~components roots in
+  Lwt.return (sig_dependency_graph, components, roots, to_check)
 
-let merge_job ~worker_mutator ~options ~reader component =
-  let leader = Nel.hd component in
-  let reader = Abstract_state_reader.Mutator_state_reader reader in
+let merge_job ~mutator ~options ~reader component =
   let diff =
-    if Module_js.checked_file ~reader ~audit:Expensive.ok leader then
+    match Parsing_heaps.Mutator_reader.typed_component ~reader component with
+    | None -> false
+    | Some component ->
       let root = Options.root options in
       let hash = Merge_service.sig_hash ~root ~reader component in
-      Context_heaps.Merge_context_mutator.add_merge_on_diff worker_mutator component hash
-    else
-      false
+      Parsing_heaps.Merge_context_mutator.add_merge_on_diff mutator component hash
   in
   (diff, Ok ())
 
 (* The processing step in Types-First needs to happen right after the check phase.
    We have already merged any necessary dependencies, so now we only check the
    target files for processing. *)
-let post_check ~visit ~iteration ~reader ~options ~metadata file check_result =
-  match check_result with
+let post_check ~visit ~iteration ~reader ~options ~metadata file = function
   | (Ok None | Error _) as result -> result
   | Ok (Some ((full_cx, type_sig, file_sig, typed_ast), _)) ->
     let reader = Abstract_state_reader.Mutator_state_reader reader in
@@ -223,6 +218,10 @@ let post_check ~visit ~iteration ~reader ~options ~metadata file check_result =
     let result = visit ~options ast ccx in
     Ok (Some ((), result))
 
+let mk_check ~visit ~iteration ~reader ~options ~metadata () =
+  let check = Merge_service.mk_check options ~reader () in
+  (fun file -> check file |> post_check ~visit ~iteration ~reader ~options ~metadata file)
+
 let mk_next ~options ~workers roots =
   Job_utils.mk_next
     ~intermediate_result_callback:(fun _ -> ())
@@ -241,10 +240,17 @@ module type TYPED_RUNNER_WITH_PREPASS_CONFIG = sig
 
   val prepass_init : unit -> prepass_state
 
+  val mod_prepass_options : Options.t -> Options.t
+
+  val check_options : Options.t -> Options.t
+
+  val include_dependents_in_prepass : bool
+
   val prepass_run :
     Context.t ->
     prepass_state ->
     File_key.t ->
+    Files.options ->
     Mutator_state_reader.t ->
     File_sig.With_ALoc.t ->
     (ALoc.t, ALoc.t * Type.t) Flow_ast.Program.t ->
@@ -277,28 +283,25 @@ module SimpleTypedRunner (C : SIMPLE_TYPED_RUNNER_CONFIG) : TYPED_RUNNER_CONFIG 
   let reporter = C.reporter
 
   let merge_and_check env workers options profiling roots ~iteration =
-    Transaction.with_transaction (fun transaction ->
+    Transaction.with_transaction "codemod" (fun transaction ->
         let reader = Mutator_state_reader.create transaction in
 
         (* Calculate dependencies that need to be merged *)
-        let%lwt (sig_dependency_graph, component_map, files_to_merge, _) =
+        let%lwt (sig_dependency_graph, components, files_to_merge, _) =
           let get_dependent_files _ _ _ = Lwt.return (FilenameSet.empty, FilenameSet.empty) in
           merge_targets ~env ~options ~profiling ~get_dependent_files roots
         in
-        let (master_mutator, worker_mutator) =
-          Context_heaps.Merge_context_mutator.create transaction files_to_merge
-        in
+        let mutator = Parsing_heaps.Merge_context_mutator.create transaction files_to_merge in
         Hh_logger.info "Merging %d files" (FilenameSet.cardinal files_to_merge);
         let%lwt _ =
           Merge_service.merge_runner
             ~job:merge_job
-            ~master_mutator
-            ~worker_mutator
+            ~mutator
             ~reader
             ~options
             ~workers
             ~sig_dependency_graph
-            ~component_map
+            ~components
             ~recheck_set:files_to_merge
         in
         Hh_logger.info "Merging done.";
@@ -306,15 +309,9 @@ module SimpleTypedRunner (C : SIMPLE_TYPED_RUNNER_CONFIG) : TYPED_RUNNER_CONFIG 
         let options = C.check_options options in
         let (next, merge) = mk_next ~options ~workers roots in
         let metadata = Context.metadata_of_options options in
-        let post_check = post_check ~visit:C.visit ~iteration ~reader ~options ~metadata in
-        let%lwt result =
-          MultiWorkerLwt.call
-            workers
-            ~job:(Job_utils.job ~post_check ~reader ~options)
-            ~neutral:[]
-            ~merge
-            ~next
-        in
+        let mk_check () = mk_check ~visit:C.visit ~iteration ~reader ~options ~metadata () in
+        let job = Job_utils.mk_job ~mk_check ~options () in
+        let%lwt result = MultiWorkerLwt.call workers ~job ~neutral:[] ~merge ~next in
         Hh_logger.info "Done";
         Lwt.return result
     )
@@ -337,50 +334,58 @@ module TypedRunnerWithPrepass (C : TYPED_RUNNER_WITH_PREPASS_CONFIG) : TYPED_RUN
 
   let pre_check_job ~reader ~options acc roots =
     let state = C.prepass_init () in
+    let options = C.mod_prepass_options options in
     let check = Merge_service.mk_check options ~reader () in
     List.fold_left
       (fun acc file ->
         match check file with
         | Ok None -> acc
         | Ok (Some ((cx, _, file_sig, typed_ast), _)) ->
-          let result = C.prepass_run cx state file reader file_sig typed_ast in
+          let result =
+            C.prepass_run cx state file options.Options.opt_file_options reader file_sig typed_ast
+          in
           FilenameMap.add file (Ok result) acc
         | Error e -> FilenameMap.add file (Error e) acc)
       acc
       roots
 
   let merge_and_check env workers options profiling roots ~iteration =
-    Transaction.with_transaction (fun transaction ->
+    Transaction.with_transaction "codemod" (fun transaction ->
         let reader = Mutator_state_reader.create transaction in
 
         (* Calculate dependencies that need to be merged *)
-        let%lwt (sig_dependency_graph, component_map, files_to_merge, files_to_check) =
+        let%lwt (sig_dependency_graph, components, files_to_merge, files_to_check) =
           let get_dependent_files sig_dependency_graph implementation_dependency_graph roots =
-            Memory_utils.with_memory_timer_lwt ~options "AllDependentFiles" profiling (fun () ->
-                Lwt.return
-                  (Pure_dep_graph_operations.calc_all_dependents
-                     ~sig_dependency_graph
-                     ~implementation_dependency_graph
-                     roots
-                  )
-            )
+            if C.include_dependents_in_prepass then
+              let should_print = Options.should_profile options in
+              Memory_utils.with_memory_timer_lwt
+                ~should_print
+                "AllDependentFiles"
+                profiling
+                (fun () ->
+                  Lwt.return
+                    (Pure_dep_graph_operations.calc_all_dependents
+                       ~sig_dependency_graph
+                       ~implementation_dependency_graph
+                       roots
+                    )
+              )
+            else
+              Lwt.return (FilenameSet.empty, FilenameSet.empty)
           in
           merge_targets ~env ~options ~profiling ~get_dependent_files roots
         in
-        let (master_mutator, worker_mutator) =
-          Context_heaps.Merge_context_mutator.create transaction files_to_merge
-        in
+        let mutator = Parsing_heaps.Merge_context_mutator.create transaction files_to_merge in
         Hh_logger.info "Merging %d files" (FilenameSet.cardinal files_to_merge);
         let%lwt _ =
           Merge_service.merge_runner
             ~job:merge_job
-            ~master_mutator
-            ~worker_mutator
+            ~mutator
             ~reader
             ~options
             ~workers
             ~sig_dependency_graph
-            ~component_map
+            ~components
             ~recheck_set:files_to_merge
         in
         Hh_logger.info "Merging done.";
@@ -400,17 +405,12 @@ module TypedRunnerWithPrepass (C : TYPED_RUNNER_WITH_PREPASS_CONFIG) : TYPED_RUN
         C.store_precheck_result result;
         Hh_logger.info "Storing pre-checking results Done";
         Hh_logger.info "Checking+Codemodding %d files" (FilenameSet.cardinal roots);
+        let options = C.check_options options in
         let (next, merge) = mk_next ~options ~workers roots in
         let metadata = Context.metadata_of_options options in
-        let post_check = post_check ~visit:C.visit ~iteration ~reader ~options ~metadata in
-        let%lwt result =
-          MultiWorkerLwt.call
-            workers
-            ~job:(Job_utils.job ~post_check ~reader ~options)
-            ~neutral:[]
-            ~merge
-            ~next
-        in
+        let mk_check () = mk_check ~visit:C.visit ~iteration ~reader ~options ~metadata () in
+        let job = Job_utils.mk_job ~mk_check ~options () in
+        let%lwt result = MultiWorkerLwt.call workers ~job ~neutral:[] ~merge ~next in
         Hh_logger.info "Checking+Codemodding Done";
         Lwt.return result
     )
@@ -430,7 +430,7 @@ module TypedRunner (TypedRunnerConfig : TYPED_RUNNER_CONFIG) : STEP_RUNNER = str
     let should_print_summary = Options.should_profile options in
     Profiling_js.with_profiling_lwt ~label:"Codemod" ~should_print_summary (fun profiling ->
         extract_flowlibs_or_exit options;
-        let%lwt (_libs_ok, env, _recheck_stats) = Types_js.init ~profiling ~workers options in
+        let%lwt (_libs_ok, env) = Types_js.init ~profiling ~workers options in
         (* Create roots set based on file list *)
         let roots =
           get_target_filename_set
@@ -464,11 +464,11 @@ module TypedRunner (TypedRunnerConfig : TYPED_RUNNER_CONFIG) : STEP_RUNNER = str
             ~options
             ~workers
             ~updates:(CheckedSet.add ~focused:roots CheckedSet.empty)
-            env
             ~files_to_force:CheckedSet.empty
-            ~file_watcher_metadata:MonitorProt.empty_file_watcher_metadata
-            ~recheck_reasons:[]
+            ~changed_mergebase:None
+            ~missed_changes:false
             ~will_be_checked_files:(ref CheckedSet.empty)
+            env
         in
         log_input_files roots;
         let%lwt results =
@@ -541,16 +541,17 @@ module UntypedRunner (C : UNTYPED_RUNNER_CONFIG) : STEP_RUNNER = struct
         let filename_set = get_target_filename_set ~options:file_options ~libs ~all roots in
         let next = Parsing_service_js.next_of_filename_set workers filename_set in
 
-        Transaction.with_transaction (fun transaction ->
+        Transaction.with_transaction "codemod" (fun transaction ->
             let reader = Mutator_state_reader.create transaction in
             let%lwt {
-                  Parsing_service_js.parse_ok = roots;
-                  parse_skips = _;
-                  parse_hash_mismatch_skips = _;
-                  parse_fails = _;
-                  parse_unchanged = _;
-                  parse_not_found = _;
-                  parse_package_json = _;
+                  Parsing_service_js.parsed = roots;
+                  unparsed = _;
+                  changed = _;
+                  failed = _;
+                  unchanged = _;
+                  not_found = _;
+                  package_json = _;
+                  dirty_modules = _;
                 } =
               Parsing_service_js.parse_with_defaults ~reader options workers next
             in
@@ -607,7 +608,7 @@ module UntypedFlowInitRunner (C : UNTYPED_FLOW_INIT_RUNNER_CONFIG) : STEP_RUNNER
           }
         in
         extract_flowlibs_or_exit options;
-        let%lwt (_libs_ok, env, _recheck_stats) = Types_js.init ~profiling ~workers options in
+        let%lwt (_libs_ok, env) = Types_js.init ~profiling ~workers options in
 
         let file_options = Options.file_options options in
         let all = Options.all options in

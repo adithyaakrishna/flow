@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,7 +18,7 @@ type options = {
   declarations: (string * Str.regexp) list;
   includes: Path_matcher.t;
   lib_paths: Path.t list;
-  module_file_exts: SSet.t;
+  module_file_exts: string list;
   module_resource_exts: SSet.t;
   node_resolver_dirnames: string list;
 }
@@ -63,24 +63,26 @@ let chop_flow_ext file =
   else
     file
 
-let is_directory path =
-  try Sys.is_directory path with
-  | Sys_error _ -> false
+(* Every <file>.js can be imported by its path, so it effectively exports a
+   module by the name <file>.js. Every <file>.js.flow shadows the corresponding
+   <file>.js, so it effectively exports a module by the name <file>.js. *)
+let eponymous_module file = Modulename.Filename (chop_flow_ext file)
 
 let is_prefix prefix =
   let prefix_with_sep =
-    if String_utils.string_ends_with prefix Filename.dir_sep then
+    if String.ends_with ~suffix:Filename.dir_sep prefix then
       prefix
     else
       prefix ^ Filename.dir_sep
   in
-  (fun path -> path = prefix || String_utils.string_starts_with path prefix_with_sep)
+  (fun path -> path = prefix || String.starts_with ~prefix:prefix_with_sep path)
 
 let is_json_file filename = Utils_js.extension_of_filename filename = Some ".json"
 
 (* This is the set of file extensions which we watch for changes *)
 let get_all_watched_extensions options =
-  SSet.union options.module_file_exts options.module_resource_exts
+  let module_file_exts = SSet.of_list options.module_file_exts in
+  SSet.union module_file_exts options.module_resource_exts
 
 let is_valid_path =
   (* Given a file foo.bar.baz.bat, checks the extensions .bat, .baz.bat, and .bar.baz.bat *)
@@ -122,9 +124,10 @@ let is_node_module options path = List.mem (Filename.basename path) options.node
 
 let is_flow_file ~options =
   let is_valid_path = is_valid_path ~options in
-  (fun path -> is_valid_path path && not (is_directory path))
+  (fun path -> is_valid_path path && not (Disk.is_directory path))
 
-let realpath path =
+(* TODO: use Unix.realpath from OCaml 4.13+ *)
+let realpath_ path =
   match Sys_utils.realpath path with
   | Some path -> path
   | None -> path
@@ -146,33 +149,43 @@ type file_kind =
 (* Determines whether a path is a regular file, a directory, or something else
    like a pipe, socket or device. If `path` is a symbolic link, then it returns
    the type of the target of the symlink, and the target's real path. *)
-let kind_of_path path =
-  Unix.(
-    try
-      match (Sys_utils.lstat path).st_kind with
+let kind_of_path dirent path =
+  try
+    let open Dirent in
+    let open Unix in
+    match dirent.d_type with
+    | DT_REG -> Reg path
+    | DT_DIR -> Dir (path, false)
+    | DT_LNK
+    | DT_UNKNOWN ->
+      (match (Sys_utils.lstat path).st_kind with
       | S_REG -> Reg path
       | S_LNK ->
         (try
            match (stat path).st_kind with
-           | S_REG -> Reg (realpath path)
-           | S_DIR -> Dir (realpath path, true)
+           | S_REG -> Reg (realpath_ path)
+           | S_DIR -> Dir (realpath_ path, true)
            | _ -> Other
            (* Don't spew errors on broken symlinks *)
          with
         | Unix_error (ENOENT, _, _) -> Other)
       | S_DIR -> Dir (path, false)
-      | _ -> Other
-    with
-    | Unix_error (ENOENT, _, _) when Sys.win32 && String.length path >= 248 ->
-      StatError
-        (Utils_js.spf
-           "On Windows, paths must be less than 248 characters for directories and 260 characters for files. This path has %d characters. Skipping %s"
-           (String.length path)
-           path
-        )
-    | Unix_error (e, _, _) ->
-      StatError (Utils_js.spf "Skipping %s: %s\n%!" path (Unix.error_message e))
-  )
+      | _ -> Other)
+    | DT_FIFO
+    | DT_CHR
+    | DT_BLK
+    | DT_SOCK ->
+      Other
+  with
+  | Unix.Unix_error (Unix.ENOENT, _, _) when Sys.win32 && String.length path >= 248 ->
+    StatError
+      (Utils_js.spf
+         "On Windows, paths must be less than 248 characters for directories and 260 characters for files. This path has %d characters. Skipping %s"
+         (String.length path)
+         path
+      )
+  | Unix.Unix_error (e, _, _) ->
+    StatError (Utils_js.spf "Skipping %s: %s\n%!" path (Unix.error_message e))
 
 let can_read path =
   try
@@ -184,14 +197,14 @@ let can_read path =
     false
 
 let try_readdir path =
-  try Sys.readdir path with
-  | Sys_error msg ->
-    Printf.eprintf "Skipping %s\n%!" msg;
+  try Dirent.entries path with
+  | Unix.Unix_error (err, _, _) ->
+    Printf.eprintf "Skipping %s (%s)\n%!" path (Unix.error_message err);
     [||]
 
 type stack =
   | S_Nil
-  | S_Dir of string list * string * stack
+  | S_Dir of Dirent.t list * string * stack
 
 let max_files = 1000
 
@@ -203,22 +216,22 @@ let max_files = 1000
 
     If kind_of_path fails, then we only emit a warning if error_filter passes *)
 let make_next_files_and_symlinks
-    ~node_module_filter ~path_filter ~realpath_filter ~error_filter ~dir_filter paths =
+    ~node_module_filter ~path_filter ~realpath_filter ~error_filter ~dir_filter ~sort paths =
   let prefix_checkers = Base.List.map ~f:is_prefix paths in
-  let rec process sz (acc, symlinks) files dir stack =
+  let rec process sz (acc, symlinks) (files : Dirent.t list) dir stack =
     if sz >= max_files then
       ((acc, symlinks), S_Dir (files, dir, stack))
     else
       match files with
       | [] -> process_stack sz (acc, symlinks) stack
-      | file :: files ->
+      | dirent :: files ->
         let file =
           if dir = "" then
-            file
+            dirent.Dirent.d_name
           else
-            Filename.concat dir file
+            Filename.concat dir dirent.Dirent.d_name
         in
-        (match kind_of_path file with
+        (match kind_of_path dirent file with
         | Reg real ->
           if path_filter file && (file = real || realpath_filter real) && can_read real then
             process (sz + 1) (real :: acc, symlinks) files dir stack
@@ -249,7 +262,9 @@ let make_next_files_and_symlinks
               in
               process sz (acc, symlinks) files dir stack
             else
-              let dirfiles = Array.to_list @@ try_readdir path in
+              let dirfiles = try_readdir path in
+              if sort then Array.fast_sort Dirent.compare dirfiles;
+              let dirfiles = Array.to_list dirfiles in
               process sz (acc, symlinks) dirfiles file (S_Dir (files, dir, stack))
           )
         | StatError msg ->
@@ -260,7 +275,16 @@ let make_next_files_and_symlinks
     | S_Nil -> (accs, S_Nil)
     | S_Dir (files, dir, stack) -> process sz accs files dir stack
   in
-  let state = ref (S_Dir (paths, "", S_Nil)) in
+  let init =
+    (* as a base case, make a fake directory "", with fake Dirent's for all of the root
+        paths. Since they have DT_UNKNOWN, we'll lstat each one and then recurse normally
+        after that. *)
+    let paths =
+      Base.List.map ~f:(fun d_name -> { Dirent.d_name; d_type = Dirent.DT_UNKNOWN }) paths
+    in
+    S_Dir (paths, "", S_Nil)
+  in
+  let state = ref init in
   fun () ->
     let ((res, symlinks), st) = process_stack 0 ([], SSet.empty) !state in
     state := st;
@@ -271,7 +295,7 @@ let make_next_files_and_symlinks
    and including any directories that are symlinked to even if they are outside
    of `paths`. *)
 let make_next_files_following_symlinks
-    ~node_module_filter ~path_filter ~realpath_filter ~error_filter ~dir_filter paths =
+    ~node_module_filter ~path_filter ~realpath_filter ~error_filter ~dir_filter ~sort paths =
   let paths = Base.List.map ~f:Path.to_string paths in
   let cb =
     ref
@@ -281,6 +305,7 @@ let make_next_files_following_symlinks
          ~realpath_filter
          ~error_filter
          ~dir_filter
+         ~sort
          paths
       )
   in
@@ -315,6 +340,7 @@ let make_next_files_following_symlinks
           ~realpath_filter
           ~error_filter
           ~dir_filter
+          ~sort
           paths;
       rec_cb ()
   in
@@ -330,11 +356,6 @@ let get_all =
       get_all_rec next accum
   in
   (fun next -> get_all_rec next SSet.empty)
-
-(* Local reference to the module exported by a file. *)
-let module_ref file = File_key.to_string file
-
-let lib_module_ref = ""
 
 let dir_sep = Str.regexp "[/\\\\]"
 
@@ -357,8 +378,7 @@ let dir_filter_of_options (options : options) f =
        the current path isn't a prefix of it. *)
     Base.List.for_all
       ~f:(fun (pattern, _rx) ->
-        (not (String_utils.string_starts_with pattern "!"))
-        && not (String_utils.string_ends_with pattern "$"))
+        (not (String.starts_with ~prefix:"!" pattern)) && not (String.ends_with ~suffix:"$" pattern))
       options.ignores
   in
   if can_prune then
@@ -412,12 +432,15 @@ let init ?(flowlibs_only = false) (options : options) =
         let lib_str = Path.to_string lib in
         (* TODO: better to parse json files, not ignore them *)
         let filter' path = (path = lib_str || filter path) && not (is_json_file path) in
+        (* we do want to sort, but use SSet.elements later, which sorts anyway *)
+        let sort = false in
         make_next_files_following_symlinks
           ~node_module_filter
           ~path_filter:filter'
           ~realpath_filter:filter'
           ~error_filter:(fun _ -> true)
           ~dir_filter
+          ~sort
           [lib]
       in
       libs |> Base.List.map ~f:(fun lib -> SSet.elements (get_all (get_next lib))) |> List.flatten
@@ -427,7 +450,7 @@ let init ?(flowlibs_only = false) (options : options) =
 let is_matching path pattern_list =
   List.fold_left
     (fun current (pattern, rx) ->
-      if String_utils.string_starts_with pattern "!" then
+      if String.starts_with ~prefix:"!" pattern then
         current && not (Str.string_match rx path 0)
       else
         current || Str.string_match rx path 0)
@@ -462,7 +485,12 @@ let wanted ~options lib_fileset =
   let is_ignored_ = is_ignored options in
   (fun path -> (not (is_ignored_ path)) && not (SSet.mem path lib_fileset))
 
-let watched_paths options = Path_matcher.stems options.includes
+let watched_paths options =
+  Path_matcher.stems options.includes
+  |> Base.List.sort ~compare:Path.compare
+  |> Base.List.remove_consecutive_duplicates ~which_to_keep:`First ~equal:(fun stem prev_stem ->
+         Path.is_ancestor ~prefix:prev_stem stem
+     )
 
 (**
  * Creates a "next" function (see also: `get_all`) for finding the files in a
@@ -472,7 +500,7 @@ let watched_paths options = Path_matcher.stems options.includes
  * If `all` is true, ignored files and libs are also returned.
  * If subdir is set, then we return the subset of files under subdir
  *)
-let make_next_files ~root ~all ~subdir ~options ~libs =
+let make_next_files ~root ~all ~sort ~subdir ~options ~libs =
   let node_module_filter = is_node_module options in
   let filter =
     if all then
@@ -498,7 +526,7 @@ let make_next_files ~root ~all ~subdir ~options ~libs =
     match subdir with
     | None ->
       fun path ->
-        (String_utils.string_starts_with path root_str || is_included options path)
+        (String.starts_with ~prefix:root_str path || is_included options path)
         && realpath_filter path
     | Some subdir ->
       (* The subdir might contain symlinks outside of the subdir. To prevent
@@ -506,8 +534,8 @@ let make_next_files ~root ~all ~subdir ~options ~libs =
        * that the realpath starts with the subdir *)
       let subdir_str = Path.to_string subdir in
       fun path ->
-        String_utils.string_starts_with path subdir_str
-        && (String_utils.string_starts_with path root_str || is_included options path)
+        String.starts_with ~prefix:subdir_str path
+        && (String.starts_with ~prefix:root_str path || is_included options path)
         && realpath_filter path
   in
   let dir_filter = dir_filter_of_options options filter in
@@ -517,6 +545,7 @@ let make_next_files ~root ~all ~subdir ~options ~libs =
     ~realpath_filter
     ~error_filter:filter
     ~dir_filter
+    ~sort
     starting_points
 
 let is_windows_root root =
@@ -571,35 +600,55 @@ let split_path =
   in
   (fun path -> f [] path)
 
-(* relative_path: (/path/to/foo, /path/to/bar/baz) -> ../bar/baz
- * absolute_path (/path/to/foo, ../bar/baz) -> /path/to/bar/baz
- *
- * Both of these are designed to avoid using Path and realpath so that we don't actually read the
- * file system *)
-let (relative_path, absolute_path) =
+(** [relative_path_parts "/path/to/foo" "/path/to/bar/baz"] returns [[".."; "bar"; "baz"]]
+
+  Designed to avoid using Path and realpath so that we don't actually read the
+  file system *)
+let relative_path_parts =
   let rec make_relative = function
     | (dir1 :: root, dir2 :: file) when dir1 = dir2 -> make_relative (root, file)
     | (root, file) -> List.fold_left (fun path _ -> Filename.parent_dir_name :: path) file root
   in
-  let make_relative root file =
-    (* This functions is only used for displaying error location or creating saved state.
-       We use '/' as file separator even on Windows. This simplify the test-suite script... *)
-    make_relative (split_path root, split_path file) |> String.concat "/"
-  in
-  let rec absolute_path = function
-    | (_ :: root, dir2 :: file) when dir2 = Filename.parent_dir_name -> absolute_path (root, file)
+  fun root ->
+    let root_components = split_path root in
+    (fun file -> make_relative (root_components, split_path file))
+
+(** [relative_path "/path/to/foo" "/path/to/bar/baz"] returns ["../bar/baz"]
+
+  This functions is only used for displaying error location or creating saved state.
+  We use '/' as file separator even on Windows. This simplify the test-suite script...
+
+  Designed to avoid using Path and realpath so that we don't actually read the
+  file system *)
+let relative_path root =
+  let relative_path_parts = relative_path_parts root in
+  (fun file -> relative_path_parts file |> String.concat "/")
+
+(** [absolute_path_parts "/path/to/foo" "../bar/baz"] returns [["/path"; "to"; "bar"; "baz"]]
+
+  Designed to avoid using Path and realpath so that we don't actually read the
+  file system *)
+let absolute_path_parts =
+  let rec make_absolute = function
+    | (_ :: root, dir2 :: file) when dir2 = Filename.parent_dir_name -> make_absolute (root, file)
     | (root, file) -> List.rev_append root file
   in
-  let absolute_path root file =
-    (* Let's avoid creating paths like "/path/to/foo/." *)
-    if file = Filename.current_dir_name || file = "" then
-      root
-    else
-      absolute_path (List.rev @@ split_path root, split_path file)
-      (* We may actually use these paths, so use the correct directory sep *)
-      |> String.concat Filename.dir_sep
-  in
-  (make_relative, absolute_path)
+  fun root ->
+    let root_components_rev = List.rev (split_path root) in
+    fun file ->
+      (* Let's avoid creating paths like "/path/to/foo/." *)
+      if file = Filename.current_dir_name || file = "" then
+        [root]
+      else
+        make_absolute (root_components_rev, split_path file)
+
+(** [absolute_path "/path/to/foo" "../bar/baz"] returns ["/path/to/bar/baz"]
+
+  Designed to avoid using Path and realpath so that we don't actually read the
+  file system *)
+let absolute_path root =
+  let absolute_path_parts = absolute_path_parts root in
+  (fun file -> absolute_path_parts file |> String.concat Filename.dir_sep)
 
 (* helper to get the full path to the "flow-typed" library dir *)
 let get_flowtyped_path root = make_path_absolute root "flow-typed"
@@ -643,12 +692,13 @@ let mkdirp path_str perm =
     )
 
 (* Given a path, we want to know if it's in a node_modules/ directory or not. *)
-let is_within_node_modules ~root ~options path =
-  (* We use paths that are relative to the root, so that we ignore ancestor directories *)
-  let path = relative_path (Path.to_string root) path in
-  let directories = Str.split dir_sep path |> SSet.of_list in
+let is_within_node_modules ~root ~options =
+  let relative_path_parts = relative_path_parts (Path.to_string root) in
   let node_resolver_dirnames = node_resolver_dirnames options |> SSet.of_list in
-  not (SSet.inter directories node_resolver_dirnames |> SSet.is_empty)
+  fun path ->
+    (* We use paths that are relative to the root, so that we ignore ancestor directories *)
+    let directories = relative_path_parts path |> SSet.of_list in
+    not (SSet.inter directories node_resolver_dirnames |> SSet.is_empty)
 
 (* realpath doesn't work for non-existent paths. So let's find the longest existent prefix, run
  * realpath on that, and then append the rest to it

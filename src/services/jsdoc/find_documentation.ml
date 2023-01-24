@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -293,6 +293,13 @@ let documentation_of_jsdoc jsdoc =
       ~f:(fun unrecognized_tag_documentations description ->
         description :: unrecognized_tag_documentations)
       ~init:(Base.List.map ~f:documentation_of_unrecognized_tag (Jsdoc.unrecognized_tags jsdoc))
+  in
+  let documentation_strings =
+    Base.Option.fold
+      (Jsdoc.deprecated jsdoc)
+      ~f:(fun acc description ->
+        documentation_of_unrecognized_tag ("deprecated", Some description) :: acc)
+      ~init:documentation_strings
   in
   match documentation_strings with
   | [] -> None

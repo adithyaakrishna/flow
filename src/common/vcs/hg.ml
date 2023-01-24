@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -12,7 +12,7 @@ type error_status = Vcs_utils.error_status =
   | Errored of string
 
 let hg ?cwd args =
-  let env = [| "NOSCMLOG=1"; "HGPLAIN=1" |] in
+  let env = `Extend [("NOSCMLOG", "1"); ("HGPLAIN", "1")] in
   exec ?cwd ~env "hg" args
 
 (** [merge_base a b] returns the hash of the common ancestor of [a] and [b]. *)
@@ -25,6 +25,17 @@ let merge_base ?cwd a b =
       | Invalid_argument _ -> Error (Errored "Malformed merge-base")
     in
     Lwt.return result
+  | Error _ as err -> Lwt.return err
+
+let merge_base_and_timestamp ?cwd a b =
+  let revset = Printf.sprintf "ancestor(%s,%s)" a b in
+  match%lwt hg ?cwd ["log"; "-T"; "{node} {date}"; "-r"; revset] with
+  | Ok stdout ->
+    (match String.split_on_char ' ' stdout with
+    | [hash; timestamp] ->
+      let timestamp = int_of_float @@ float_of_string timestamp in
+      Lwt.return (Ok (hash, timestamp))
+    | _ -> Lwt.return (Error (Errored "Malformed log response")))
   | Error _ as err -> Lwt.return err
 
 let files_changed_since ?cwd hash =

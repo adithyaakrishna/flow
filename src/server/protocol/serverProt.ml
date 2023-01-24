@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -13,6 +13,7 @@ module Request = struct
         trigger_character: string option;
         wait_for_recheck: bool option;
         imports: bool;  (** include auto-import suggestions *)
+        imports_ranked_usage: bool;
       }
     | AUTOFIX_EXPORTS of {
         input: File_input.t;
@@ -54,9 +55,11 @@ module Request = struct
     | FORCE_RECHECK of {
         files: string list;
         focus: bool;
+        missed_changes: bool;
+        changed_mergebase: bool;
       }
     | GET_DEF of {
-        filename: File_input.t;
+        input: File_input.t;
         line: int;
         char: int;
         wait_for_recheck: bool option;
@@ -96,8 +99,15 @@ module Request = struct
     | STATUS of { include_warnings: bool }
 
   let to_string = function
-    | AUTOCOMPLETE { input; cursor = _; wait_for_recheck = _; trigger_character = _; imports = _ }
-      ->
+    | AUTOCOMPLETE
+        {
+          input;
+          cursor = _;
+          wait_for_recheck = _;
+          trigger_character = _;
+          imports = _;
+          imports_ranked_usage = _;
+        } ->
       Printf.sprintf "autocomplete %s" (File_input.filename_of_file_input input)
     | AUTOFIX_EXPORTS { input; _ } ->
       Printf.sprintf "autofix exports %s" (File_input.filename_of_file_input input)
@@ -114,10 +124,24 @@ module Request = struct
       Printf.sprintf "dump-types %s" (File_input.filename_of_file_input input)
     | FIND_MODULE { moduleref; filename; wait_for_recheck = _ } ->
       Printf.sprintf "find-module %s %s" moduleref filename
-    | FORCE_RECHECK { files; focus } ->
-      Printf.sprintf "force-recheck %s (focus = %b)" (String.concat " " files) focus
-    | GET_DEF { filename; line; char; wait_for_recheck = _ } ->
-      Printf.sprintf "get-def %s:%d:%d" (File_input.filename_of_file_input filename) line char
+    | FORCE_RECHECK { files; focus; missed_changes; changed_mergebase } ->
+      let parts =
+        [
+          (focus, Printf.sprintf "focus = %b" focus);
+          (missed_changes, Printf.sprintf "missed_changes = %b" missed_changes);
+          (changed_mergebase, Printf.sprintf "changed_mergebase = %b" changed_mergebase);
+        ]
+        |> Base.List.filter_map ~f:(fun (x, str) ->
+               if x then
+                 Some str
+               else
+                 None
+           )
+        |> String.concat "; "
+      in
+      Printf.sprintf "force-recheck %s (%s)" (String.concat " " files) parts
+    | GET_DEF { input; line; char; wait_for_recheck = _ } ->
+      Printf.sprintf "get-def %s:%d:%d" (File_input.filename_of_file_input input) line char
     | GET_IMPORTS { module_names; wait_for_recheck = _ } ->
       Printf.sprintf "get-imports %s" (String.concat " " module_names)
     | INFER_TYPE
@@ -173,18 +197,29 @@ module Response = struct
     return_ty: string;
   }
 
+  type textedit = Loc.t * string
+
+  type insert_replace_edit = {
+    newText: string;
+    insert: Loc.t;
+    replace: Loc.t;
+  }
+
   module Completion = struct
     type completion_item = {
-      detail: string;
       kind: Lsp.Completion.completionItemKind option;
       name: string;
-      text_edits: (Loc.t * string) list;
+      labelDetail: string option;  (** LSP's CompletionItemLabelDetails.detail *)
+      description: string option;  (** LSP's CompletionItemLabelDetails.description *)
+      itemDetail: string option;  (** LSP's CompletionItem.detail *)
+      text_edit: insert_replace_edit option;
+      additional_text_edits: textedit list;
       sort_text: string option;
       preselect: bool;
       documentation: string option;
+      tags: Lsp.CompletionItemTag.t list option;
       log_info: string;
-      source: string option;  (** autoimport source *)
-      type_: string option;
+      insert_text_format: Lsp.Completion.insertTextFormat;
     }
 
     type t = {
@@ -219,8 +254,6 @@ module Response = struct
   type infer_type_response = (infer_type_response_ok, string) result
 
   type insert_type_response = (Replacement_printer.patch, string) result
-
-  type textedit = Loc.t * string
 
   type rage_response = (string * string) list
 

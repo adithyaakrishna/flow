@@ -7,8 +7,8 @@ Cannot get `Default.T` because property `T` is missing in `Number` [1]. [prop-mi
                      ^
 
 References:
-   <BUILTINS>/core.js:377:15
-   377| declare class Number {
+   <BUILTINS>/core.js:376:15
+   376| declare class Number {
                       ^^^^^^ [1]
 
 
@@ -21,8 +21,8 @@ Cannot get `React.NotAType` because property `NotAType` is missing in module `re
                     ^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:469:27
-   469|   declare module.exports: $Exports<'react'>;
+   <BUILTINS>/react.js:460:27
+   460|   declare module.exports: $Exports<'react'>;
                                   ^^^^^^^^^^^^^^^^^ [1]
 
 

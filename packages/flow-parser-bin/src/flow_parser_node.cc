@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -14,7 +14,7 @@ using namespace flowparser;
 
 class V8Translator : public AbstractTranslator<Local<Value>> {
  public:
-  Local<Value> convert_string(char* str) {
+  Local<Value> convert_string(const char* str) {
     return Nan::New(str).ToLocalChecked();
   };
   Local<Value> convert_number(double n) {

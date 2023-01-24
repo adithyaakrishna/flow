@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,8 +10,6 @@ type 'a t = {
   outgoing: 'a list;
   length: int;
 }
-
-exception Empty
 
 let empty = { incoming = []; outgoing = []; length = 0 }
 
@@ -37,11 +35,6 @@ let peek t =
   match t.outgoing with
   | [] -> (None, t)
   | hd :: _ -> (Some hd, t)
-
-let pop_unsafe t =
-  match pop t with
-  | (Some x, t) -> (x, t)
-  | (None, _) -> raise Empty
 
 let exists t ~f = List.exists f t.outgoing || List.exists f t.incoming
 

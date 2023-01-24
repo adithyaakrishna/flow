@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -21,12 +21,12 @@ let test_escape_unescape_data =
     "tab\t";
     "carriage return\r";
     "backslash\\";
-    "magic char" ^ String.make 1 (Char.of_int_exn 8);
-    "magic_char_with_hexadecimal_digit" ^ String.make 1 (Char.of_int_exn 26);
+    "magic char" ^ String.of_char (Char.of_int_exn 8);
+    "magic_char_with_hexadecimal_digit" ^ String.of_char (Char.of_int_exn 26);
   ]
 
 let test_escape_unescape () =
-  List.for_all test_escape_unescape_data (fun s ->
+  List.for_all test_escape_unescape_data ~f:(fun s ->
       let json = Hh_json.JSON_String s in
       let encoded = Hh_json.json_to_string json in
       let decoded = Hh_json.json_of_string encoded in
@@ -109,7 +109,7 @@ let test_jget_string () =
       results
       ^ Printf.sprintf "string_exn: str=%B num=%B nul=%B abs=%B non=%B\n" str num nul abs non
     in
-    let failed = String_utils.is_substring "false" results in
+    let failed = Base.String.is_substring ~substring:"false" results in
     if failed then Caml.Printf.eprintf "%s" results;
     not failed
   )
@@ -132,7 +132,7 @@ let test_jget_number () =
     let results =
       results ^ Printf.sprintf "float_opt: int=%B float=%B string=%B\n" fint ffloat fstring
     in
-    let failed = String_utils.is_substring "false" results in
+    let failed = Base.String.is_substring ~substring:"false" results in
     if failed then Caml.Printf.eprintf "%s" results;
     not failed
   )

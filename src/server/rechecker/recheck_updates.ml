@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -25,18 +25,13 @@ let is_incompatible_package_json ~options ~reader =
     match Sys_utils.cat_or_failed filename_str with
     | None -> Module_js.Incompatible Module_js.Unknown (* Failed to read package.json *)
     | Some content ->
-      (try
-         let (ast, _parse_errors) =
-           Parsing_service_js.parse_json_file ~fail:true content filename
-         in
-         Module_js.package_incompatible ~options ~reader filename_str ast
-       with
-      | _ -> Module_js.Incompatible Module_js.Unknown)
-    (* Failed to parse package.json *)
+      let node_main_fields = Options.node_main_fields options in
+      let result = Parsing_service_js.parse_package_json_file ~node_main_fields content filename in
+      Module_js.package_incompatible ~reader filename result
   in
   fun ~want ~sroot ~file_options f ->
     if
-      (String_utils.string_starts_with f sroot || Files.is_included file_options f)
+      (String.starts_with ~prefix:sroot f || Files.is_included file_options f)
       && Filename.basename f = "package.json"
       && want f
     then
@@ -138,7 +133,9 @@ let did_content_change ~reader filename =
   let file = File_key.LibFile filename in
   match Sys_utils.cat_or_failed filename with
   | None -> true (* Failed to read lib file *)
-  | Some content -> not (Parsing_service_js.does_content_match_file_hash ~reader file content)
+  | Some content ->
+    let reader = Abstract_state_reader.State_reader reader in
+    not (Parsing_service_js.does_content_match_file_hash ~reader file content)
 
 let check_for_lib_changes ~reader ~all_libs ~root ~skip_incompatible updates =
   let flow_typed_path = Path.to_string (Files.get_flowtyped_path root) in
@@ -166,7 +163,7 @@ let filter_wanted_updates ~file_options ~sroot ~want updates =
       if
         is_flow_file f
         (* note: is_included may be expensive. check in-root match first. *)
-        && (String_utils.string_starts_with f sroot || Files.is_included file_options f)
+        && (String.starts_with ~prefix:sroot f || Files.is_included file_options f)
         && (* removes excluded and lib files. the latter are already filtered *)
         want f
       then
@@ -194,7 +191,7 @@ let process_updates ?(skip_incompatible = false) ~options ~libs updates =
   in
   let root = Options.root options in
   let config_path = Server_files_js.config_file (Options.flowconfig_name options) root in
-  let sroot = Path.to_string root in
+  let sroot = Path.to_string root ^ Filename.dir_sep in
   let want = Files.wanted ~options:file_options all_libs in
   let is_incompatible_package_json =
     is_incompatible_package_json ~options ~reader ~want ~sroot ~file_options

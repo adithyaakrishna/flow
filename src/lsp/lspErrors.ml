@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -104,18 +104,17 @@ let limit_errors errors =
       let discard_count = List.length discard in
       let message = Printf.sprintf "[Only showing %i/%i diagnostics]" cap (cap + discard_count) in
       let diagnostic =
-        PublishDiagnostics.
-          {
-            (* the following range displays fine in all editors, regardless of contents *)
-            range = { start = { line = 0; character = 0 }; end_ = { line = 0; character = 0 } };
-            severity = Some PublishDiagnostics.Information;
-            code = NoCode;
-            source = Some "Flow";
-            message;
-            relatedInformation = [];
-            relatedLocations = [];
-          }
-        
+        {
+          (* the following range displays fine in all editors, regardless of contents *)
+          PublishDiagnostics.range =
+            { start = { line = 0; character = 0 }; end_ = { line = 0; character = 0 } };
+          severity = Some PublishDiagnostics.Information;
+          code = PublishDiagnostics.NoCode;
+          source = Some "Flow";
+          message;
+          relatedInformation = [];
+          relatedLocations = [];
+        }
       in
 
       diagnostic :: retain
@@ -127,7 +126,7 @@ let is_parse_error =
 let is_not_parse_error d = not (is_parse_error d)
 
 let split errors =
-  let (parse_errors, non_parse_errors) = List.partition_tf errors is_parse_error in
+  let (parse_errors, non_parse_errors) = List.partition_tf errors ~f:is_parse_error in
   (ParseErrors parse_errors, NonParseErrors non_parse_errors)
 
 let choose_errors

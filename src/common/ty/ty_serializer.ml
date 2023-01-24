@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -48,8 +48,6 @@ let builtin_from_string ?targs x =
   let x = id_from_string x in
   mk_generic_type x targs
 
-let tvar (RVar _) = Error "Unsupported recursive variables."
-
 let variance_ = function
   | Neutral -> None
   | Positive -> Some (Loc.none, { Ast.Variance.kind = Ast.Variance.Plus; comments = None })
@@ -60,7 +58,6 @@ let type_ options =
     let just t = return (Loc.none, t) in
     let just' t = (Loc.none, t) in
     match t with
-    | TVar (v, _) -> tvar v
     | Bound (_, name) -> Ok (builtin_from_string name)
     | Generic (x, _, ts) -> generic_type x ts
     | Any _ -> just (T.Any None)
@@ -90,18 +87,58 @@ let type_ options =
            "$TEMPORARY$boolean"
            ~targs:(mk_targs [(Loc.none, T.BooleanLiteral (bool_lit lit))])
         )
-    | Bool None -> just (T.Boolean None)
+    | Bool None -> just (T.Boolean { raw = `Boolean; comments = None })
+    | BigInt (Some lit) ->
+      return
+        (builtin_from_string
+           "$TEMPORARY$bigint"
+           ~targs:(mk_targs [(Loc.none, T.BigIntLiteral (bigint_lit lit))])
+        )
+    | BigInt None -> just (T.BigInt None)
     | NumLit lit -> just (T.NumberLiteral (num_lit lit))
     | StrLit lit -> just (T.StringLiteral (str_lit (Reason.display_string_of_name lit)))
     | BoolLit lit -> just (T.BooleanLiteral (bool_lit lit))
+    | BigIntLit lit -> just (T.BigIntLiteral (bigint_lit lit))
     | Fun f ->
       let%map f = function_ f in
       (Loc.none, T.Function f)
     | Obj o -> obj_ o
     | Arr a -> arr a
-    | Tup ts ->
-      let%map ts = mapM type_ ts in
-      (Loc.none, T.Tuple { T.Tuple.types = ts; comments = None })
+    | Tup elements ->
+      let%map els =
+        all
+          ((Base.List.mapi ~f:(fun i (TupleElement { name; t; polarity }) ->
+                let%map annot = type_ t in
+                let el =
+                  match (name, polarity) with
+                  | (Some name, _) ->
+                    T.Tuple.LabeledElement
+                      {
+                        T.Tuple.LabeledElement.name = id_from_string name;
+                        annot;
+                        variance = variance_ polarity;
+                        optional = false;
+                      }
+                  | (None, Neutral) -> T.Tuple.UnlabeledElement annot
+                  | _ ->
+                    (* No label, but has polarity - e.g. `$ReadOnly<[string, number]>`
+                       We must make up a name. *)
+                    let name = id_from_string (Printf.sprintf "element_%d" i) in
+                    T.Tuple.LabeledElement
+                      {
+                        T.Tuple.LabeledElement.name;
+                        annot;
+                        variance = variance_ polarity;
+                        optional = false;
+                      }
+                in
+                (Loc.none, el)
+            )
+           )
+             elements
+          )
+      in
+      (Loc.none, T.Tuple { T.Tuple.elements = els; comments = None })
     | Union (from_bounds, t0, t1, ts) as t -> union t (from_bounds, t0, t1, ts)
     | Inter (t0, t1, ts) -> intersection (t0, t1, ts)
     | Utility s -> utility s
@@ -120,8 +157,7 @@ let type_ options =
     | TypeOf (TSymbol name) ->
       let%map id = id_from_symbol name in
       just' (T.Typeof { T.Typeof.argument = mk_typeof_expr id; comments = None })
-    | TypeOf _
-    | Mu _ ->
+    | TypeOf _ ->
       Error (Utils_js.spf "Unsupported type constructor `%s`." (Ty_debug.string_of_ctor_t t))
   and generic x targs =
     let%bind id = id_from_symbol x in
@@ -311,6 +347,7 @@ let type_ options =
           (match bound with
           | Some t -> T.Available t
           | None -> T.Missing Loc.none);
+        bound_kind = T.TypeParam.Colon;
         variance = variance_ tp.tp_polarity;
         default;
       }
@@ -332,6 +369,8 @@ let type_ options =
       comments = None;
     }
   and bool_lit lit = { Ast.BooleanLiteral.value = lit; comments = None }
+  and bigint_lit lit =
+    { Ast.BigIntLiteral.value = Int64.of_string_opt lit; raw = lit; comments = None }
   and getter t =
     function_
       {

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -51,7 +51,7 @@ module Queries = struct
 
   let used_names prog =
     let idents = ref SSet.empty in
-    let visitor = new ident_visitor idents in
+    let visitor = new ident_visitor ~init:idents in
     let _ = visitor#program prog in
     !idents
 end
@@ -106,7 +106,7 @@ let validate_ty cctx ~max_type_size ty =
 
 (* Used to infer the type for an annotation from an error loc *)
 let get_ty cctx ~preserve_literals loc =
-  let preserve_inferred_literal_types =
+  let lits =
     Codemod_hardcoded_ty_fixes.PreserveLiterals.(
       match preserve_literals with
       | Always
@@ -116,17 +116,7 @@ let get_ty cctx ~preserve_literals loc =
     )
   in
   let norm_opts =
-    {
-      Ty_normalizer_env.expand_internal_types = false;
-      flag_shadowed_type_params = false;
-      preserve_inferred_literal_types;
-      evaluate_type_destructors = false;
-      optimize_types = false;
-      omit_targ_defaults = true;
-      merge_bot_and_any_kinds = false;
-      verbose_normalizer = false;
-      max_depth = None;
-    }
+    Ty_normalizer_env.{ default_codemod_options with preserve_inferred_literal_types = lits }
   in
   match Codemod_context.Typed.ty_at_loc norm_opts cctx loc with
   | Ok (Ty.Type ty) -> Ok ty
@@ -144,14 +134,19 @@ module Make (Extra : BASE_STATS) = struct
   module Hardcoded_Ty_Fixes = Codemod_hardcoded_ty_fixes.Make (Extra)
 
   class virtual mapper
-    ~max_type_size
-    ~exact_by_default
-    ~lint_severities
-    ~suppress_types
-    ~imports_react
-    ~preserve_literals
+    (cctx : Codemod_context.Typed.t)
     ~default_any
-    (cctx : Codemod_context.Typed.t) =
+    ~generalize_maybe
+    ~generalize_react_mixed_element
+    ~lint_severities
+    ~max_type_size
+    ~preserve_literals
+    ~merge_arrays
+    ?(exact_by_default = Options.exact_by_default cctx.Codemod_context.Typed.options)
+    ?(suppress_types = Options.suppress_types cctx.Codemod_context.Typed.options)
+    ?(imports_react =
+      Insert_type_imports.ImportsHelper.imports_react cctx.Codemod_context.Typed.file_sig)
+    () =
     object (this)
       inherit [Acc.t, Loc.t] Flow_ast_visitor.visitor ~init:Acc.empty as super
 
@@ -181,6 +176,9 @@ module Make (Extra : BASE_STATS) = struct
               ~suppress_types
               ~imports_react
               ~preserve_literals
+              ~generalize_maybe
+              ~generalize_react_mixed_element
+              ~merge_arrays
               acc
               loc
               ty
@@ -216,6 +214,9 @@ module Make (Extra : BASE_STATS) = struct
               ~suppress_types
               ~imports_react
               ~preserve_literals
+              ~generalize_maybe
+              ~generalize_react_mixed_element
+              ~merge_arrays
               acc
               loc
               ty
@@ -226,19 +227,18 @@ module Make (Extra : BASE_STATS) = struct
         in
         fun loc ty_or_type_ast f ->
           match ty_or_type_ast with
-          | Ty_ ty ->
-            begin
-              match run loc ty with
-              | Ok t_ast ->
-                let size = Ty_utils.size_of_type ~max:max_type_size ty in
-                let t_ast' = Insert_type_utils.patch_up_type_ast t_ast in
-                added_annotations_locmap <- LMap.add loc size added_annotations_locmap;
-                Ok (f (Loc.none, t_ast'))
-              | Error e ->
-                this#update_acc (fun acc -> Acc.error acc loc e);
-                codemod_error_locs <- LSet.add loc codemod_error_locs;
-                Error e
-            end
+          | Ty_ ty -> begin
+            match run loc ty with
+            | Ok t_ast ->
+              let size = Ty_utils.size_of_type ~max:max_type_size ty in
+              let t_ast' = Insert_type_utils.patch_up_type_ast t_ast in
+              added_annotations_locmap <- LMap.add loc size added_annotations_locmap;
+              Ok (f (Loc.none, t_ast'))
+            | Error e ->
+              this#update_acc (fun acc -> Acc.error acc loc e);
+              codemod_error_locs <- LSet.add loc codemod_error_locs;
+              Error e
+          end
           | Type_ast { Annotate_exports_hardcoded_expr_fixes.tast_type = t; tast_imports } ->
             let size = Some 1 (* TODO *) in
             added_annotations_locmap <- LMap.add loc size added_annotations_locmap;
@@ -274,8 +274,9 @@ module Make (Extra : BASE_STATS) = struct
             error x
           | Error _ -> x
 
-      (* The 'expr' parameter is used for hard-coding type annotations on expressions
-       * matching annotate_exports_hardcoded_expr_fixes.expr_to_type_ast. *)
+      (* - expr: used for hard-coding type annotations on expressions matching
+       *   annotate_exports_hardcoded_expr_fixes.expr_to_type_ast.
+       * - error: used when "default-any" has been set to true. *)
       method private opt_annotate
           : 'a.
             f:(Loc.t -> 'a -> ty_or_type_ast -> ('a, Error.kind) result) ->

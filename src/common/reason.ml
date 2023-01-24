@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -59,6 +59,7 @@ type 'loc virtual_reason_desc =
   | RBoolean
   | RMixed
   | REmpty
+  | REmptyArrayElement
   | RVoid
   | RNull
   | RVoidedNull
@@ -113,7 +114,7 @@ type 'loc virtual_reason_desc =
   | RImplicitInstantiation
   | RTooFewArgs
   | RTooFewArgsExpectedRest
-  | RConstructorReturn
+  | RConstructorVoidReturn
   | RNewObject
   | RUnion
   | RUnionType
@@ -131,7 +132,6 @@ type 'loc virtual_reason_desc =
   | RDefaultConstructor
   | RConstructorCall of 'loc virtual_reason_desc
   | RReturn
-  | RImplicitReturn of 'loc virtual_reason_desc
   | RRegExp
   | RSuper
   | RNoSuper
@@ -148,8 +148,11 @@ type 'loc virtual_reason_desc =
   | RTypeAlias of string * 'loc option (* reliable def loc *) * 'loc virtual_reason_desc
   | ROpaqueType of string
   | RTypeParam of
-      string * ('loc virtual_reason_desc * 'loc) * (*reason op *)
-      ('loc virtual_reason_desc * 'loc) (* reason tapp *)
+      Subst_name.t
+      * ('loc virtual_reason_desc * 'loc)
+      * (*reason op *)
+      ('loc virtual_reason_desc * 'loc)
+    (* reason tapp *)
   | RTypeof of string
   | RMethod of string option
   | RMethodCall of string option
@@ -161,7 +164,6 @@ type 'loc virtual_reason_desc =
   | RPropertyAssignment of string option
   | RProperty of name option
   | RPrivateProperty of string
-  | RShadowProperty of name
   | RMember of {
       object_: string;
       property: string;
@@ -190,7 +192,7 @@ type 'loc virtual_reason_desc =
   | RReadOnlyType
   | ROptional of 'loc virtual_reason_desc
   | RMaybe of 'loc virtual_reason_desc
-  | RRestArray of 'loc virtual_reason_desc
+  | RRestArrayLit of 'loc virtual_reason_desc
   | RAbstract of 'loc virtual_reason_desc
   | RTypeApp of 'loc virtual_reason_desc
   | RTypeAppImplicit of 'loc virtual_reason_desc
@@ -234,6 +236,7 @@ type 'loc virtual_reason_desc =
   | RUnionBranching of 'loc virtual_reason_desc * int
   | RUninitialized
   | RPossiblyUninitialized
+  | RUnannotatedNext
 [@@deriving eq, show]
 
 and reason_desc_function =
@@ -253,7 +256,7 @@ let rec map_desc_locs f = function
     | RROArrayType | RTupleType | RTupleElement | RTupleLength _ | RTupleOutOfBoundsAccess
     | RFunction _ | RFunctionType | RFunctionBody | RFunctionCallType | RFunctionUnusedArgument
     | RJSXFunctionCall _ | RJSXIdentifier _ | RJSXElementProps _ | RJSXElement _ | RJSXText | RFbt
-    | RUninitialized | RPossiblyUninitialized ) as r ->
+    | RUninitialized | RPossiblyUninitialized | RUnannotatedNext | REmptyArrayElement ) as r ->
     r
   | RFunctionCall desc -> RFunctionCall (map_desc_locs f desc)
   | RUnknownUnspecifiedProperty desc -> RUnknownUnspecifiedProperty (map_desc_locs f desc)
@@ -262,13 +265,13 @@ let rec map_desc_locs f = function
   | RLogical (s, d1, d2) -> RLogical (s, map_desc_locs f d1, map_desc_locs f d2)
   | ( RTemplateString | RUnknownString | RUnionEnum | REnum _ | RGetterSetterProperty | RThis
     | RThisType | RImplicitInstantiation | RTooFewArgs | RTooFewArgsExpectedRest
-    | RConstructorReturn | RNewObject | RUnion | RUnionType | RIntersection | RIntersectionType
+    | RConstructorVoidReturn | RNewObject | RUnion | RUnionType | RIntersection | RIntersectionType
     | RKeySet | RAnd | RConditional | RPrototype | RObjectPrototype | RFunctionPrototype
     | RDestructuring | RDefaultValue | RConstructor | RReturn | RDefaultConstructor | RRegExp
     | RSuper | RNoSuper | RDummyPrototype | RDummyThis | RTupleMap | RObjectMap | RType _
     | RTypeof _ | RMethod _ | RMethodCall _ | RParameter _ | RRestParameter _ | RIdentifier _
     | RUnknownParameter _ | RIdentifierAssignment _ | RPropertyAssignment _ | RProperty _
-    | RPrivateProperty _ | RShadowProperty _ | RMember _ | RPropertyIsAString _ | RMissingProperty _
+    | RPrivateProperty _ | RMember _ | RPropertyIsAString _ | RMissingProperty _
     | RUnknownProperty _ | RUndefinedProperty _ | RSomeProperty | RFieldInitializer _
     | RUntypedModule _ | RNamedImportedType _ | RImportStarType _ | RImportStarTypeOf _
     | RImportStar _ | RDefaultImportedType _ | RAsyncImport | RCode _ | RCustom _
@@ -277,7 +280,6 @@ let rec map_desc_locs f = function
     r
   | REnumRepresentation desc -> REnumRepresentation (map_desc_locs f desc)
   | RConstructorCall desc -> RConstructorCall (map_desc_locs f desc)
-  | RImplicitReturn desc -> RImplicitReturn (map_desc_locs f desc)
   | RTypeAlias (s, None, d) -> RTypeAlias (s, None, map_desc_locs f d)
   | RTypeAlias (s, Some b, d) -> RTypeAlias (s, Some (f b), map_desc_locs f d)
   | RTypeParam (s, (d1, l1), (d2, l2)) ->
@@ -290,7 +292,7 @@ let rec map_desc_locs f = function
   | RReadOnlyType -> RReadOnlyType
   | ROptional desc -> ROptional (map_desc_locs f desc)
   | RMaybe desc -> RMaybe (map_desc_locs f desc)
-  | RRestArray desc -> RRestArray (map_desc_locs f desc)
+  | RRestArrayLit desc -> RRestArrayLit (map_desc_locs f desc)
   | RAbstract desc -> RAbstract (map_desc_locs f desc)
   | RTypeApp desc -> RTypeApp (map_desc_locs f desc)
   | RTypeAppImplicit desc -> RTypeAppImplicit (map_desc_locs f desc)
@@ -351,44 +353,37 @@ let in_range loc range =
 let string_of_source ?(strip_root = None) =
   File_key.(
     function
-    | Builtins -> "(builtins)"
-    | LibFile file ->
-      begin
-        match strip_root with
-        | Some root ->
-          let root_str = spf "%s%s" (Path.to_string root) Filename.dir_sep in
-          if string_starts_with file root_str then
-            spf "[LIB] %s" (Files.relative_path root_str file)
-          else
-            spf "[LIB] %s" (Filename.basename file)
-        | None -> file
-      end
+    | LibFile file -> begin
+      match strip_root with
+      | Some root ->
+        let root_str = spf "%s%s" (Path.to_string root) Filename.dir_sep in
+        if String.starts_with ~prefix:root_str file then
+          spf "[LIB] %s" (Files.relative_path root_str file)
+        else
+          spf "[LIB] %s" (Filename.basename file)
+      | None -> file
+    end
     | SourceFile file
     | JsonFile file
-    | ResourceFile file ->
-      begin
-        match strip_root with
-        | Some root ->
-          let root_str = spf "%s%s" (Path.to_string root) Filename.dir_sep in
-          Files.relative_path root_str file
-        | None -> file
-      end
+    | ResourceFile file -> begin
+      match strip_root with
+      | Some root ->
+        let root_str = spf "%s%s" (Path.to_string root) Filename.dir_sep in
+        Files.relative_path root_str file
+      | None -> file
+    end
   )
 
 let string_of_loc ?(strip_root = None) loc =
   Loc.(
     match loc.source with
-    | None
-    | Some File_key.Builtins ->
-      ""
+    | None -> ""
     | Some file -> spf "%s:%s" (string_of_source ~strip_root file) (Loc.to_string_no_source loc)
   )
 
 let string_of_aloc ?(strip_root = None) aloc =
   match ALoc.source aloc with
-  | None
-  | Some File_key.Builtins ->
-    ""
+  | None -> ""
   | Some file -> spf "%s:%s" (string_of_source ~strip_root file) (ALoc.to_string_no_source aloc)
 
 let json_of_source ?(strip_root = None) =
@@ -405,7 +400,6 @@ let json_source_type_of_source =
     | Some (File_key.SourceFile _) -> JSON_String "SourceFile"
     | Some (File_key.JsonFile _) -> JSON_String "JsonFile"
     | Some (File_key.ResourceFile _) -> JSON_String "ResourceFile"
-    | Some File_key.Builtins -> JSON_String "Builtins"
     | None -> JSON_Null
   )
 
@@ -531,6 +525,7 @@ let rec string_of_desc = function
   | RBoolean -> "boolean"
   | RMixed -> "mixed"
   | REmpty -> "empty"
+  | REmptyArrayElement -> "unknown element of empty array"
   | RAnyImplicit -> "implicit 'any'"
   | RAnyExplicit -> "explicit 'any'"
   | RVoid -> "undefined"
@@ -595,7 +590,7 @@ let rec string_of_desc = function
   | RImplicitInstantiation -> "implicit instantiation"
   | RTooFewArgs -> "undefined (too few arguments)"
   | RTooFewArgsExpectedRest -> "undefined (too few arguments, expected default/rest parameters)"
-  | RConstructorReturn -> "constructor return"
+  | RConstructorVoidReturn -> "constructor void return"
   | RNewObject -> "new object"
   | RUnion -> "union"
   | RUnionType -> "union type"
@@ -615,7 +610,6 @@ let rec string_of_desc = function
   | RConstructorCall (RClass d) -> string_of_desc d
   | RConstructorCall d -> spf "new %s" (string_of_desc d)
   | RReturn -> "return"
-  | RImplicitReturn desc -> spf "implicitly-returned %s" (string_of_desc desc)
   | RRegExp -> "regexp"
   | RSuper -> "super"
   | RNoSuper -> "empty super object"
@@ -630,7 +624,7 @@ let rec string_of_desc = function
   | RType x -> spf "`%s`" (prettify_react_util (display_string_of_name x))
   | RTypeAlias (x, _, _) -> spf "`%s`" (prettify_react_util x)
   | ROpaqueType x -> spf "`%s`" (prettify_react_util x)
-  | RTypeParam (x, _, _) -> spf "`%s`" x
+  | RTypeParam (x, _, _) -> spf "`%s`" (Subst_name.string_of_subst_name x)
   | RTypeof x -> spf "`typeof %s`" x
   | RMethod (Some x) -> spf "method `%s`" x
   | RMethod None -> "computed method"
@@ -649,12 +643,12 @@ let rec string_of_desc = function
   | RMember { object_; property } -> spf "`%s%s`" object_ property
   | RPropertyAssignment (Some x) -> spf "assignment of property `%s`" x
   | RPropertyAssignment None -> "assignment of computed property/element"
-  | RShadowProperty x -> spf ".%s" (display_string_of_name x)
   | RPropertyOf (x, d) -> spf "property `%s` of %s" (display_string_of_name x) (string_of_desc d)
   | RPropertyIsAString (OrdinaryName "") -> "empty string"
   | RPropertyIsAString x -> spf "string `%s`" (display_string_of_name x)
-  | RMissingProperty (Some x) -> spf "property `%s` does not exist" (display_string_of_name x)
-  | RMissingProperty None -> "computed property does not exist"
+  | RMissingProperty (Some x) ->
+    spf "`void` (due to access of non-existent property `%s`)" (display_string_of_name x)
+  | RMissingProperty None -> "`void` (due to access of a computed property which does not exist)"
   | RUnknownProperty (Some x) -> spf "property `%s` of unknown type" (display_string_of_name x)
   | RUnknownProperty None -> "computed property of unknown type"
   | RUnknownUnspecifiedProperty d ->
@@ -684,7 +678,7 @@ let rec string_of_desc = function
       | d -> d
     in
     spf "nullable %s" (string_of_desc (loop d))
-  | RRestArray _ -> "rest array"
+  | RRestArrayLit _ -> "rest array"
   | RAbstract d -> spf "abstract %s" (string_of_desc d)
   | RTypeApp d -> string_of_desc d
   | RTypeAppImplicit d -> string_of_desc d
@@ -734,6 +728,7 @@ let rec string_of_desc = function
   | RUnionBranching (desc, _) -> string_of_desc desc
   | RUninitialized -> "uninitialized variable"
   | RPossiblyUninitialized -> "possibly uninitialized variable"
+  | RUnannotatedNext -> "undefined (default `next` of unannotated generator function)"
 
 let string_of_reason ?(strip_root = None) r =
   let spos = string_of_aloc ~strip_root (aloc_of_reason r) in
@@ -882,18 +877,6 @@ let is_literal_object_reason r =
     true
   | _ -> false
 
-let is_literal_array_reason r =
-  match desc_of_reason r with
-  | RArrayLit
-  | REmptyArrayLit ->
-    true
-  | _ -> false
-
-let builtin_reason desc =
-  { Loc.none with Loc.source = Some File_key.Builtins } |> ALoc.of_loc |> mk_reason desc
-
-let is_builtin_reason f r = r.loc |> f |> ( = ) (Some File_key.Builtins)
-
 let is_lib_reason r =
   r.loc |> ALoc.source |> Base.Option.value_map ~default:false ~f:File_key.is_lib_file
 
@@ -943,6 +926,12 @@ let mk_annot_reason desc annot_loc = annot_reason ~annot_loc (mk_reason desc ann
 
 module ReasonMap = WrappedMap.Make (struct
   type t = reason
+
+  let compare = Stdlib.compare
+end)
+
+module ImplicitInstantiationReasonMap = WrappedMap.Make (struct
+  type t = reason * reason * reason Nel.t * bool (* synthesis mode *)
 
   let compare = Stdlib.compare
 end)
@@ -1057,8 +1046,12 @@ let rec code_desc_of_expression ~wrap (_, x) =
     in
     do_wrap ("new " ^ code_desc_of_expression ~wrap:true callee ^ targs ^ args)
   | Object _ -> "{...}"
-  | OptionalCall { OptionalCall.call = { Call.callee; targs; arguments; comments = _ }; optional }
-    ->
+  | OptionalCall
+      {
+        OptionalCall.call = { Call.callee; targs; arguments; comments = _ };
+        optional;
+        filtered_out = _;
+      } ->
     let targ_string =
       match targs with
       | None -> ""
@@ -1078,8 +1071,12 @@ let rec code_desc_of_expression ~wrap (_, x) =
       )
     ^ targ_string
     ^ arg_string
-  | OptionalMember { OptionalMember.member = { Member._object; property; comments = _ }; optional }
-    ->
+  | OptionalMember
+      {
+        OptionalMember.member = { Member._object; property; comments = _ };
+        optional;
+        filtered_out = _;
+      } ->
     let o = code_desc_of_expression ~wrap:true _object in
     let p = code_desc_of_property ~optional property in
     o ^ p
@@ -1089,7 +1086,9 @@ let rec code_desc_of_expression ~wrap (_, x) =
   | TaggedTemplate { TaggedTemplate.tag; _ } -> code_desc_of_expression ~wrap:true tag ^ "`...`"
   | TemplateLiteral _ -> "`...`"
   | This _ -> "this"
-  | TypeCast { TypeCast.expression; _ } -> code_desc_of_expression ~wrap expression
+  | TSTypeCast { TSTypeCast.expression; _ }
+  | TypeCast { TypeCast.expression; _ } ->
+    code_desc_of_expression ~wrap expression
   | Unary { Unary.operator; argument; comments = _ } ->
     let x = code_desc_of_expression ~wrap:true argument in
     let op =
@@ -1348,11 +1347,12 @@ let classification_of_reason r =
   | RArrayType
   | RROArrayType
   | RTupleType
-  | RRestArray _
+  | RRestArrayLit _
   | RArrayPatternRestProp ->
     `Array
   | RMixed
   | REmpty
+  | REmptyArrayElement
   | RAnyExplicit
   | RAnyImplicit
   | RIndexedAccess _
@@ -1384,7 +1384,7 @@ let classification_of_reason r =
   | RImplicitInstantiation
   | RTooFewArgs
   | RTooFewArgsExpectedRest
-  | RConstructorReturn
+  | RConstructorVoidReturn
   | RNewObject
   | RUnion
   | RUnionType
@@ -1401,7 +1401,6 @@ let classification_of_reason r =
   | RDefaultConstructor
   | RConstructorCall _
   | RReturn
-  | RImplicitReturn _
   | RSuper
   | RNoSuper
   | RDummyPrototype
@@ -1427,7 +1426,6 @@ let classification_of_reason r =
   | RPropertyAssignment _
   | RProperty _
   | RPrivateProperty _
-  | RShadowProperty _
   | RMember _
   | RPropertyOf _
   | RPropertyIsAString _
@@ -1496,7 +1494,8 @@ let classification_of_reason r =
   | RTrusted _
   | RPrivate _
   | REnum _
-  | REnumRepresentation _ ->
+  | REnumRepresentation _
+  | RUnannotatedNext ->
     `Unclassified
 
 let is_nullish_reason r = classification_of_reason r = `Nullish

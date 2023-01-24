@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -52,7 +52,7 @@ module type PARSER = sig
   val block_body : env -> Loc.t * (Loc.t, Loc.t) Statement.Block.t
 
   val function_block_body :
-    expression:bool -> env -> Loc.t * (Loc.t, Loc.t) Statement.Block.t * bool
+    expression:bool -> env -> (Loc.t * (Loc.t, Loc.t) Statement.Block.t) * bool
 
   val jsx_element_or_fragment :
     env ->
@@ -71,6 +71,10 @@ module type PARSER = sig
   val is_assignable_lhs : (Loc.t, Loc.t) Expression.t -> bool
 
   val number : env -> Token.number_type -> string -> float
+
+  val annot : env -> (Loc.t, Loc.t) Type.annotation
+
+  val bigint : env -> Token.bigint_type -> string -> int64 option
 end
 
 let identifier_name_raw env =
@@ -143,6 +147,11 @@ let identifier_name_raw env =
     | T_STRING_TYPE -> "string"
     | T_VOID_TYPE -> "void"
     | T_SYMBOL_TYPE -> "symbol"
+    | T_UNKNOWN_TYPE -> "unknown"
+    | T_NEVER_TYPE -> "never"
+    | T_UNDEFINED_TYPE -> "undefined"
+    | T_KEYOF -> "keyof"
+    | T_READONLY -> "readonly"
     (* Contextual stuff *)
     | T_OF -> "of"
     | T_ASYNC -> "async"
@@ -182,19 +191,55 @@ let private_identifier env =
     error_at env (loc, Parse_error.WhitespaceInPrivateName);
   (loc, { PrivateName.name; comments })
 
+(** The operation IsSimpleParamterList
+    https://tc39.es/ecma262/#sec-static-semantics-issimpleparameterlist *)
+let is_simple_parameter_list =
+  let is_simple_param = function
+    | (_, { Flow_ast.Function.Param.argument = (_, Pattern.Identifier _); default = None }) -> true
+    | _ -> false
+  in
+  fun (_, { Flow_ast.Function.Params.params; rest; comments = _; this_ = _ }) ->
+    rest = None && List.for_all is_simple_param params
+
 (**
  * The abstract operation IsLabelledFunction
  *
  * https://tc39.github.io/ecma262/#sec-islabelledfunction
  *)
 let rec is_labelled_function = function
-  | (_, Flow_ast.Statement.Labeled { Flow_ast.Statement.Labeled.body; _ }) ->
-    begin
-      match body with
-      | (_, Flow_ast.Statement.FunctionDeclaration _) -> true
-      | _ -> is_labelled_function body
-    end
+  | (_, Flow_ast.Statement.Labeled { Flow_ast.Statement.Labeled.body; _ }) -> begin
+    match body with
+    | (_, Flow_ast.Statement.FunctionDeclaration _) -> true
+    | _ -> is_labelled_function body
+  end
   | _ -> false
+
+(** https://tc39.es/ecma262/#sec-exports-static-semantics-early-errors *)
+let assert_identifier_name_is_identifier
+    ?restricted_error env (loc, { Flow_ast.Identifier.name; comments = _ }) =
+  match name with
+  | "let" when no_let env ->
+    error_at env (loc, Parse_error.Unexpected (Token.quote_token_value name))
+  | "await" ->
+    (* `allow_await` means that `await` is allowed to be a keyword,
+       which makes it illegal to use as an identifier.
+       https://tc39.github.io/ecma262/#sec-identifiers-static-semantics-early-errors *)
+    if allow_await env then error_at env (loc, Parse_error.AwaitAsIdentifierReference)
+  | "yield" ->
+    (* `allow_yield` means that `yield` is allowed to be a keyword,
+       which makes it illegal to use as an identifier.
+       https://tc39.github.io/ecma262/#sec-identifiers-static-semantics-early-errors *)
+    if allow_yield env then
+      error_at env (loc, Parse_error.UnexpectedReserved)
+    else
+      strict_error_at env (loc, Parse_error.StrictReservedWord)
+  | _ when is_strict_reserved name -> strict_error_at env (loc, Parse_error.StrictReservedWord)
+  | _ when is_reserved name -> error_at env (loc, Parse_error.UnexpectedReserved)
+  | _ -> begin
+    match restricted_error with
+    | Some err when is_restricted name -> strict_error_at env (loc, err)
+    | _ -> ()
+  end
 
 let with_loc ?start_loc fn env =
   let start_loc =
@@ -214,3 +259,7 @@ let with_loc_opt ?start_loc fn env =
   match with_loc ?start_loc fn env with
   | (loc, Some x) -> Some (loc, x)
   | (_, None) -> None
+
+let with_loc_extra ?start_loc fn env =
+  let (loc, (x, extra)) = with_loc ?start_loc fn env in
+  ((loc, x), extra)

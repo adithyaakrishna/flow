@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -125,28 +125,13 @@ type token_sink_result = {
 
 type parse_options = {
   enums: bool;  (** enable parsing of Flow enums *)
-  esproposal_class_instance_fields: bool;  (** enable parsing of class instance fields *)
-  esproposal_class_static_fields: bool;  (** enable parsing of class static fields *)
   esproposal_decorators: bool;  (** enable parsing of decorators *)
-  esproposal_export_star_as: bool;  (** enable parsing of `export * as` syntax *)
-  esproposal_nullish_coalescing: bool;  (** enable parsing of nullish coalescing (`??`) *)
-  esproposal_optional_chaining: bool;  (** enable parsing of optional chaining (`?.`) *)
   types: bool;  (** enable parsing of Flow types *)
   use_strict: bool;  (** treat the file as strict, without needing a "use strict" directive *)
 }
 
 let default_parse_options =
-  {
-    enums = false;
-    esproposal_class_instance_fields = false;
-    esproposal_class_static_fields = false;
-    esproposal_decorators = false;
-    esproposal_export_star_as = false;
-    esproposal_optional_chaining = false;
-    esproposal_nullish_coalescing = false;
-    types = true;
-    use_strict = false;
-  }
+  { enums = false; esproposal_decorators = false; types = true; use_strict = false }
 
 type allowed_super =
   | No_super
@@ -157,10 +142,10 @@ type env = {
   errors: (Loc.t * Parse_error.t) list ref;
   comments: Loc.t Comment.t list ref;
   labels: SSet.t;
-  exports: SSet.t ref;
   last_lex_result: Lex_result.t option ref;
   in_strict_mode: bool;
   in_export: bool;
+  in_export_default: bool;
   in_loop: bool;
   in_switch: bool;
   in_formal_parameters: bool;
@@ -173,6 +158,7 @@ type env = {
   allow_yield: bool;
   allow_await: bool;
   allow_directive: bool;
+  has_simple_parameters: bool;
   allow_super: allowed_super;
   error_callback: (env -> Parse_error.t -> unit) option;
   lex_mode_stack: Lex_mode.t list ref;
@@ -210,10 +196,11 @@ let init_env ?(token_sink = None) ?(parse_options = None) source content =
     errors = ref errors;
     comments = ref [];
     labels = SSet.empty;
-    exports = ref SSet.empty;
     last_lex_result = ref None;
+    has_simple_parameters = true;
     in_strict_mode = parse_options.use_strict;
     in_export = false;
+    in_export_default = false;
     in_loop = false;
     in_switch = false;
     in_formal_parameters = false;
@@ -245,6 +232,8 @@ let lex_mode env = List.hd !(env.lex_mode_stack)
 
 let in_export env = env.in_export
 
+let in_export_default env = env.in_export_default
+
 let comments env = !(env.comments)
 
 let labels env = env.labels
@@ -264,6 +253,8 @@ let allow_await env = env.allow_await
 let allow_directive env = env.allow_directive
 
 let allow_super env = env.allow_super
+
+let has_simple_parameters env = env.has_simple_parameters
 
 let no_in env = env.no_in
 
@@ -289,17 +280,6 @@ let error_at env (loc, e) =
   match env.error_callback with
   | None -> ()
   | Some callback -> callback env e
-
-let record_export env (loc, { Identifier.name = export_name; comments = _ }) =
-  if export_name = "" then
-    ()
-  else
-    (* empty identifiers signify an error, don't export it *)
-    let exports = !(env.exports) in
-    if SSet.mem export_name exports then
-      error_at env (loc, Parse_error.DuplicateExport export_name)
-    else
-      env.exports := SSet.add export_name !(env.exports)
 
 (* Since private fields out of scope are a parse error, we keep track of the declared and used
  * private fields.
@@ -440,6 +420,12 @@ let with_in_export in_export env =
   else
     { env with in_export }
 
+let with_in_export_default in_export_default env =
+  if in_export_default = env.in_export_default then
+    env
+  else
+    { env with in_export_default }
+
 let with_no_call no_call env =
   if no_call = env.no_call then
     env
@@ -465,22 +451,90 @@ let without_error_callback env = { env with error_callback = None }
 
 let add_label env label = { env with labels = SSet.add label env.labels }
 
-let enter_function env ~async ~generator =
+let enter_function env ~async ~generator ~simple_params =
   {
     env with
     in_formal_parameters = false;
+    has_simple_parameters = simple_params;
     in_function = true;
     in_loop = false;
     in_switch = false;
     in_export = false;
+    in_export_default = false;
     labels = SSet.empty;
     allow_await = async;
     allow_yield = generator;
   }
 
-(* #sec-keywords *)
-let is_keyword = function
+(** IdentifierNames that can't be used as Identifiers in strict mode.
+
+    https://tc39.es/ecma262/#sec-strict-mode-of-ecmascript *)
+let is_strict_reserved = function
+  | "implements"
+  | "interface"
+  | "let"
+  | "package"
+  | "private"
+  | "protected"
+  | "public"
+  | "static"
+  | "yield" ->
+    true
+  | _ -> false
+
+(** Tokens which, if parsed as an identifier, are reserved words in strict mode. *)
+let token_is_strict_reserved =
+  let open Token in
+  function
+  | T_IDENTIFIER { value; _ } -> is_strict_reserved value
+  | T_INTERFACE
+  | T_IMPLEMENTS
+  | T_LET
+  | T_PACKAGE
+  | T_PRIVATE
+  | T_PROTECTED
+  | T_PUBLIC
+  | T_STATIC
+  | T_YIELD ->
+    true
+  | _ -> false
+
+(* #sec-strict-mode-of-ecmascript *)
+let is_restricted = function
+  | "eval"
+  | "arguments" ->
+    true
+  | _ -> false
+
+(** Words that are sometimes reserved, and sometimes allowed as identifiers
+    (namely "await" and "yield")
+
+    https://tc39.es/ecma262/#sec-keywords-and-reserved-words *)
+let is_contextually_reserved str_val =
+  match str_val with
   | "await"
+  | "yield" ->
+    true
+  | _ -> false
+
+(** Words that are sometimes reserved, and sometimes allowed as identifiers
+    (namely "await" and "yield")
+
+    https://tc39.es/ecma262/#sec-keywords-and-reserved-words *)
+let token_is_contextually_reserved t =
+  let open Token in
+  match t with
+  | T_IDENTIFIER { raw; _ } -> is_contextually_reserved raw
+  | T_AWAIT
+  | T_YIELD ->
+    true
+  | _ -> false
+
+(** Words that are always reserved (mostly keywords)
+
+    https://tc39.es/ecma262/#sec-keywords-and-reserved-words *)
+let is_reserved str_val =
+  match str_val with
   | "break"
   | "case"
   | "catch"
@@ -492,8 +546,10 @@ let is_keyword = function
   | "delete"
   | "do"
   | "else"
+  | "enum"
   | "export"
   | "extends"
+  | "false"
   | "finally"
   | "for"
   | "function"
@@ -502,25 +558,156 @@ let is_keyword = function
   | "in"
   | "instanceof"
   | "new"
+  | "null"
   | "return"
   | "super"
   | "switch"
   | "this"
   | "throw"
+  | "true"
   | "try"
   | "typeof"
   | "var"
   | "void"
   | "while"
-  | "with"
-  | "yield" ->
+  | "with" ->
     true
   | _ -> false
 
-let token_is_keyword =
-  Token.(
-    function
-    | T_IDENTIFIER { raw; _ } when is_keyword raw -> true
+(** Words that are always reserved (mostly keywords)
+
+    https://tc39.es/ecma262/#sec-keywords-and-reserved-words *)
+let token_is_reserved t =
+  let open Token in
+  match t with
+  | T_IDENTIFIER { raw; _ } -> is_reserved raw
+  | T_BREAK
+  | T_CASE
+  | T_CATCH
+  | T_CLASS
+  | T_CONST
+  | T_CONTINUE
+  | T_DEBUGGER
+  | T_DEFAULT
+  | T_DELETE
+  | T_DO
+  | T_ELSE
+  | T_ENUM
+  | T_EXPORT
+  | T_EXTENDS
+  | T_FALSE
+  | T_FINALLY
+  | T_FOR
+  | T_FUNCTION
+  | T_IF
+  | T_IMPORT
+  | T_IN
+  | T_INSTANCEOF
+  | T_NEW
+  | T_NULL
+  | T_RETURN
+  | T_SUPER
+  | T_SWITCH
+  | T_THIS
+  | T_THROW
+  | T_TRUE
+  | T_TRY
+  | T_TYPEOF
+  | T_VAR
+  | T_VOID
+  | T_WHILE
+  | T_WITH ->
+    true
+  | _ -> false
+
+let is_reserved_type str_val =
+  match str_val with
+  | "any"
+  | "bigint"
+  | "bool"
+  | "boolean"
+  | "empty"
+  | "extends"
+  | "false"
+  | "interface"
+  | "keyof"
+  | "mixed"
+  | "never"
+  | "null"
+  | "number"
+  | "readonly"
+  | "static"
+  | "string"
+  | "symbol"
+  | "true"
+  | "typeof"
+  | "undefined"
+  | "unknown"
+  | "void"
+  | "_" ->
+    true
+  | _ -> false
+
+let token_is_reserved_type t =
+  let open Token in
+  match t with
+  | T_IDENTIFIER { raw; _ } when is_reserved_type raw -> true
+  | T_ANY_TYPE
+  | T_BIGINT_TYPE
+  | T_BOOLEAN_TYPE _
+  | T_EMPTY_TYPE
+  | T_EXTENDS
+  | T_FALSE
+  | T_INTERFACE
+  | T_KEYOF
+  | T_MIXED_TYPE
+  | T_NEVER_TYPE
+  | T_NULL
+  | T_NUMBER_TYPE
+  | T_READONLY
+  | T_STATIC
+  | T_STRING_TYPE
+  | T_SYMBOL_TYPE
+  | T_TRUE
+  | T_TYPEOF
+  | T_UNDEFINED_TYPE
+  | T_UNKNOWN_TYPE
+  | T_VOID_TYPE ->
+    true
+  | _ -> false
+
+let token_is_type_identifier env t =
+  let open Token in
+  match lex_mode env with
+  | Lex_mode.TYPE -> begin
+    match t with
+    | T_IDENTIFIER _ -> true
+    | _ -> false
+  end
+  | Lex_mode.NORMAL -> begin
+    (* Sometimes we peek at type identifiers while in normal lex mode. For
+       example, when deciding whether a `type` token is an identifier or the
+       start of a type declaration, based on whether the following token
+       `is_type_identifier`. *)
+    match t with
+    | T_IDENTIFIER { raw; _ } when is_reserved_type raw -> false
+    (* reserved type identifiers, but these don't appear in NORMAL mode *)
+    | T_ANY_TYPE
+    | T_MIXED_TYPE
+    | T_EMPTY_TYPE
+    | T_NUMBER_TYPE
+    | T_BIGINT_TYPE
+    | T_STRING_TYPE
+    | T_VOID_TYPE
+    | T_SYMBOL_TYPE
+    | T_UNKNOWN_TYPE
+    | T_NEVER_TYPE
+    | T_UNDEFINED_TYPE
+    | T_BOOLEAN_TYPE _
+    | T_NUMBER_SINGLETON_TYPE _
+    | T_BIGINT_SINGLETON_TYPE _
+    (* identifier-ish *)
+    | T_ASYNC
     | T_AWAIT
     | T_BREAK
     | T_CASE
@@ -529,135 +716,142 @@ let token_is_keyword =
     | T_CONST
     | T_CONTINUE
     | T_DEBUGGER
+    | T_DECLARE
     | T_DEFAULT
     | T_DELETE
     | T_DO
     | T_ELSE
+    | T_ENUM
     | T_EXPORT
     | T_EXTENDS
+    | T_FALSE
     | T_FINALLY
     | T_FOR
     | T_FUNCTION
+    | T_IDENTIFIER _
     | T_IF
+    | T_IMPLEMENTS
     | T_IMPORT
     | T_IN
     | T_INSTANCEOF
+    | T_INTERFACE
+    | T_LET
     | T_NEW
+    | T_NULL
+    | T_OF
+    | T_OPAQUE
+    | T_PACKAGE
+    | T_PRIVATE
+    | T_PROTECTED
+    | T_PUBLIC
     | T_RETURN
     | T_SUPER
     | T_SWITCH
     | T_THIS
     | T_THROW
+    | T_TRUE
     | T_TRY
-    | T_TYPEOF
+    | T_TYPE
     | T_VAR
-    | T_VOID
     | T_WHILE
     | T_WITH
     | T_YIELD ->
       true
-    | _ -> false
-  )
-
-(* #sec-future-reserved-words *)
-let is_future_reserved = function
-  | "enum" -> true
-  | _ -> false
-
-let token_is_future_reserved =
-  Token.(
-    function
-    | T_IDENTIFIER { raw; _ } when is_future_reserved raw -> true
-    | T_ENUM -> true
-    | _ -> false
-  )
-
-(* #sec-strict-mode-of-ecmascript *)
-let is_strict_reserved = function
-  | "interface"
-  | "implements"
-  | "package"
-  | "private"
-  | "protected"
-  | "public"
-  | "static"
-  | "yield" ->
-    true
-  | _ -> false
-
-let token_is_strict_reserved =
-  Token.(
-    function
-    | T_IDENTIFIER { raw; _ } when is_strict_reserved raw -> true
-    | T_INTERFACE
-    | T_IMPLEMENTS
-    | T_PACKAGE
-    | T_PRIVATE
-    | T_PROTECTED
-    | T_PUBLIC
+    (* identifier-ish, but not valid types *)
     | T_STATIC
-    | T_YIELD ->
-      true
-    | _ -> false
-  )
+    | T_TYPEOF
+    | T_KEYOF
+    | T_READONLY
+    | T_VOID ->
+      false
+    (* syntax *)
+    | T_LCURLY
+    | T_RCURLY
+    | T_LCURLYBAR
+    | T_RCURLYBAR
+    | T_LPAREN
+    | T_RPAREN
+    | T_LBRACKET
+    | T_RBRACKET
+    | T_SEMICOLON
+    | T_COMMA
+    | T_PERIOD
+    | T_ARROW
+    | T_ELLIPSIS
+    | T_AT
+    | T_POUND
+    | T_CHECKS
+    | T_RSHIFT3_ASSIGN
+    | T_RSHIFT_ASSIGN
+    | T_LSHIFT_ASSIGN
+    | T_BIT_XOR_ASSIGN
+    | T_BIT_OR_ASSIGN
+    | T_BIT_AND_ASSIGN
+    | T_MOD_ASSIGN
+    | T_DIV_ASSIGN
+    | T_MULT_ASSIGN
+    | T_EXP_ASSIGN
+    | T_MINUS_ASSIGN
+    | T_PLUS_ASSIGN
+    | T_NULLISH_ASSIGN
+    | T_AND_ASSIGN
+    | T_OR_ASSIGN
+    | T_ASSIGN
+    | T_PLING_PERIOD
+    | T_PLING_PLING
+    | T_PLING
+    | T_COLON
+    | T_OR
+    | T_AND
+    | T_BIT_OR
+    | T_BIT_XOR
+    | T_BIT_AND
+    | T_EQUAL
+    | T_NOT_EQUAL
+    | T_STRICT_EQUAL
+    | T_STRICT_NOT_EQUAL
+    | T_LESS_THAN_EQUAL
+    | T_GREATER_THAN_EQUAL
+    | T_LESS_THAN
+    | T_GREATER_THAN
+    | T_LSHIFT
+    | T_RSHIFT
+    | T_RSHIFT3
+    | T_PLUS
+    | T_MINUS
+    | T_DIV
+    | T_MULT
+    | T_EXP
+    | T_MOD
+    | T_NOT
+    | T_BIT_NOT
+    | T_INCR
+    | T_DECR
+    | T_EOF ->
+      false
+    (* literals *)
+    | T_NUMBER _
+    | T_BIGINT _
+    | T_STRING _
+    | T_TEMPLATE_PART _
+    | T_REGEXP _
+    (* misc that shouldn't appear in NORMAL mode *)
+    | T_JSX_IDENTIFIER _
+    | T_JSX_TEXT _
+    | T_ERROR _ ->
+      false
+  end
+  | Lex_mode.JSX_TAG
+  | Lex_mode.JSX_CHILD
+  | Lex_mode.TEMPLATE
+  | Lex_mode.REGEXP ->
+    false
 
-(* #sec-strict-mode-of-ecmascript *)
-let is_restricted = function
-  | "eval"
-  | "arguments" ->
-    true
-  | _ -> false
-
-let token_is_restricted =
-  Token.(
-    function
-    | T_IDENTIFIER { raw; _ } when is_restricted raw -> true
-    | _ -> false
-  )
-
-(* #sec-reserved-words *)
-let is_reserved str_val =
-  is_keyword str_val
-  || is_future_reserved str_val
-  ||
-  match str_val with
-  | "null"
-  | "true"
-  | "false" ->
-    true
-  | _ -> false
-
-let token_is_reserved t =
-  token_is_keyword t
-  || token_is_future_reserved t
-  ||
-  match t with
-  | Token.T_IDENTIFIER { raw = "null" | "true" | "false"; _ }
-  | Token.T_NULL
-  | Token.T_TRUE
-  | Token.T_FALSE ->
-    true
-  | _ -> false
-
-let is_reserved_type str_val =
-  match str_val with
-  | "any"
-  | "bool"
-  | "boolean"
-  | "empty"
-  | "false"
-  | "mixed"
-  | "null"
-  | "number"
-  | "bigint"
-  | "static"
-  | "string"
-  | "true"
-  | "typeof"
-  | "void"
-  | "interface"
-  | "extends"
-  | "_" ->
+let token_is_variance token =
+  let open Token in
+  match token with
+  | T_PLUS
+  | T_MINUS ->
     true
   | _ -> false
 
@@ -733,183 +927,20 @@ module Peek = struct
   let ith_is_identifier ~i env =
     match ith_token ~i env with
     | t when token_is_strict_reserved t -> true
-    | t when token_is_future_reserved t -> true
-    | t when token_is_restricted t -> true
-    | T_LET
     | T_TYPE
     | T_OPAQUE
     | T_OF
     | T_DECLARE
     | T_ASYNC
     | T_AWAIT
+    | T_ENUM
     | T_POUND
-    | T_IDENTIFIER _ ->
+    | T_IDENTIFIER _
+    | T_READONLY ->
       true
     | _ -> false
 
-  let ith_is_type_identifier ~i env =
-    match lex_mode env with
-    | Lex_mode.TYPE ->
-      begin
-        match ith_token ~i env with
-        | T_IDENTIFIER _ -> true
-        | _ -> false
-      end
-    | Lex_mode.NORMAL ->
-      (* Sometimes we peek at type identifiers while in normal lex mode. For
-         example, when deciding whether a `type` token is an identifier or the
-         start of a type declaration, based on whether the following token
-         `is_type_identifier`. *)
-      begin
-        match ith_token ~i env with
-        | T_IDENTIFIER { raw; _ } when is_reserved_type raw -> false
-        (* reserved type identifiers, but these don't appear in NORMAL mode *)
-        | T_ANY_TYPE
-        | T_MIXED_TYPE
-        | T_EMPTY_TYPE
-        | T_NUMBER_TYPE
-        | T_BIGINT_TYPE
-        | T_STRING_TYPE
-        | T_VOID_TYPE
-        | T_SYMBOL_TYPE
-        | T_BOOLEAN_TYPE _
-        | T_NUMBER_SINGLETON_TYPE _
-        | T_BIGINT_SINGLETON_TYPE _
-        (* identifier-ish *)
-        | T_ASYNC
-        | T_AWAIT
-        | T_BREAK
-        | T_CASE
-        | T_CATCH
-        | T_CLASS
-        | T_CONST
-        | T_CONTINUE
-        | T_DEBUGGER
-        | T_DECLARE
-        | T_DEFAULT
-        | T_DELETE
-        | T_DO
-        | T_ELSE
-        | T_ENUM
-        | T_EXPORT
-        | T_EXTENDS
-        | T_FALSE
-        | T_FINALLY
-        | T_FOR
-        | T_FUNCTION
-        | T_IDENTIFIER _
-        | T_IF
-        | T_IMPLEMENTS
-        | T_IMPORT
-        | T_IN
-        | T_INSTANCEOF
-        | T_INTERFACE
-        | T_LET
-        | T_NEW
-        | T_NULL
-        | T_OF
-        | T_OPAQUE
-        | T_PACKAGE
-        | T_PRIVATE
-        | T_PROTECTED
-        | T_PUBLIC
-        | T_RETURN
-        | T_SUPER
-        | T_SWITCH
-        | T_THIS
-        | T_THROW
-        | T_TRUE
-        | T_TRY
-        | T_TYPE
-        | T_VAR
-        | T_WHILE
-        | T_WITH
-        | T_YIELD ->
-          true
-        (* identifier-ish, but not valid types *)
-        | T_STATIC
-        | T_TYPEOF
-        | T_VOID ->
-          false
-        (* syntax *)
-        | T_LCURLY
-        | T_RCURLY
-        | T_LCURLYBAR
-        | T_RCURLYBAR
-        | T_LPAREN
-        | T_RPAREN
-        | T_LBRACKET
-        | T_RBRACKET
-        | T_SEMICOLON
-        | T_COMMA
-        | T_PERIOD
-        | T_ARROW
-        | T_ELLIPSIS
-        | T_AT
-        | T_POUND
-        | T_CHECKS
-        | T_RSHIFT3_ASSIGN
-        | T_RSHIFT_ASSIGN
-        | T_LSHIFT_ASSIGN
-        | T_BIT_XOR_ASSIGN
-        | T_BIT_OR_ASSIGN
-        | T_BIT_AND_ASSIGN
-        | T_MOD_ASSIGN
-        | T_DIV_ASSIGN
-        | T_MULT_ASSIGN
-        | T_EXP_ASSIGN
-        | T_MINUS_ASSIGN
-        | T_PLUS_ASSIGN
-        | T_ASSIGN
-        | T_PLING_PERIOD
-        | T_PLING_PLING
-        | T_PLING
-        | T_COLON
-        | T_OR
-        | T_AND
-        | T_BIT_OR
-        | T_BIT_XOR
-        | T_BIT_AND
-        | T_EQUAL
-        | T_NOT_EQUAL
-        | T_STRICT_EQUAL
-        | T_STRICT_NOT_EQUAL
-        | T_LESS_THAN_EQUAL
-        | T_GREATER_THAN_EQUAL
-        | T_LESS_THAN
-        | T_GREATER_THAN
-        | T_LSHIFT
-        | T_RSHIFT
-        | T_RSHIFT3
-        | T_PLUS
-        | T_MINUS
-        | T_DIV
-        | T_MULT
-        | T_EXP
-        | T_MOD
-        | T_NOT
-        | T_BIT_NOT
-        | T_INCR
-        | T_DECR
-        | T_EOF ->
-          false
-        (* literals *)
-        | T_NUMBER _
-        | T_BIGINT _
-        | T_STRING _
-        | T_TEMPLATE_PART _
-        | T_REGEXP _
-        (* misc that shouldn't appear in NORMAL mode *)
-        | T_JSX_IDENTIFIER _
-        | T_JSX_TEXT _
-        | T_ERROR _ ->
-          false
-      end
-    | Lex_mode.JSX_TAG
-    | Lex_mode.JSX_CHILD
-    | Lex_mode.TEMPLATE
-    | Lex_mode.REGEXP ->
-      false
+  let ith_is_type_identifier ~i env = token_is_type_identifier env (ith_token ~i env)
 
   let ith_is_identifier_name ~i env = ith_is_identifier ~i env || ith_is_type_identifier ~i env
 
@@ -945,15 +976,10 @@ let error env e =
   error_at env (loc, e)
 
 let get_unexpected_error ?expected token =
-  if token_is_future_reserved token then
-    Parse_error.UnexpectedReserved
-  else if token_is_strict_reserved token then
-    Parse_error.StrictReservedWord
-  else
-    let unexpected = Token.explanation_of_token token in
-    match expected with
-    | Some expected_msg -> Parse_error.UnexpectedWithExpected (unexpected, expected_msg)
-    | None -> Parse_error.Unexpected unexpected
+  let unexpected = Token.explanation_of_token token in
+  match expected with
+  | Some expected_msg -> Parse_error.UnexpectedWithExpected (unexpected, expected_msg)
+  | None -> Parse_error.Unexpected unexpected
 
 let error_unexpected ?expected env =
   (* So normally we consume the lookahead lex result when Eat.token calls
@@ -966,6 +992,19 @@ let error_unexpected ?expected env =
 
 let error_on_decorators env =
   List.iter (fun decorator -> error_at env (fst decorator, Parse_error.UnsupportedDecorator))
+
+let error_nameless_declaration env kind =
+  let expected =
+    if in_export env then
+      Printf.sprintf
+        "an identifier. When exporting a %s as a named export, you must specify a %s name. Did you mean `export default %s ...`?"
+        kind
+        kind
+        kind
+    else
+      "an identifier"
+  in
+  error_unexpected ~expected env
 
 let strict_error env e = if in_strict_mode env then error env e
 
@@ -1009,11 +1048,9 @@ module Eat = struct
 
   (** [maybe env t] eats the next token and returns [true] if it is [t], else return [false] *)
   let maybe env t =
-    if Token.equal (Peek.token env) t then (
-      token env;
-      true
-    ) else
-      false
+    let is_t = Token.equal (Peek.token env) t in
+    if is_t then token env;
+    is_t
 
   let push_lex_mode env mode =
     env.lex_mode_stack := mode :: !(env.lex_mode_stack);
@@ -1110,6 +1147,10 @@ module Eat = struct
 end
 
 module Expect = struct
+  let get_error env t =
+    let expected = Token.explanation_of_token ~use_article:true t in
+    (Peek.loc env, get_unexpected_error ~expected (Peek.token env))
+
   let error env t =
     let expected = Token.explanation_of_token ~use_article:true t in
     error_unexpected ~expected env
@@ -1118,15 +1159,18 @@ module Expect = struct
     if not (Token.equal (Peek.token env) t) then error env t;
     Eat.token env
 
+  (** [token_maybe env T_FOO] eats a token if it is [T_FOO], and errors without consuming if
+      not. Returns whether it consumed a token, like [Eat.maybe]. *)
+  let token_maybe env t =
+    let ate = Eat.maybe env t in
+    if not ate then error env t;
+    ate
+
   (** [token_opt env T_FOO] eats a token if it is [T_FOO], and errors without consuming if not.
       This differs from [token], which always consumes. Only use [token_opt] when it's ok for
       the parser to not advance, like if you are guaranteed that something else has eaten a
       token. *)
-  let token_opt env t =
-    if not (Token.equal (Peek.token env) t) then
-      error env t
-    else
-      Eat.token env
+  let token_opt env t = ignore (token_maybe env t)
 
   let identifier env name =
     let t = Peek.token env in

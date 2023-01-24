@@ -44,21 +44,21 @@ function qux(x: Breakfast) {
 }
 
 // example 4
-function list(n) {
+type OCamlList = {|kind: 'cons', next: OCamlList|} | {|kind: 'nil'|};
+function list(n: number): OCamlList {
   if (n > 0) return { kind: "cons", next: list(n-1) };
   return { kind: "nil" };
 }
-function length(l) {
+function length(l: OCamlList): number {
   switch (l.kind) {
   case "cons": return 1 + length(l.next);
   default: return 0;
   }
 }
-function check(n) {
+function check(n: number) {
   if (n >= 0) return (n === (length(list(n))));
   return true;
 }
-
 
 // example 5
 var EnumKind = { A: 1, B: 2, C: 3};
@@ -142,15 +142,15 @@ let tests = [
   },
 
   // sentinel props become the RHS
-  function(x: { str: string, num: number, bool: boolean }) {
+  function(x: { str: string, num: number, boolean: boolean }) {
     if (x.str === 'str') {
       (x.str: 'not str'); // error: 'str' !~> 'not str'
     }
     if (x.num === 123) {
       (x.num: 456); // error: 123 !~> 456
     }
-    if (x.bool === true) {
-      (x.bool: false); // error: true !~> false
+    if (x.boolean === true) {
+      (x.boolean: false); // error: true !~> false
     }
     // even if it doesn't exist...
     if (x.badStr === 'bad') { // Error, reading unknown property

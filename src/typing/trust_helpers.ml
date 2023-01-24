@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -32,10 +32,9 @@ let actual_trust cx t =
   Trust_constraint.(
     match expand t with
     | QualifiedTrust trust -> trust
-    | InferredTrust ident ->
-      begin
-        match Context.find_trust_graph cx ident with
-        | TrustResolved trust -> trust
-        | TrustUnresolved bounds -> get_trust bounds
-      end
+    | InferredTrust ident -> begin
+      match Context.find_trust_graph cx ident with
+      | TrustResolved trust -> trust
+      | TrustUnresolved bounds -> get_trust bounds
+    end
   )

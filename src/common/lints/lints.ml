@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -9,10 +9,12 @@ type sketchy_null_kind =
   | SketchyNullBool
   | SketchyNullString
   | SketchyNullNumber
+  | SketchyNullBigInt
   | SketchyNullMixed
   | SketchyNullEnumBool
   | SketchyNullEnumString
   | SketchyNullEnumNumber
+  | SketchyNullEnumBigInt
 
 type sketchy_number_kind = SketchyNumberAnd
 
@@ -23,6 +25,10 @@ type property_assignment_kind =
   | ThisBeforeEverythingInitialized
   | PropertyFunctionCallBeforeEverythingInitialized
 
+type deprecated_type_kind =
+  | DeprecatedBool
+  | DeprecatedStar
+
 type lint_kind =
   | SketchyNull of sketchy_null_kind
   | SketchyNumber of sketchy_number_kind
@@ -30,12 +36,10 @@ type lint_kind =
   | UntypedImport
   | NonstrictImport
   | UnclearType
-  | DeprecatedType
-  | DeprecatedUtility
+  | DeprecatedType of deprecated_type_kind
   | UnsafeGettersSetters
   | UnnecessaryOptionalChain
   | UnnecessaryInvariant
-  | SignatureVerificationFailure
   | ImplicitInexactObject
   | UninitializedInstanceProperty
   | AmbiguousObjectType
@@ -46,6 +50,7 @@ type lint_kind =
   | ThisInExportedFunction
   | MixedImportAndRequire
   | ExportRenamedDefault
+  | UnusedPromiseInAsyncScope
 
 let string_of_sketchy_null_kind = function
   | SketchyNullBool
@@ -57,10 +62,17 @@ let string_of_sketchy_null_kind = function
   | SketchyNullNumber
   | SketchyNullEnumNumber ->
     "sketchy-null-number"
+  | SketchyNullBigInt
+  | SketchyNullEnumBigInt ->
+    "sketchy-null-bigint"
   | SketchyNullMixed -> "sketchy-null-mixed"
 
 let string_of_sketchy_number_kind = function
   | SketchyNumberAnd -> "sketchy-number-and"
+
+let string_of_deprecated_type_kind = function
+  | DeprecatedBool -> "deprecated-type-bool"
+  | DeprecatedStar -> "deprecated-type-star"
 
 let string_of_kind = function
   | SketchyNull kind -> string_of_sketchy_null_kind kind
@@ -69,12 +81,10 @@ let string_of_kind = function
   | UntypedImport -> "untyped-import"
   | NonstrictImport -> "nonstrict-import"
   | UnclearType -> "unclear-type"
-  | DeprecatedType -> "deprecated-type"
-  | DeprecatedUtility -> "deprecated-utility"
+  | DeprecatedType kind -> string_of_deprecated_type_kind kind
   | UnsafeGettersSetters -> "unsafe-getters-setters"
   | UnnecessaryOptionalChain -> "unnecessary-optional-chain"
   | UnnecessaryInvariant -> "unnecessary-invariant"
-  | SignatureVerificationFailure -> "signature-verification-failure"
   | ImplicitInexactObject -> "implicit-inexact-object"
   | UninitializedInstanceProperty -> "uninitialized-instance-property"
   | AmbiguousObjectType -> "ambiguous-object-type"
@@ -85,6 +95,7 @@ let string_of_kind = function
   | ThisInExportedFunction -> "this-in-exported-function"
   | MixedImportAndRequire -> "mixed-import-and-require"
   | ExportRenamedDefault -> "export-renamed-default"
+  | UnusedPromiseInAsyncScope -> "unused-promise-in-async-scope"
 
 let kinds_of_string = function
   | "sketchy-null" ->
@@ -93,14 +104,17 @@ let kinds_of_string = function
         SketchyNull SketchyNullBool;
         SketchyNull SketchyNullString;
         SketchyNull SketchyNullNumber;
+        SketchyNull SketchyNullBigInt;
         SketchyNull SketchyNullMixed;
         SketchyNull SketchyNullEnumBool;
         SketchyNull SketchyNullEnumString;
         SketchyNull SketchyNullEnumNumber;
+        SketchyNull SketchyNullEnumBigInt;
       ]
   | "sketchy-null-bool" -> Some [SketchyNull SketchyNullBool; SketchyNull SketchyNullEnumBool]
   | "sketchy-null-string" -> Some [SketchyNull SketchyNullString; SketchyNull SketchyNullEnumString]
   | "sketchy-null-number" -> Some [SketchyNull SketchyNullNumber; SketchyNull SketchyNullEnumNumber]
+  | "sketchy-null-bigint" -> Some [SketchyNull SketchyNullBigInt; SketchyNull SketchyNullEnumBigInt]
   | "sketchy-null-mixed" -> Some [SketchyNull SketchyNullMixed]
   | "sketchy-number" -> Some [SketchyNumber SketchyNumberAnd]
   | "sketchy-number-and" -> Some [SketchyNumber SketchyNumberAnd]
@@ -108,12 +122,12 @@ let kinds_of_string = function
   | "nonstrict-import" -> Some [NonstrictImport]
   | "untyped-import" -> Some [UntypedImport]
   | "unclear-type" -> Some [UnclearType]
-  | "deprecated-type" -> Some [DeprecatedType]
-  | "deprecated-utility" -> Some [DeprecatedUtility]
+  | "deprecated-type" -> Some [DeprecatedType DeprecatedBool; DeprecatedType DeprecatedStar]
+  | "deprecated-type-bool" -> Some [DeprecatedType DeprecatedBool]
+  | "deprecated-type-star" -> Some [DeprecatedType DeprecatedStar]
   | "unsafe-getters-setters" -> Some [UnsafeGettersSetters]
   | "unnecessary-optional-chain" -> Some [UnnecessaryOptionalChain]
   | "unnecessary-invariant" -> Some [UnnecessaryInvariant]
-  | "signature-verification-failure" -> Some [SignatureVerificationFailure]
   | "implicit-inexact-object" -> Some [ImplicitInexactObject]
   | "ambiguous-object-type" -> Some [AmbiguousObjectType]
   | "require-explicit-enum-switch-cases" -> Some [RequireExplicitEnumSwitchCases]
@@ -124,6 +138,7 @@ let kinds_of_string = function
   | "this-in-exported-function" -> Some [ThisInExportedFunction]
   | "mixed-import-and-require" -> Some [MixedImportAndRequire]
   | "export-renamed-default" -> Some [ExportRenamedDefault]
+  | "unused-promise-in-async-scope" -> Some [UnusedPromiseInAsyncScope]
   | _ -> None
 
 module LintKind = struct

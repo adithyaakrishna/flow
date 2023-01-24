@@ -1,11 +1,11 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *
  * @flow
- * @noformat
+ * @format
  */
 
 import type {Context} from './getContext';
@@ -48,7 +48,8 @@ function expandComment(
 ) {
   const length = contents.length;
 
-  const emptyFlowlintRegex = /^[ \t\n\r*]*flowlint(-line|-next-line)?[ \t\n\r*]*$/;
+  const emptyFlowlintRegex =
+    /^[ \t\n\r*]*flowlint(-line|-next-line)?[ \t\n\r*]*$/;
   if (commentAST && isLintSuppression(commentAST)) {
     // We're operating on a flowlint comment
 
@@ -153,14 +154,16 @@ function expandComment(
 }
 
 function findStartOfLine(contents: Buffer, startOffset: number): number {
-  let start = startOffset;
+  // if startOffset is already a newline, that's not the start of the line,
+  // it's the end of the line. so start from the character before.
+  let start = startOffset - 1;
   while (start >= 0 && !bufferCharAt(contents, start).match(newlineRegex)) {
     start--;
   }
   return start + 1;
 }
 
-function findEndOfLine(contents: Buffer, startOffset): number {
+function findEndOfLine(contents: Buffer, startOffset: number): number {
   let start = startOffset;
   while (
     start < contents.length &&
@@ -254,14 +257,20 @@ function addCommentToText(
     const part1 = line.substr(0, start_col);
     const match = part1.match(/^ */);
     const padding = match ? match[0] + '  ' : '  ';
-    const part2 = padding + line.substr(start_col);
-    const newCode = []
-      // $FlowFixMe unsealed object but should just be {||}
-      .concat([part1], formatComment(comments, part2, {}), [part2])
-      .join('\n');
+    const part2 = line.substr(start_col);
+
+    // $FlowFixMe[incompatible-exact] unsealed object but should just be {||}
+    const newCodeParts = [part1, ...formatComment(comments, padding, {})];
+
+    // If the remainder of the line is empty we don't want to add a newline
+    // since one already exists after the opening expression.
+    if (part2.trim() !== '') {
+      newCodeParts.push(padding + part2);
+    }
+
     return Buffer.concat([
       contents.slice(0, start),
-      Buffer.from(newCode),
+      Buffer.from(newCodeParts.join('\n')),
       contents.slice(endOfLine),
     ]);
   } else if (inJSX && ast.type === 'JSXText') {

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -32,7 +32,7 @@ module Reordered_argument_map (S : WrappedMap.S) = struct
 
   let merge m1 m2 ~f = merge f m1 m2
 
-  let filter m ~f = filter m f
+  let filter m ~f = filter m ~f
 
   let partition m ~f = partition f m
 end

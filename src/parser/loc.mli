@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -21,6 +21,8 @@ type t = {
 val none : t
 
 val is_none : t -> bool
+
+val is_none_ignore_source : t -> bool
 
 val btwn : t -> t -> t
 
@@ -44,6 +46,8 @@ val lines_intersect : t -> t -> bool
 val pos_cmp : position -> position -> int
 
 val span_compare : t -> t -> int
+
+val compare_ignore_source : t -> t -> int
 
 val compare : t -> t -> int
 

@@ -1,41 +1,42 @@
-Error ----------------------------------------------------------------------------------------------- import_meta.js:6:2
+Error ----------------------------------------------------------------------------------------------- import_meta.js:7:2
 
 Cannot cast `import.meta` to number literal `1` because `Import$Meta` [1] is incompatible with number literal `1` [2].
 [incompatible-cast]
 
-   import_meta.js:6:2
-      6| (import.meta: 1); // Error
+   import_meta.js:7:2
+      7| (import.meta: 1); // Error
           ^^^^^^^^^^^
 
 References:
-   <BUILTINS>/core.js:2577:20
+   <BUILTINS>/core.js:2619:20
                             v
-   2577| type Import$Meta = {
-   2578|   url?: string,
-   2579|   ...
-   2580| };
+   2619| type Import$Meta = {
+   2620|   [string]: mixed,
+   2621|   url?: string,
+   2622|   ...
+   2623| };
          ^ [1]
-   import_meta.js:6:15
-      6| (import.meta: 1); // Error
+   import_meta.js:7:15
+      7| (import.meta: 1); // Error
                        ^ [2]
 
 
-Error ---------------------------------------------------------------------------------------------- import_meta.js:7:13
+Error ----------------------------------------------------------------------------------------------- import_meta.js:8:2
 
-Cannot get `import.meta.xxx` because property `xxx` is missing in `Import$Meta` [1]. [prop-missing]
+Cannot cast `import.meta.XXX` to number literal `1` because mixed [1] is incompatible with number literal `1` [2].
+[incompatible-cast]
 
-   import_meta.js:7:13
-      7| import.meta.xxx; // Error
-                     ^^^
+   import_meta.js:8:2
+      8| (import.meta.XXX: 1); // Error
+          ^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/core.js:2577:20
-                            v
-   2577| type Import$Meta = {
-   2578|   url?: string,
-   2579|   ...
-   2580| };
-         ^ [1]
+   <BUILTINS>/core.js:2620:13
+   2620|   [string]: mixed,
+                     ^^^^^ [1]
+   import_meta.js:8:19
+      8| (import.meta.XXX: 1); // Error
+                           ^ [2]
 
 
 Error ------------------------------------------------------------------------------------------------ new_target.js:5:4

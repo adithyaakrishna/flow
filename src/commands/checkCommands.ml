@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -72,7 +72,7 @@ let format_errors
           suppressed_errors
       in
       let () =
-        Errors.Cli_output.format_errors
+        Errors.Cli_output.print_errors
           ~out_channel:stdout
           ~flags
           ~strip_root
@@ -136,15 +136,16 @@ module CheckCommand = struct
       let lazy_mode = Some FlowConfig.Non_lazy in
       (* Saved state doesn't make sense for `flow check`, so disable it. *)
       let saved_state_options_flags =
-        CommandUtils.Saved_state_flags.
-          {
-            (* None would mean we would just use the value in the .flowconfig, if available.
-             * Instead, let's override that and turn off saved state entirely. *)
-            saved_state_fetcher = Some Options.Dummy_fetcher;
-            saved_state_force_recheck = false;
-            saved_state_no_fallback = false;
-          }
-        
+        {
+          CommandUtils.Saved_state_flags.saved_state_allow_reinit = None;
+          (* None would mean we would just use the value in the .flowconfig, if available.
+           * Instead, let's override that and turn off saved state entirely. *)
+          saved_state_fetcher = Some Options.Dummy_fetcher;
+          saved_state_force_recheck = false;
+          saved_state_no_fallback = false;
+          saved_state_skip_version_check = false;
+          saved_state_verify = false;
+        }
       in
 
       make_options
@@ -175,7 +176,6 @@ module CheckCommand = struct
       format_errors ~printer ~client_include_warnings ~offset_kind options
     in
     let (errors, warnings) = Server.check_once options ~init_id ~shared_mem_config ~format_errors in
-    Flow_server_profile.print_url ();
     Exit.exit
       (get_check_or_status_exit_code errors warnings error_flags.Errors.Cli_output.max_warnings)
 

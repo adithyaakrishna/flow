@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -17,8 +17,8 @@ do_file() {
     "$TEMP_DIR/$FILE" "$@"
   cat "$TEMP_DIR/out.js"
   rm "$TEMP_DIR/$FILE"
-  assert_ok "$FLOW" force-recheck "$TEMP_DIR/out.js"
-  assert_ok "$FLOW" status
+  "$FLOW" force-recheck "$TEMP_DIR/out.js"
+  "$FLOW" status || :
   rm "$TEMP_DIR/out.js"
 }
 

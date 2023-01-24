@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -17,7 +17,7 @@ module Ast = Flow_ast
    lookups from an id base
 *)
 
-module Make (Env : Env_sig.S) = struct
+module Keys = struct
   let rec key ~allow_optional =
     let open Ast.Expression in
     function
@@ -67,33 +67,12 @@ module Make (Env : Env_sig.S) = struct
         | Some key -> Some (base, Key.Elem key :: chain)
         | None -> None)
       | None -> None)
-
-  let key_of_pattern ~allow_optional patt =
-    match patt with
-    | (_, Ast.Pattern.Identifier { Ast.Pattern.Identifier.name; _ }) -> key_of_identifier name
-    | (_, Ast.Pattern.Expression (_, Ast.Expression.Member member)) ->
-      key_of_member ~allow_optional member
-    | ( _,
-        Ast.Pattern.Expression
-          (_, Ast.Expression.OptionalMember { Ast.Expression.OptionalMember.member; _ })
-      ) ->
-      key_of_member ~allow_optional member
-    | (_, Ast.Pattern.Array _)
-    | (_, Ast.Pattern.Object _) ->
-      (* other LHSes unsupported currently/here *)
-      None
-    | (_, Ast.Pattern.Expression _) ->
-      (* non-member expression patterns are bogus *)
-      None
-
-  (* get type refinement for expression, if it exists *)
-  let get ~allow_optional cx expr loc =
-    match key ~allow_optional expr with
-    | Some k -> Env.get_refinement cx k loc
-    | None -> None
-
-  let get_of_pattern ~allow_optional cx patt loc =
-    match key_of_pattern ~allow_optional patt with
-    | Some k -> Env.get_refinement cx k loc
-    | None -> None
 end
+
+include Keys
+
+(* get type refinement for expression, if it exists *)
+let get ~allow_optional cx expr loc =
+  match key ~allow_optional expr with
+  | Some k -> Env.get_refinement cx k loc
+  | None -> None

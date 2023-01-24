@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -34,12 +34,12 @@ let spec =
                "File containing list of files or directories to compute coverage for, one per line. If -, the list is read from standard input."
         |> flag
              "--show-all"
-             no_arg
+             truthy
              ~doc:
                "Whether to output the coverage for all files. If not specified, this command will only print coverage for 50 files. "
         |> flag
              "--show-trust"
-             no_arg
+             truthy
              ~doc:"EXPERIMENTAL: Whether to include trust information in output"
         |> anon "FILE..." (list_of string)
       );
@@ -206,7 +206,7 @@ let main
   let batch =
     get_filenames_from_input input files |> Base.List.map ~f:(Path.make %> Path.to_string)
   in
-  let input = Base.Option.map (Base.List.hd batch) (fun x -> File_input.FileName x) in
+  let input = Base.Option.map (Base.List.hd batch) ~f:(fun x -> File_input.FileName x) in
   let root = get_the_root ~base_flags ?input root in
   (* pretty implies json *)
   let json = json || pretty in

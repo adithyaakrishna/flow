@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -23,12 +23,12 @@ exception Parse_error of string
 
 let version_of_string str =
   let lexbuf = Lexing.from_string str in
-  try Semver_parser.version Semver_lexer.token lexbuf with
+  try Semver_parser.version_top Semver_lexer.token lexbuf with
   | Parsing.Parse_error -> raise (Parse_error ("Invalid version number: " ^ str))
 
 let range_of_string str =
   let lexbuf = Lexing.from_string str in
-  try Semver_parser.range Semver_lexer.token lexbuf with
+  try Semver_parser.range_top Semver_lexer.token lexbuf with
   | Parsing.Parse_error -> raise (Parse_error ("Invalid range: " ^ str))
 
 let is_valid_range range =

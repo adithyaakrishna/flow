@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -58,7 +58,7 @@ let run_interrupter limit =
         | _ ->
           let written = Unix.write_substring fd_out "!" 0 1 in
           assert (written = 1);
-          aux (Base.Option.map x (fun x -> x - 1))
+          aux (Base.Option.map x ~f:(fun x -> x - 1))
       in
       aux limit
     | pid -> pid

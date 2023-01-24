@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,6 +7,7 @@
 
 open OUnit2
 open Test_utils
+open Loc_collections
 
 let indent_len str =
   let len = String.length str in
@@ -30,16 +31,7 @@ let dedent_trim str =
   String.concat "\n" lines
 
 let parse contents =
-  let parse_options =
-    Some
-      {
-        Parser_env.default_parse_options with
-        Parser_env.enums = true;
-        Parser_env.esproposal_class_instance_fields = true;
-        Parser_env.esproposal_class_static_fields = true;
-        Parser_env.esproposal_export_star_as = true;
-      }
-  in
+  let parse_options = Some Parser_env.{ default_parse_options with enums = true } in
   let (ast, _errors) = Parser_flow.program ~parse_options (dedent_trim contents) in
   ast
 
@@ -49,7 +41,7 @@ let print_providers prov =
   | Some provider_locs ->
     Utils_js.spf
       "[%s]"
-      (Loc_collections.LocSet.elements provider_locs
+      (Loc_collections.LocMap.keys provider_locs
       |> Base.List.map ~f:(Loc.debug_to_string ~include_source:false)
       |> String.concat "], ["
       )
@@ -57,13 +49,26 @@ let print_providers prov =
 let print_providers_of_def prov =
   match prov with
   | None -> "[]"
-  | Some (_, provider_locs) ->
+  | Some { Provider_api.LocProviders.providers = provider_locs; array_providers = arr_prov_locs; _ }
+    ->
     Utils_js.spf
-      "[%s]"
+      "[%s]%s"
       (Base.List.map
-         ~f:(fun r -> Loc.debug_to_string ~include_source:false (Reason.poly_loc_of_reason r))
+         ~f:(fun { Provider_api.LocProviders.reason = r; _ } -> Reason.poly_loc_of_reason r)
          provider_locs
+      |> Base.List.map ~f:(Loc.debug_to_string ~include_source:false)
       |> String.concat "], ["
+      )
+      ( if LocSet.cardinal arr_prov_locs = 0 then
+        ""
+      else
+        " array providers: ["
+        ^ (Base.List.map
+             ~f:(fun l -> Loc.debug_to_string ~include_source:false l)
+             (LocSet.elements arr_prov_locs)
+          |> String.concat "], ["
+          )
+        ^ "]"
       )
 
 let mk_provider_test var contents expected_msg ctxt =
@@ -699,4 +704,101 @@ x = 'a'; // p
     w = 42;
          "
                "[(5, 8) to (5, 9)]";
+         "declared_function"
+         >:: mk_provider_loc_test
+               (mk_loc (2, 17) (2, 18))
+               "
+declare function f(): number;
+declare function f(x: string): string;
+function f(x: any): any { return null }
+         "
+               "[(1, 17) to (1, 18)], [(2, 17) to (2, 18)]";
+         "arr1"
+         >:: mk_provider_loc_test
+               (mk_loc (1, 4) (1, 5))
+               "
+var x = [];
+x.push(42);
+x.push(100);
+         "
+               "[(1, 4) to (1, 5)] array providers: [(2, 7) to (2, 9)]";
+         "arr2"
+         >:: mk_provider_loc_test
+               (mk_loc (1, 4) (1, 5))
+               "
+var x = [];
+x.push(42);
+x = [100]
+         "
+               "[(1, 4) to (1, 5)] array providers: [(2, 7) to (2, 9)]";
+         "arr3"
+         >:: mk_provider_loc_test
+               (mk_loc (1, 4) (1, 5))
+               "
+var x = [];
+x = [100]
+x.push(42);
+         "
+               "[(1, 4) to (1, 5)], [(2, 0) to (2, 1)]";
+         "arr4"
+         >:: mk_provider_loc_test
+               (mk_loc (1, 4) (1, 5))
+               "
+var x = [];
+function f() {
+      x.push(1)
+}
+x.push(2)
+         "
+               "[(1, 4) to (1, 5)] array providers: [(5, 7) to (5, 8)]";
+         "arr5"
+         >:: mk_provider_loc_test
+               (mk_loc (3, 4) (3, 11))
+               "
+declare var noop : <T>(arr: Array<Array<T>>) => void;
+declare var arr : Array<Array<?string>>;
+let new_arr = [];
+arr.forEach(x => { new_arr.push(x) });
+new_arr = new_arr.filter(Boolean);
+noop<string>(new_arr);
+         "
+               "[(3, 4) to (3, 11)] array providers: [(4, 32) to (4, 33)]";
+         "arr6"
+         >:: mk_provider_loc_test
+               (mk_loc (1, 4) (1, 5))
+               "
+var x = [];
+function f() {
+      x = [10]
+}
+x[0] = 2
+         "
+               "[(1, 4) to (1, 5)] array providers: [(5, 7) to (5, 8)]";
+         "arr7"
+         >:: mk_provider_loc_test
+               (mk_loc (1, 4) (1, 5))
+               "
+var x = [];
+x = [10];
+         "
+               "[(1, 4) to (1, 5)], [(2, 0) to (2, 1)]";
+         "arr8"
+         >:: mk_provider_loc_test
+               (mk_loc (1, 4) (1, 5))
+               "
+var x = [];
+x.push(42);
+x = [10];
+         "
+               "[(1, 4) to (1, 5)] array providers: [(2, 7) to (2, 9)]";
+         "arr9"
+         >:: mk_provider_loc_test
+               (mk_loc (2, 6) (2, 7))
+               "
+function foo() {
+  var x = [];
+  x.push(42);
+}
+         "
+               "[(2, 6) to (2, 7)] array providers: [(3, 9) to (3, 11)]";
        ]

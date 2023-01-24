@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -12,11 +12,31 @@
 %token <string> ID
 %token <string> NR
 
-%start version comparator range
-%type <Semver_version.t> version
 %type <Semver_comparator.t> comparator
-%type <Semver_range.t> range
+%type <Semver_version.identifier list> identifier_list prerelease build
+%type <Semver_version.identifier> identifier_part
+%type <int> number part
+%type <Semver_comparator.op option> op
+%type <Semver_range.part list> range
+%type <Semver_range.part> range_part
+%type <Semver_version.t> version
+
+%start version_top comparator_top range_top range_top
+%type <Semver_version.t> version_top
+%type <Semver_comparator.t> comparator_top
+%type <Semver_range.t> range_top
 %%
+
+version_top:
+  version EOF { $1 }
+;
+comparator_top:
+  comparator EOF { $1 }
+;
+range_top:
+  range EOF { $1 }
+;
+
 version:
   number part part prerelease build {
     Semver_version.({

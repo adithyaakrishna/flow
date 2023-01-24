@@ -1,6 +1,6 @@
 // @flow
 
-function test(a: string, b: number): number {
+function test(this: number | string, a: string, b: number): number {
   return this.length; // expect []/"" this
 }
 
@@ -18,10 +18,10 @@ test.call("", "", ""); // error: string ~> number (2nd arg)
 test.call("", 0, 0); // error: number ~> string (1st arg)
 
 // resolve args array from tvar
-function f(args) { test.call("", args[0], args[1]) }
+function f(args: Array<(number | string)>) { test.call("", args[0], args[1]) } // error: args[0], args[1] mismatch
 f(["", 0]); // OK
-f(["", ""]); // error: string ~> number (2nd arg)
-f([0, 0]); // error: number ~> string (1st arg)
+f(["", ""]); // OK
+f([0, 0]); // OK
 
 // expect 3 errors:
 // - lookup length on Number (0 used as `this`)
@@ -53,7 +53,7 @@ let tests = [
     f({x: 234}); // error, 234 !~> 123
   },
 
-  // bool literal errors track use ops
+  // boolean literal errors track use ops
   function() {
     function f(y: { x: false }): void {}
     f({x: true}); // error, true !~> false

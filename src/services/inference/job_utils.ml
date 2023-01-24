@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -17,10 +17,10 @@ let out_of_memory ~options ~start_rss =
       rss_total - start_rss > Options.max_rss_bytes_for_check_per_worker options
     | Error _ -> false)
 
-(* Check as many files as it can before it hits the timeout. The timeout is soft,
-* so the file which exceeds the timeout won't be canceled. We expect most buckets
-* to not hit the timeout *)
-let rec job_helper ~check ~post_check ~options ~start_time ~start_rss acc = function
+(** Check as many files as it can before it hits the timeout. The timeout is soft,
+  so the file which exceeds the timeout won't be canceled. We expect most buckets
+  to not hit the timeout *)
+let rec job_helper ~check ~options ~start_time ~start_rss acc = function
   | [] -> (acc, [])
   | unfinished_files when out_of_time ~options ~start_time ->
     Hh_logger.debug
@@ -36,24 +36,24 @@ let rec job_helper ~check ~post_check ~options ~start_time ~start_rss acc = func
     (acc, unfinished_files)
   | file :: rest ->
     let result =
-      match check file |> post_check file with
+      match check file with
       | Ok (Some (_, acc)) -> Ok (Some acc)
       | (Ok None | Error _) as result -> result
     in
-    job_helper ~check ~post_check ~options ~start_time ~start_rss ((file, result) :: acc) rest
+    job_helper ~check ~options ~start_time ~start_rss ((file, result) :: acc) rest
 
-let job ~post_check ~reader ~options acc files =
+let mk_job ~mk_check ~options () acc files =
   let start_time = Unix.gettimeofday () in
   let start_rss =
     match ProcFS.status_for_pid (Unix.getpid ()) with
     | Ok { ProcFS.rss_total; _ } -> Some rss_total
     | Error _ -> None
   in
-  let check = Merge_service.mk_check options ~reader () in
-  job_helper ~check ~post_check ~options ~start_time ~start_rss acc files
+  let check = mk_check () in
+  job_helper ~check ~options ~start_time ~start_rss acc files
 
-(* A stateful (next, merge) pair. This lets us re-queue unfinished files which are returned
-* when a bucket times out *)
+(** A stateful (next, merge) pair. This lets us re-queue unfinished files which are returned
+  when a bucket times out *)
 let mk_next ~intermediate_result_callback ~max_size ~workers ~files =
   let total_count = List.length files in
   let todo = ref (files, total_count) in
@@ -61,7 +61,8 @@ let mk_next ~intermediate_result_callback ~max_size ~workers ~files =
   let num_workers = max 1 (Base.Option.value_map workers ~default:1 ~f:List.length) in
   let status_update () =
     MonitorRPC.status_update
-      ServerStatus.(Checking_progress { total = Some total_count; finished = !finished_count })
+      ~event:
+        ServerStatus.(Checking_progress { total = Some total_count; finished = !finished_count })
   in
   let next () =
     let (remaining_files, remaining_count) = !todo in

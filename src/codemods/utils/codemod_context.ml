@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -29,7 +29,7 @@ module Typed = struct
   let ty_at_loc norm_opts ccx loc =
     let { full_cx; file; file_sig; typed_ast; _ } = ccx in
     let aloc = ALoc.of_loc loc in
-    match Typed_ast_utils.find_exact_match_annotation typed_ast aloc with
+    match Typed_ast_utils.find_exact_match_annotation full_cx typed_ast aloc with
     | None -> Error MissingTypeAnnotation
     | Some scheme ->
       let genv = Ty_normalizer_env.mk_genv ~full_cx ~file ~file_sig ~typed_ast in
@@ -44,6 +44,25 @@ module Typed = struct
   let context ccx = ccx.full_cx
 
   let typed_ast ccx = ccx.typed_ast
+
+  let lint_severities ccx =
+    let { docblock; metadata; options; _ } = ccx in
+    let metadata = Context.docblock_overrides docblock metadata in
+    let { Context.strict; strict_local; _ } = metadata in
+    if strict || strict_local then
+      StrictModeSettings.fold
+        (fun lint_kind lint_severities ->
+          LintSettings.set_value lint_kind (Severity.Err, None) lint_severities)
+        (Options.strict_mode options)
+        (Options.lint_severities options)
+    else
+      Options.lint_severities options
+
+  let flowfixme_ast ~lint_severities ccx =
+    let { options; _ } = ccx in
+    let suppress_types = Options.suppress_types options in
+    let exact_by_default = Options.exact_by_default options in
+    Insert_type_utils.Builtins.flowfixme_ast ~lint_severities ~suppress_types ~exact_by_default
 end
 
 module Untyped = struct

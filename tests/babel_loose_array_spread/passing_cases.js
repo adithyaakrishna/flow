@@ -14,10 +14,10 @@ f(...b);
 f.apply(null, b);
 f.bind(null, ...b);
 
-function f(...args) {}
+function f(...args: Array<mixed>) {}
 
 declare var compose: $Compose;
-compose(...[x => x, x => x]);
+compose(...[(x: mixed) => x, (x: mixed) => x]);
 
 const c: $ReadOnlyArray<number> = [4,5,6];
 [...c];

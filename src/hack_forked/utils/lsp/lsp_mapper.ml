@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -26,7 +26,6 @@ type t = {
   of_configuration_params: t -> Configuration.params -> Configuration.params;
   of_configuration_result: t -> Configuration.result -> Configuration.result;
   of_connection_status_params: t -> ConnectionStatus.params -> ConnectionStatus.params;
-  of_definition_location: t -> DefinitionLocation.t -> DefinitionLocation.t;
   of_definition_params: t -> Definition.params -> Definition.params;
   of_definition_result: t -> Definition.result -> Definition.result;
   of_diagnostic: t -> PublishDiagnostics.diagnostic -> PublishDiagnostics.diagnostic;
@@ -67,6 +66,7 @@ type t = {
   of_hover_result: t -> Hover.result -> Hover.result;
   of_initialize_params: t -> Initialize.params -> Initialize.params;
   of_initialize_result: t -> Initialize.result -> Initialize.result;
+  of_insert_replace_edit: t -> InsertReplaceEdit.t -> InsertReplaceEdit.t;
   of_log_message_params: t -> LogMessage.params -> LogMessage.params;
   of_lsp_message: t -> lsp_message -> lsp_message;
   of_lsp_notification: t -> lsp_notification -> lsp_notification;
@@ -95,6 +95,10 @@ type t = {
   of_text_document_position_params:
     t -> TextDocumentPositionParams.t -> TextDocumentPositionParams.t;
   of_text_edit: t -> TextEdit.t -> TextEdit.t;
+  of_text_edit_or_insert_replace_edit:
+    t ->
+    [ `TextEdit of TextEdit.t | `InsertReplaceEdit of InsertReplaceEdit.t ] ->
+    [ `TextEdit of TextEdit.t | `InsertReplaceEdit of InsertReplaceEdit.t ];
   of_type_coverage_params: t -> TypeCoverage.params -> TypeCoverage.params;
   of_type_coverage_result: t -> TypeCoverage.result -> TypeCoverage.result;
   of_type_definition_params: t -> TypeDefinition.params -> TypeDefinition.params;
@@ -165,16 +169,23 @@ let default_mapper =
              kind;
              detail;
              documentation;
+             tags;
              preselect;
              sortText;
              filterText;
              insertText;
              insertTextFormat;
-             textEdits;
+             textEdit;
+             additionalTextEdits;
              command;
              data;
            } ->
-        let textEdits = Base.List.map ~f:(mapper.of_text_edit mapper) textEdits in
+        let textEdit =
+          Base.Option.map ~f:(mapper.of_text_edit_or_insert_replace_edit mapper) textEdit
+        in
+        let additionalTextEdits =
+          Base.List.map ~f:(mapper.of_text_edit mapper) additionalTextEdits
+        in
         let command = Base.Option.map ~f:(mapper.of_command mapper) command in
         {
           Completion.label;
@@ -182,12 +193,14 @@ let default_mapper =
           kind;
           detail;
           documentation;
+          tags;
           preselect;
           sortText;
           filterText;
           insertText;
           insertTextFormat;
-          textEdits;
+          textEdit;
+          additionalTextEdits;
           command;
           data;
         });
@@ -239,12 +252,9 @@ let default_mapper =
           relatedInformation;
           relatedLocations;
         });
-    of_definition_location =
-      (fun mapper { DefinitionLocation.location; title } ->
-        { DefinitionLocation.location = mapper.of_location mapper location; title });
     of_definition_params = (fun mapper t -> mapper.of_text_document_position_params mapper t);
     of_definition_result =
-      (fun mapper results -> Base.List.map ~f:(mapper.of_definition_location mapper) results);
+      (fun mapper results -> Base.List.map ~f:(mapper.of_location mapper) results);
     of_did_change_configuration_params =
       (fun _mapper { DidChangeConfiguration.settings } -> { DidChangeConfiguration.settings });
     of_did_change_content_change_event =
@@ -376,9 +386,14 @@ let default_mapper =
           trace;
         });
     of_initialize_result =
-      (fun _mapper { Initialize.server_capabilities } ->
+      (fun _mapper { Initialize.server_capabilities; Initialize.server_info } ->
         (* TODO? Could add visitors for all of these capabilities *)
-        { Initialize.server_capabilities });
+        { Initialize.server_capabilities; Initialize.server_info });
+    of_insert_replace_edit =
+      (fun mapper { InsertReplaceEdit.newText; insert; replace } ->
+        let insert = mapper.of_range mapper insert in
+        let replace = mapper.of_range mapper replace in
+        { InsertReplaceEdit.newText; insert; replace });
     of_log_message_params =
       (fun _mapper { LogMessage.type_; message } -> { LogMessage.type_; message });
     of_lsp_message =
@@ -597,6 +612,11 @@ let default_mapper =
       (fun mapper { TextEdit.range; newText } ->
         let range = mapper.of_range mapper range in
         { TextEdit.range; newText });
+    of_text_edit_or_insert_replace_edit =
+      (fun mapper edit ->
+        match edit with
+        | `TextEdit edit -> `TextEdit (mapper.of_text_edit mapper edit)
+        | `InsertReplaceEdit edit -> `InsertReplaceEdit (mapper.of_insert_replace_edit mapper edit));
     of_type_coverage_params =
       (fun mapper { TypeCoverage.textDocument } ->
         let textDocument = mapper.of_text_document_identifier mapper textDocument in
@@ -614,7 +634,7 @@ let default_mapper =
     of_type_definition_params =
       (fun mapper params -> mapper.of_text_document_position_params mapper params);
     of_type_definition_result =
-      (fun mapper results -> Base.List.map ~f:(mapper.of_definition_location mapper) results);
+      (fun mapper results -> Base.List.map ~f:(mapper.of_location mapper) results);
     of_versioned_text_document_identifier =
       (fun mapper { VersionedTextDocumentIdentifier.uri; version } ->
         let uri = mapper.of_document_uri mapper uri in

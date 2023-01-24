@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -28,14 +28,7 @@ let dedent_trim str =
 
 let parse_options =
   let open Parser_env in
-  Some
-    {
-      default_parse_options with
-      enums = true;
-      esproposal_class_instance_fields = true;
-      esproposal_class_static_fields = true;
-      esproposal_export_star_as = true;
-    }
+  Some { default_parse_options with enums = true }
 
 let parse_and_pack_module ~strict sig_opts contents =
   let (ast, _errors) = Parser_flow.program ~parse_options contents in
@@ -56,8 +49,7 @@ let make_test_formatter () =
 
 let sig_opts =
   {
-    Type_sig_parse.type_asserts = true;
-    suppress_types = SSet.empty;
+    Type_sig_parse.suppress_types = SSet.empty;
     munge = false;
     ignore_static_propTypes = false;
     facebook_keyMirror = false;

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,12 +18,12 @@ and source =
 
 and export = source * kind [@@deriving show, ord]
 
-module ExportSet : sig
-  include Flow_set.S with type elt = export
+module ExportMap : sig
+  include WrappedMap.S with type key = export
 
-  val pp : Format.formatter -> t -> unit
+  val pp : (Format.formatter -> 'a -> unit) -> Format.formatter -> 'a t -> unit
 
-  val show : t -> string
+  val show : (Format.formatter -> 'a -> unit) -> 'a t -> string
 end
 
 type t [@@deriving show]
@@ -34,19 +34,23 @@ val add : string -> source -> kind -> t -> t
 
 val merge : t -> t -> t
 
+val merge_export_import : t -> t -> t
+
 (** [subtract to_remove t] removes all of the exports in [to_remove] from [t], and
     also returns a list of keys that no longer are exported by any file. *)
 val subtract : t -> t -> t * string list
 
-val find : string -> t -> ExportSet.t
+val subtract_count : t -> t -> t
 
-val find_seq : string -> t -> export Seq.t
+val find : string -> t -> int ExportMap.t
 
-val fold_names : f:('acc -> string -> ExportSet.t -> 'acc) -> init:'acc -> t -> 'acc
+val find_seq : string -> t -> (export * int) Seq.t
+
+val fold_names : f:('acc -> string -> int ExportMap.t -> 'acc) -> init:'acc -> t -> 'acc
 
 val fold : f:('acc -> string -> export -> 'acc) -> init:'acc -> t -> 'acc
 
-val map : f:(export -> export) -> t -> t
+val map : f:('a -> 'b) -> 'a ExportMap.t SMap.t -> 'b ExportMap.t SMap.t
 
 val keys : t -> string list
 

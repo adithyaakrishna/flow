@@ -7,7 +7,7 @@ delete obj1.f; // error, f is required
 declare var obj2: { f?: number };
 delete obj2.f; //fine
 
-var x = 42;
+var x: number | void = 42;
 delete x;
 (x: number);
 (x: number | void);
@@ -43,7 +43,7 @@ delete obj4.f; // error, just like when writing to frozen object
 declare var obj5: { +f?: number };
 delete obj5.f; // error, just like when writing to read-only object
 
-class C { x; m() {} }
+class C { x: void; m() {} }
 declare var obj6: C;
 delete obj6.x;
 delete obj6.m; // warn, m is not own (delete only has effect
@@ -62,19 +62,3 @@ delete index.a;
 delete index['a'];
 delete index.b;
 delete index['foo'];
-
-var dct = {};
-dct['a'] = 'hello';
-dct['c'] = 'bye';
-delete dct['a'];
-delete dct['b'];
-(dct['a']: string);
-(dct['a']: void);
-(dct['c']: string);
-
-var dct2 = {};
-dct2['a'] = 'hello';
-dct2['c'] = 'bye';
-declare var key: string;
-delete dct2[key];
-(dct2['a']: string)

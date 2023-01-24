@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -104,6 +104,8 @@ end = struct
   open Type_sig_collections
   module P = Type_sig_pack
 
+  let reader = State_reader.create ()
+
   (* NOTE The checks below are only based on the name. Ideally we'd also match
    * with def_loc as well. This was not available for every case originally,
    * when this was based on types-first 1.0 export info. *)
@@ -196,21 +198,24 @@ end = struct
     match ALoc.source loc with
     | None -> Error Error.Loc_source_none
     | Some remote_file ->
-      (match Parsing_heaps.Reader.get_type_sig ~reader:(State_reader.create ()) remote_file with
-      | None -> Error Error.Parsing_heaps_get_sig_error
-      | Some type_sig ->
-        let import_kind = AstHelper.mk_import_declaration_kind use_mode in
-        let import_info_opt =
-          Utils_js.lazy_seq
-            [
-              lazy (from_type_sig import_kind type_sig name);
-              lazy (from_react loc);
-              lazy (from_react_redux loc);
-            ]
-        in
-        (match import_info_opt with
-        | None -> Error (Error.No_matching_export (name, loc))
-        | Some import_info -> Ok import_info))
+      let type_sig = Parsing_heaps.Reader.get_type_sig_unsafe ~reader remote_file in
+      let import_kind = AstHelper.mk_import_declaration_kind use_mode in
+      let import_info_opt =
+        Utils_js.lazy_seq
+          [
+            lazy (from_type_sig import_kind type_sig name);
+            lazy (from_react loc);
+            lazy (from_react_redux loc);
+          ]
+      in
+      begin
+        match import_info_opt with
+        | None ->
+          let table = Parsing_heaps.Reader.get_aloc_table_unsafe ~reader remote_file in
+          let loc = ALoc.to_loc (lazy table) loc in
+          Error (Error.No_matching_export (name, loc))
+        | Some import_info -> Ok import_info
+      end
 end
 
 module ImportsHelper : sig
@@ -493,10 +498,8 @@ end = struct
             else if is_react_redux_file_key remote_source then
               Modulename.String "react-redux"
             else
-              let info =
-                Module_heaps.Reader.get_info_unsafe ~reader ~audit:Expensive.warn remote_source
-              in
-              (match info.Module_heaps.module_name with
+              let addr = Parsing_heaps.get_file_addr_unsafe remote_source in
+              (match Parsing_heaps.Reader.get_haste_name ~reader addr with
               | Some name -> Modulename.String name
               | None -> Modulename.Filename (Files.chop_flow_ext remote_source))
           | None -> failwith "No source"
@@ -776,7 +779,8 @@ end = struct
         | Import { ns = Some (_, "React"); _ } -> raise Found_react_import
         | Import _
         | ImportDynamic _
-        | Import0 _ ->
+        | Import0 _
+        | ExportFrom _ ->
           ()
       in
       let from_requires requires = List.iter from_require requires in

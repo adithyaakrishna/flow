@@ -13,32 +13,12 @@ let tests = [
         }},
         attributeChangedCallback: {
           value: function attributeChangedCallback (
-            attributeLocalName,
-            oldAttributeValue,
-            newAttributeValue,
-            attributeNamespace
+            attributeLocalName: string,
+            oldAttributeValue: string | null,
+            newAttributeValue: string | null,
+            attributeNamespace: string,
           ) {
           }
-        }
-      })
-    })
-  },
-  // or with Object.assign()
-  function() {
-    document.registerElement('custom-element', {
-      prototype: Object.assign(Object.create(HTMLElement.prototype), {
-        createdCallback () {
-        },
-        attachedCallback () {
-        },
-        detachedCallback () {
-        },
-        attributeChangedCallback (
-          attributeLocalName,
-          oldAttributeValue,
-          newAttributeValue,
-          attributeNamespace
-        ) {
         }
       })
     })

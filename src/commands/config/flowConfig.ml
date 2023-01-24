@@ -1,13 +1,12 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 open Utils_js
-
-let ( >>= ) = Base.Result.( >>= )
+open Base.Result.Let_syntax
 
 type line = int * string
 
@@ -26,8 +25,6 @@ type lazy_mode =
   | Lazy
   | Non_lazy
   | Watchman_DEPRECATED  (** lazy_mode=watchman is deprecated, but implies file_watcher=Watchman *)
-
-let default_temp_dir = Filename.concat Sys_utils.temp_dir_name "flow"
 
 let map_add map (key, value) = SMap.add key value map
 
@@ -49,24 +46,29 @@ module Opts = struct
     abstract_locations: bool option;
     all: bool option;
     autoimports: bool option;
+    autoimports_ranked_by_usage: bool option;
     automatic_require_default: bool option;
     babel_loose_array_spread: bool option;
+    conditional_type: bool option;
+    cycle_errors: bool;
+    cycle_errors_includes: string list;
     direct_dependent_files_fix: bool option;
-    disable_live_non_parse_errors: bool option;
     emoji: bool option;
-    enable_const_params: bool;
-    enforce_local_inference_annotations: bool;
-    local_inference_annotation_dirs: string list;
-    enforce_this_annotations: bool;
+    enable_const_params: bool option;
     enforce_strict_call_arity: bool;
     enums: bool;
+    inference_mode: Options.inference_mode;
+    inference_mode_lti_includes: string list;
+    estimate_recheck_time: bool option;
     exact_by_default: bool;
     facebook_fbs: string option;
     facebook_fbt: string option;
     facebook_module_interop: bool;
-    file_watcher_mergebase_with: string option;
-    file_watcher_timeout: int option;
     file_watcher: file_watcher option;
+    file_watcher_mergebase_with: string option;
+    file_watcher_mergebase_with_git: string option;
+    file_watcher_mergebase_with_hg: string option;
+    file_watcher_timeout: int option;
     format_bracket_spacing: bool option;  (** print spaces between brackets in object literals *)
     format_single_quotes: bool option;  (** prefer single-quoted strings *)
     gc_worker_custom_major_ratio: int option;  (** Gc.control's custom_major_ratio *)
@@ -77,10 +79,6 @@ module Opts = struct
     gc_worker_space_overhead: int option;  (** Gc.control's space_overhead *)
     gc_worker_window_size: int option;  (** Gc.control's window_size *)
     generate_tests: bool;
-    relay_integration: bool;
-    relay_integration_excludes: string list;
-    relay_integration_module_prefix: string option;
-    relay_integration_module_prefix_includes: string list;
     haste_module_ref_prefix: string option;
     haste_name_reducers: (Str.regexp * string) list;
     haste_paths_excludes: string list;
@@ -89,55 +87,52 @@ module Opts = struct
     ignore_non_literal_requires: bool;
     include_warnings: bool;
     lazy_mode: lazy_mode option;
-    log_file: Path.t option;
     log_saving: Options.log_saving SMap.t;
     max_files_checked_per_worker: int;
     max_header_tokens: int;
     max_literal_length: int;
     max_rss_bytes_for_check_per_worker: int;
     max_seconds_for_check_per_worker: float;
-    max_workers: int;
+    max_workers: int option;
     merge_timeout: int option;
-    module_file_exts: SSet.t;
+    missing_module_generators: (Str.regexp * string) list;
+    module_file_exts: string list;
     module_name_mappers: (Str.regexp * string) list;
     module_resource_exts: SSet.t;
     module_system: Options.module_system;
     modules_are_use_strict: bool;
     munge_underscores: bool;
-    new_merge: bool;
     no_flowlib: bool;
     node_main_fields: string list;
     node_resolver_allow_root_relative: bool;
     node_resolver_dirnames: string list;
     node_resolver_root_relative_dirnames: string list;
-    prioritize_dependency_checks: bool option;
+    array_literal_providers: bool;
+    array_literal_providers_includes: string list;
     react_runtime: Options.react_runtime;
     react_server_component_exts: SSet.t;
     recursion_limit: int;
-    refactor: bool option;
-    statement_reorder_checking: Options.statement_order_mode;
-    cycle_errors: bool;
+    relay_integration: bool;
+    relay_integration_excludes: string list;
+    relay_integration_module_prefix: string option;
+    relay_integration_module_prefix_includes: string list;
     root_name: string option;
     run_post_inference_implicit_instantiation: bool;
+    saved_state_allow_reinit: bool option;
     saved_state_fetcher: Options.saved_state_fetcher;
-    saved_state_load_sighashes: bool;
     shm_hash_table_pow: int;
     shm_heap_size: int;
     shm_log_level: int;
-    strict_es6_import_export_excludes: string list;
     strict_es6_import_export: bool;
+    strict_es6_import_export_excludes: string list;
     suppress_types: SSet.t;
-    temp_dir: string;
-    env_mode: Options.env_mode;
-    env_mode_constrain_write_dirs: string list;
     traces: int;
     trust_mode: Options.trust_mode;
-    type_asserts: bool;
     wait_for_recheck: bool;
     watchman_defer_states: string list;
-    watchman_survive_restarts: bool option;
     watchman_sync_timeout: int option;
   }
+  [@@warning "-69"]
 
   let warn_on_unknown_opts (raw_opts, config) : (t * warning list, error) result =
     (* If the user specified any options that aren't defined, issue a warning *)
@@ -151,13 +146,8 @@ module Opts = struct
     in
     Ok (config, warnings)
 
-  let module_file_exts =
-    SSet.empty
-    |> SSet.add ".js"
-    |> SSet.add ".jsx"
-    |> SSet.add ".json"
-    |> SSet.add ".mjs"
-    |> SSet.add ".cjs"
+  (** the order of this list determines precedence. ./foo resolves to foo.js before foo.json *)
+  let module_file_exts = [".js"; ".jsx"; ".mjs"; ".cjs"; ".json"]
 
   let module_resource_exts =
     SSet.empty
@@ -181,23 +171,28 @@ module Opts = struct
       abstract_locations = None;
       all = None;
       autoimports = None;
+      autoimports_ranked_by_usage = None;
       automatic_require_default = None;
       babel_loose_array_spread = None;
+      conditional_type = None;
+      cycle_errors = false;
+      cycle_errors_includes = [];
       direct_dependent_files_fix = None;
-      disable_live_non_parse_errors = None;
       emoji = None;
-      enable_const_params = false;
-      enforce_local_inference_annotations = false;
-      local_inference_annotation_dirs = [];
-      enforce_this_annotations = false;
+      enable_const_params = None;
       enforce_strict_call_arity = true;
       enums = false;
+      inference_mode = Options.ConstrainWrites;
+      inference_mode_lti_includes = [];
+      estimate_recheck_time = None;
       exact_by_default = false;
       facebook_fbs = None;
       facebook_fbt = None;
       facebook_module_interop = false;
       file_watcher = None;
       file_watcher_mergebase_with = None;
+      file_watcher_mergebase_with_git = None;
+      file_watcher_mergebase_with_hg = None;
       file_watcher_timeout = None;
       format_bracket_spacing = None;
       format_single_quotes = None;
@@ -209,10 +204,6 @@ module Opts = struct
       gc_worker_space_overhead = None;
       gc_worker_window_size = None;
       generate_tests = false;
-      relay_integration = false;
-      relay_integration_excludes = [];
-      relay_integration_module_prefix = None;
-      relay_integration_module_prefix_includes = ["<PROJECT_ROOT>/.*"];
       haste_module_ref_prefix = None;
       haste_name_reducers =
         [(Str.regexp "^\\(.*/\\)?\\([a-zA-Z0-9$_.-]+\\)\\.js\\(\\.flow\\)?$", "\\2")];
@@ -222,87 +213,69 @@ module Opts = struct
       ignore_non_literal_requires = false;
       include_warnings = false;
       lazy_mode = None;
-      log_file = None;
       log_saving = SMap.empty;
       max_files_checked_per_worker = 100;
       max_header_tokens = 10;
       max_literal_length = 100;
       max_rss_bytes_for_check_per_worker = (* 200MB *) 200 * 1024 * 1024;
       max_seconds_for_check_per_worker = 5.0;
-      max_workers = Sys_utils.nbr_procs;
+      max_workers = None;
       merge_timeout = Some 100;
+      missing_module_generators = [];
       module_file_exts;
       module_name_mappers = [];
       module_resource_exts;
       module_system = Options.Node;
       modules_are_use_strict = false;
       munge_underscores = false;
-      new_merge = false;
       no_flowlib = false;
       node_main_fields = ["main"];
       node_resolver_allow_root_relative = false;
       node_resolver_dirnames = ["node_modules"];
       node_resolver_root_relative_dirnames = [""];
-      prioritize_dependency_checks = None;
+      array_literal_providers = false;
+      array_literal_providers_includes = [];
       react_runtime = Options.ReactRuntimeClassic;
       react_server_component_exts;
       recursion_limit = 10000;
-      refactor = None;
-      statement_reorder_checking = Options.Lexical;
-      cycle_errors = false;
+      relay_integration = false;
+      relay_integration_excludes = [];
+      relay_integration_module_prefix = None;
+      relay_integration_module_prefix_includes = ["<PROJECT_ROOT>/.*"];
       root_name = None;
       run_post_inference_implicit_instantiation = false;
+      saved_state_allow_reinit = None;
       saved_state_fetcher = Options.Dummy_fetcher;
-      saved_state_load_sighashes = false;
       shm_hash_table_pow = 19;
       shm_heap_size = (* 25GB *) 1024 * 1024 * 1024 * 25;
       shm_log_level = 0;
       strict_es6_import_export = false;
       strict_es6_import_export_excludes = [];
       suppress_types = SSet.empty |> SSet.add "$FlowFixMe";
-      temp_dir = default_temp_dir;
-      env_mode = Options.ClassicEnv [];
-      env_mode_constrain_write_dirs = [];
       traces = 0;
       trust_mode = Options.NoTrust;
-      type_asserts = false;
       wait_for_recheck = false;
       watchman_defer_states = [];
-      watchman_survive_restarts = None;
       watchman_sync_timeout = None;
     }
 
-  let parse_lines : line list -> (raw_options, error) result =
-    let rec loop acc lines =
-      acc >>= fun map ->
-      match lines with
-      | [] -> Ok map
-      | (line_num, line) :: rest ->
-        if Str.string_match (Str.regexp "^\\([a-zA-Z0-9._]+\\)=\\(.*\\)$") line 0 then
+  let cons_opt to_add = function
+    | Some prev -> Some (to_add :: prev)
+    | None -> Some [to_add]
+
+  let parse_lines (lines : line list) : (raw_options, error) result =
+    Base.List.fold_result lines ~init:SMap.empty ~f:(fun acc (line_num, line) ->
+        let line = String.trim line in
+        if String.length line = 0 then
+          Ok acc
+        else if Str.string_match (Str.regexp "^\\([a-zA-Z0-9._]+\\)=\\(.*\\)$") line 0 then
           let key = Str.matched_group 1 line in
           let value = Str.matched_group 2 line in
-          let map =
-            SMap.add
-              key
-              ((line_num, value)
-               ::
-               (match SMap.find_opt key map with
-               | Some values -> values
-               | None -> [])
-              )
-              map
-          in
-          loop (Ok map) rest
+          let acc = SMap.update key (cons_opt (line_num, value)) acc in
+          Ok acc
         else
           Error (line_num, "Unable to parse line.")
-    in
-    fun lines ->
-      let lines =
-        lines
-        |> Base.List.map ~f:(fun (ln, line) -> (ln, String.trim line))
-        |> Base.List.filter ~f:(fun (_, s) -> s <> "")
-      in
-      loop (Ok SMap.empty) lines
+    )
 
   (**
     * `init` gets called on the options object immediately before
@@ -319,15 +292,14 @@ module Opts = struct
       match values with
       | [] -> Ok config
       | (line_num, value_str) :: rest ->
-        let value =
+        let%bind value =
           optparser value_str
           |> Base.Result.map_error ~f:(fun msg -> (line_num, Failed_to_parse_value msg))
         in
-        let config =
-          value >>= fun value ->
+        let%bind config =
           setter config value |> Base.Result.map_error ~f:(fun msg -> (line_num, Failed_to_set msg))
         in
-        config >>= loop optparser setter rest
+        loop optparser setter rest config
     in
     fun (optparser : string -> ('a, string) result)
         ?init
@@ -349,6 +321,10 @@ module Opts = struct
     try Ok (Scanf.unescaped str) with
     | Scanf.Scan_failure reason -> Error (spf "Invalid ocaml string: %s" reason)
 
+  let optparse_regexp str =
+    try Ok (Str.regexp str) with
+    | Failure reason -> Error (spf "Invalid ocaml regular expression: %s" reason)
+
   let enum values =
     opt (fun str ->
         let values = Base.List.fold_left ~f:map_add ~init:SMap.empty values in
@@ -363,15 +339,14 @@ module Opts = struct
             )
     )
 
-  let filepath = opt (fun str -> Ok (Path.make str))
-
-  let optparse_mapping str =
+  let optparse_mapping =
     let regexp_str = "^'\\([^']*\\)'[ \t]*->[ \t]*'\\([^']*\\)'$" in
     let regexp = Str.regexp regexp_str in
-    if Str.string_match regexp str 0 then
-      Ok (Str.matched_group 1 str, Str.matched_group 2 str)
-    else
-      Error ("Expected a mapping of form: " ^ "'single-quoted-string' -> 'single-quoted-string'")
+    fun str ->
+      if Str.string_match regexp str 0 then
+        Ok (Str.matched_group 1 str, Str.matched_group 2 str)
+      else
+        Error ("Expected a mapping of form: " ^ "'single-quoted-string' -> 'single-quoted-string'")
 
   let boolean = enum [("true", true); ("false", false)]
 
@@ -386,24 +361,17 @@ module Opts = struct
           Ok v
     )
 
-  let mapping fn = opt (fun str -> optparse_mapping str >>= fn)
+  let mapping fn =
+    opt (fun str ->
+        let%bind v = optparse_mapping str in
+        fn v
+    )
 
   let optparse_json str =
     try Ok (Hh_json.json_of_string str) with
     | Hh_json.Syntax_error msg -> Error (spf "Failed to parse JSON: %s" msg)
 
   let json = opt optparse_json
-
-  (* TODO: remove once .flowconfigs no longer use this setting *)
-  let new_check_parser =
-    boolean (fun opts v ->
-        if v then
-          Ok opts
-        else
-          Error "New check mode can no longer be disabled."
-    )
-
-  let new_merge_parser = boolean (fun opts v -> Ok { opts with new_merge = v })
 
   let max_files_checked_per_worker_parser =
     uint (fun opts v -> Ok { opts with max_files_checked_per_worker = v })
@@ -416,10 +384,10 @@ module Opts = struct
 
   let file_ext_parser =
     string
-      ~init:(fun opts -> { opts with module_file_exts = SSet.empty })
+      ~init:(fun opts -> { opts with module_file_exts = [] })
       ~multiple:true
       (fun opts v ->
-        if String_utils.string_ends_with v Files.flow_ext then
+        if String.ends_with ~suffix:Files.flow_ext v then
           Error
             ("Cannot use file extension '"
             ^ v
@@ -427,15 +395,20 @@ module Opts = struct
             ^ Files.flow_ext
             ^ "'"
             )
+        else if Base.List.mem opts.module_file_exts v ~equal:String.equal then
+          (* ignore duplicates. doesn't seem super important to error. *)
+          Ok opts
         else
-          let module_file_exts = SSet.add v opts.module_file_exts in
+          let module_file_exts = v :: opts.module_file_exts in
           Ok { opts with module_file_exts })
 
   let haste_name_reducers_parser =
     mapping
       ~init:(fun opts -> { opts with haste_name_reducers = [] })
       ~multiple:true
-      (fun (pattern, template) -> Ok (Str.regexp pattern, template))
+      (fun (pattern, template) ->
+        let%bind pattern = optparse_regexp pattern in
+        Ok (pattern, template))
       (fun opts v -> Ok { opts with haste_name_reducers = v :: opts.haste_name_reducers })
 
   let haste_paths_excludes_parser =
@@ -449,7 +422,6 @@ module Opts = struct
     let multiple = true in
     let parse opts json =
       let open Hh_json in
-      let open Base.Result.Let_syntax in
       let%bind (method_name, threshold_time_ms_str, limit_json, rate_str) =
         match json with
         | JSON_Array [JSON_String a; JSON_Number b; c; JSON_Number d] -> Ok (a, b, c, d)
@@ -484,37 +456,6 @@ module Opts = struct
       ~multiple:true
       (fun opts v -> Ok { opts with haste_paths_includes = v :: opts.haste_paths_includes })
 
-  let enforce_local_inference_annotations =
-    boolean (fun opts v -> Ok { opts with enforce_local_inference_annotations = v })
-
-  let local_inference_annotation_dirs =
-    string
-      ~init:(fun opts -> { opts with local_inference_annotation_dirs = [] })
-      ~multiple:true
-      (fun opts v ->
-        if opts.enforce_local_inference_annotations then
-          Ok
-            {
-              opts with
-              local_inference_annotation_dirs = v :: opts.local_inference_annotation_dirs;
-            }
-        else
-          Error
-            "Option \"enforce_local_inference_annotations\" must be set to true to set \"local_inference_annotation_dirs\".")
-
-  let enforce_this_annotations =
-    boolean (fun opts v -> Ok { opts with enforce_this_annotations = v })
-
-  let statement_reorder_checking_parser =
-    enum
-      [
-        ("lexical", Options.Lexical);
-        ("dependency", Options.Dependency);
-        ("lexical_with_dependency_validation", Options.LexicalWithDependencyValidation);
-      ]
-      (fun opts v -> Ok { opts with statement_reorder_checking = v }
-    )
-
   let post_inference_implicit_instantiation_parser =
     boolean (fun opts v -> Ok { opts with run_post_inference_implicit_instantiation = v })
 
@@ -530,22 +471,28 @@ module Opts = struct
   let direct_dependent_files_fix_parser =
     boolean (fun opts v -> Ok { opts with direct_dependent_files_fix = Some v })
 
-  let disable_live_non_parse_errors_parser =
-    boolean (fun opts v -> Ok { opts with disable_live_non_parse_errors = Some v })
-
   let enforce_strict_call_arity_parser =
     boolean (fun opts v -> Ok { opts with enforce_strict_call_arity = v })
+
+  let estimate_recheck_time_parser =
+    boolean (fun opts v -> Ok { opts with estimate_recheck_time = Some v })
 
   let facebook_module_interop_parser =
     boolean (fun opts v -> Ok { opts with facebook_module_interop = v })
 
   let file_watcher_parser =
-    enum [("none", NoFileWatcher); ("dfind", DFind); ("watchman", Watchman)] (fun opts v ->
-        Ok { opts with file_watcher = Some v }
-    )
+    enum
+      [("none", NoFileWatcher); ("dfind", DFind); ("watchman", Watchman)]
+      (fun opts v -> Ok { opts with file_watcher = Some v })
 
   let file_watcher_mergebase_with_parser =
     string (fun opts v -> Ok { opts with file_watcher_mergebase_with = Some v })
+
+  let file_watcher_mergebase_with_git_parser =
+    string (fun opts v -> Ok { opts with file_watcher_mergebase_with_git = Some v })
+
+  let file_watcher_mergebase_with_hg_parser =
+    string (fun opts v -> Ok { opts with file_watcher_mergebase_with_hg = Some v })
 
   let format_bracket_spacing_parser =
     boolean (fun opts v -> Ok { opts with format_bracket_spacing = Some v })
@@ -595,8 +542,7 @@ module Opts = struct
         ("watchman", Watchman_DEPRECATED);
         ("none", Non_lazy);
       ]
-      (fun opts v -> Ok { opts with lazy_mode = Some v }
-    )
+      (fun opts v -> Ok { opts with lazy_mode = Some v })
 
   let merge_timeout_parser =
     uint (fun opts v ->
@@ -609,15 +555,27 @@ module Opts = struct
         Ok { opts with merge_timeout }
     )
 
+  let missing_module_generators_parser =
+    mapping
+      ~init:(fun opts -> { opts with missing_module_generators = [] })
+      ~multiple:true
+      (fun (pattern, generator) ->
+        let%bind pattern = optparse_regexp pattern in
+        Ok (pattern, generator))
+      (fun opts v ->
+        Ok { opts with missing_module_generators = v :: opts.missing_module_generators })
+
   let module_system_parser =
-    enum [("node", Options.Node); ("haste", Options.Haste)] (fun opts v ->
-        Ok { opts with module_system = v }
-    )
+    enum
+      [("node", Options.Node); ("haste", Options.Haste)]
+      (fun opts v -> Ok { opts with module_system = v })
 
   let name_mapper_parser =
     mapping
       ~multiple:true
-      (fun (pattern, template) -> Ok (Str.regexp pattern, template))
+      (fun (pattern, template) ->
+        let%bind pattern = optparse_regexp pattern in
+        Ok (pattern, template))
       (fun opts v ->
         let module_name_mappers = v :: opts.module_name_mappers in
         Ok { opts with module_name_mappers })
@@ -626,7 +584,8 @@ module Opts = struct
     mapping
       ~multiple:true
       (fun (file_ext, template) ->
-        Ok (Str.regexp ("^\\(.*\\)\\." ^ Str.quote file_ext ^ "$"), template))
+        let%bind pattern = optparse_regexp ("^\\(.*\\)\\." ^ Str.quote file_ext ^ "$") in
+        Ok (pattern, template))
       (fun opts v ->
         let module_name_mappers = v :: opts.module_name_mappers in
         Ok { opts with module_name_mappers })
@@ -665,14 +624,10 @@ module Opts = struct
         let node_resolver_root_relative_dirnames = v :: opts.node_resolver_root_relative_dirnames in
         Ok { opts with node_resolver_root_relative_dirnames })
 
-  let prioritize_dependency_checks_parser =
-    boolean (fun opts v -> Ok { opts with prioritize_dependency_checks = Some v })
-
   let react_runtime_parser =
     enum
       [("classic", Options.ReactRuntimeClassic); ("automatic", Options.ReactRuntimeAutomatic)]
-      (fun opts react_runtime -> Ok { opts with react_runtime }
-    )
+      (fun opts react_runtime -> Ok { opts with react_runtime })
 
   let react_server_component_exts_parser =
     string
@@ -707,13 +662,18 @@ module Opts = struct
         Ok { opts with root_name = Some v }
     )
 
+  let saved_state_allow_reinit_parser =
+    boolean (fun opts v -> Ok { opts with saved_state_allow_reinit = Some v })
+
   let saved_state_fetcher_parser =
     enum
       [
-        ("none", Options.Dummy_fetcher); ("local", Options.Local_fetcher); ("fb", Options.Fb_fetcher);
+        ("none", Options.Dummy_fetcher);
+        ("local", Options.Local_fetcher);
+        ("scm", Options.Scm_fetcher);
+        ("fb", Options.Fb_fetcher);
       ]
-      (fun opts saved_state_fetcher -> Ok { opts with saved_state_fetcher }
-    )
+      (fun opts saved_state_fetcher -> Ok { opts with saved_state_fetcher })
 
   let shm_hash_table_pow_parser =
     uint (fun opts shm_hash_table_pow -> Ok { opts with shm_hash_table_pow })
@@ -741,73 +701,48 @@ module Opts = struct
   let trust_mode_parser =
     enum
       [("check", Options.CheckTrust); ("silent", Options.SilentTrust); ("none", Options.NoTrust)]
-      (fun opts trust_mode -> Ok { opts with trust_mode }
-    )
+      (fun opts trust_mode -> Ok { opts with trust_mode })
 
-  let env_mode_parser =
-    string (fun opts s ->
-        match String.split_on_char ',' s |> Base.List.filter ~f:(( <> ) "") with
-        | [] -> Error "env_mode requires an argument"
-        | ["ssa"] ->
-          if List.length opts.env_mode_constrain_write_dirs = 0 then
-            Ok { opts with env_mode = Options.SSAEnv { resolved = false } }
-          else
-            Error
-              "Option \"env_mode\" must not be set to \"ssa\" when \"constrain_write_dirs\" is set."
-        | ["resolved"] ->
-          if List.length opts.env_mode_constrain_write_dirs = 0 then
-            Ok { opts with env_mode = Options.SSAEnv { resolved = true } }
-          else
-            Error
-              "Option \"env_mode\" must not be set to \"resolved\" when \"constrain_write_dirs\" is set."
-        | ["classic"] -> Ok { opts with env_mode = Options.ClassicEnv [] }
-        | options ->
-          let options =
-            Base.List.fold_result options ~init:[] ~f:(fun acc opt ->
-                match opt with
-                | "constrain_writes" when List.length opts.env_mode_constrain_write_dirs = 0 ->
-                  Ok (Options.ConstrainWrites :: acc)
-                | "constrain_writes" ->
-                  Error
-                    "Option \"env_mode\" should not set \"constrain_writes\" when \"env_mode.constrain_writes.includes\" is also set."
-                | "ssa" -> Error "\"ssa\" must be the first and only env_mode option if present"
-                | "resolved" ->
-                  Error "\"resolved\" must be the first and only env_mode option if present"
-                | "classic" ->
-                  Error "\"classic\" must be the first and only env_mode option if present"
-                | opt -> Error (spf "\"%s\" is not a valid env_mode option" opt)
-            )
-          in
-          Base.Result.map
-            ~f:(fun options -> { opts with env_mode = Options.ClassicEnv options })
-            options
-    )
-
-  let env_mode_constrain_write_dirs_parser =
+  let cycle_errors_includes_parser =
     string
-      ~init:(fun opts -> { opts with env_mode_constrain_write_dirs = [] })
+      ~init:(fun opts -> { opts with cycle_errors_includes = [] })
+      ~multiple:true
+      (fun opts v -> Ok { opts with cycle_errors_includes = v :: opts.cycle_errors_includes })
+
+  let inference_mode_parser =
+    string (fun opts s ->
+        match s with
+        | "constrain_writes" -> Ok { opts with inference_mode = Options.ConstrainWrites }
+        | "lti" -> Ok { opts with inference_mode = Options.LTI }
+        | "experimental.lti" -> Ok { opts with inference_mode = Options.LTI }
+        | inference_mode -> Error (spf "\"%s\" is not a valid inference_mode option" inference_mode)
+    )
+
+  let inference_mode_lti_includes_parser =
+    string
+      ~init:(fun opts -> { opts with inference_mode_lti_includes = [] })
       ~multiple:true
       (fun opts v ->
-        match opts.env_mode with
-        | Options.SSAEnv { resolved = false } ->
-          Error
-            "Option \"env_mode\" must not be set to \"ssa\" when \"constrain_writes.includes\" is set."
-        | Options.SSAEnv { resolved = true } ->
-          Error
-            "Option \"env_mode\" must not be set to \"resolved\" when \"constrain_writes.includes\" is set."
-        | Options.ClassicEnv opts when List.mem Options.ConstrainWrites opts ->
-          Error
-            "Option \"env_mode\" should not set \"constrain_writes\" when \"env_mode.constrain_writes.includes\" is also set."
-        | _ ->
-          Ok { opts with env_mode_constrain_write_dirs = v :: opts.env_mode_constrain_write_dirs })
+        Ok { opts with inference_mode_lti_includes = v :: opts.inference_mode_lti_includes })
+
+  let experimental_empty_array_literals_parser =
+    boolean (fun opts v -> Ok { opts with array_literal_providers = v })
+
+  let experimental_empty_array_literals_includes_parser =
+    string
+      ~init:(fun opts -> { opts with array_literal_providers_includes = [] })
+      ~multiple:true
+      (fun opts v ->
+        Ok
+          {
+            opts with
+            array_literal_providers_includes = v :: opts.array_literal_providers_includes;
+          })
 
   let watchman_defer_states_parser =
     string ~multiple:true (fun opts v ->
         Ok { opts with watchman_defer_states = v :: opts.watchman_defer_states }
     )
-
-  let watchman_survive_restarts_parser =
-    boolean (fun opts v -> Ok { opts with watchman_survive_restarts = Some v })
 
   let watchman_sync_timeout_parser =
     uint (fun opts v -> Ok { opts with watchman_sync_timeout = Some v })
@@ -816,44 +751,49 @@ module Opts = struct
     [
       ("all", boolean (fun opts v -> Ok { opts with all = Some v }));
       ("autoimports", boolean (fun opts v -> Ok { opts with autoimports = Some v }));
+      ( "autoimports_ranked_by_usage",
+        boolean (fun opts v -> Ok { opts with autoimports_ranked_by_usage = Some v })
+      );
       ("babel_loose_array_spread", babel_loose_array_spread_parser);
       ("emoji", boolean (fun opts v -> Ok { opts with emoji = Some v }));
       ("enums", boolean (fun opts v -> Ok { opts with enums = v }));
+      ("estimate_recheck_time", estimate_recheck_time_parser);
       ("exact_by_default", boolean (fun opts v -> Ok { opts with exact_by_default = v }));
       ("experimental.abstract_locations", abstract_locations_parser);
-      ("experimental.const_params", boolean (fun opts v -> Ok { opts with enable_const_params = v }));
+      ( "experimental.const_params",
+        boolean (fun opts v -> Ok { opts with enable_const_params = Some v })
+      );
+      ( "experimental.conditional_type",
+        boolean (fun opts v -> Ok { opts with conditional_type = Some v })
+      );
+      ("experimental.cycle_errors", boolean (fun opts v -> Ok { opts with cycle_errors = v }));
+      ("experimental.cycle_errors.includes", cycle_errors_includes_parser);
       ("experimental.direct_dependent_files_fix", direct_dependent_files_fix_parser);
-      ("experimental.disable_live_non_parse_errors", disable_live_non_parse_errors_parser);
-      ("experimental.enforce_local_inference_annotations", enforce_local_inference_annotations);
-      ("experimental.local_inference_annotation_dirs", local_inference_annotation_dirs);
-      ("experimental.enforce_this_annotations", enforce_this_annotations);
-      ("experimental.enums", boolean (fun opts v -> Ok { opts with enums = v }));
+      ("inference_mode", inference_mode_parser);
+      ("inference_mode.lti.includes", inference_mode_lti_includes_parser);
+      ("inference_mode.experimental.lti.includes", inference_mode_lti_includes_parser);
+      ("experimental.array_literal_providers", experimental_empty_array_literals_parser);
+      ( "experimental.array_literal_providers.includes",
+        experimental_empty_array_literals_includes_parser
+      );
       ("experimental.facebook_module_interop", facebook_module_interop_parser);
       ("experimental.module.automatic_require_default", automatic_require_default_parser);
-      ("experimental.new_check", new_check_parser);
-      ("experimental.new_merge", new_merge_parser);
-      ("experimental.prioritize_dependency_checks", prioritize_dependency_checks_parser);
       ("experimental.react.server_component_ext", react_server_component_exts_parser);
-      ("experimental.refactor", boolean (fun opts v -> Ok { opts with refactor = Some v }));
-      ("experimental.statement_reorder_checking", statement_reorder_checking_parser);
-      ("experimental.cycle_errors", boolean (fun opts v -> Ok { opts with cycle_errors = v }));
       ( "experimental.run_post_inference_implicit_instantiation",
         post_inference_implicit_instantiation_parser
       );
       ("experimental.strict_call_arity", enforce_strict_call_arity_parser);
-      ("experimental.strict_es6_import_export.excludes", strict_es6_import_export_excludes_parser);
       ("experimental.strict_es6_import_export", strict_es6_import_export_parser);
-      ("experimental.env_mode", env_mode_parser);
-      ("experimental.env_mode.constrain_writes.includes", env_mode_constrain_write_dirs_parser);
-      ("experimental.type_asserts", boolean (fun opts v -> Ok { opts with type_asserts = v }));
+      ("experimental.strict_es6_import_export.excludes", strict_es6_import_export_excludes_parser);
       ("facebook.fbs", string (fun opts v -> Ok { opts with facebook_fbs = Some v }));
       ("facebook.fbt", string (fun opts v -> Ok { opts with facebook_fbt = Some v }));
-      ("file_watcher_timeout", uint (fun opts v -> Ok { opts with file_watcher_timeout = Some v }));
-      ("file_watcher.mergebase_with", file_watcher_mergebase_with_parser);
-      ("file_watcher.watchman.defer_state", watchman_defer_states_parser);
-      ("file_watcher.watchman.survive_restarts", watchman_survive_restarts_parser);
-      ("file_watcher.watchman.sync_timeout", watchman_sync_timeout_parser);
       ("file_watcher", file_watcher_parser);
+      ("file_watcher.mergebase_with", file_watcher_mergebase_with_parser);
+      ("file_watcher.mergebase_with_git", file_watcher_mergebase_with_git_parser);
+      ("file_watcher.mergebase_with_hg", file_watcher_mergebase_with_hg_parser);
+      ("file_watcher.watchman.defer_state", watchman_defer_states_parser);
+      ("file_watcher.watchman.sync_timeout", watchman_sync_timeout_parser);
+      ("file_watcher_timeout", uint (fun opts v -> Ok { opts with file_watcher_timeout = Some v }));
       ("format.bracket_spacing", format_bracket_spacing_parser);
       ("format.single_quotes", format_single_quotes_parser);
       ("gc.worker.custom_major_ratio", gc_worker_custom_major_ratio_parser);
@@ -863,23 +803,18 @@ module Opts = struct
       ("gc.worker.minor_heap_size", gc_worker_minor_heap_size_parser);
       ("gc.worker.space_overhead", gc_worker_space_overhead_parser);
       ("gc.worker.window_size", gc_worker_window_size_parser);
-      ("relay_integration", boolean (fun opts v -> Ok { opts with relay_integration = v }));
-      ("relay_integration.excludes", relay_integration_excludes_parser);
-      ( "relay_integration.module_prefix",
-        string (fun opts v -> Ok { opts with relay_integration_module_prefix = Some v })
-      );
-      ("relay_integration.module_prefix.includes", relay_integration_module_prefix_includes_parser);
       ("include_warnings", boolean (fun opts v -> Ok { opts with include_warnings = v }));
       ("lazy_mode", lazy_mode_parser);
-      ("log.file", filepath (fun opts v -> Ok { opts with log_file = Some v }));
       ("log_saving", log_saving_parser);
       ("max_header_tokens", uint (fun opts v -> Ok { opts with max_header_tokens = v }));
       ("max_literal_length", uint (fun opts v -> Ok { opts with max_literal_length = v }));
       ("merge_timeout", merge_timeout_parser);
       ("module.file_ext", file_ext_parser);
       ("module.ignore_non_literal_requires", ignore_non_literal_requires_parser);
-      ("module.name_mapper.extension", name_mapper_extension_parser);
       ("module.name_mapper", name_mapper_parser);
+      ("module.name_mapper.extension", name_mapper_extension_parser);
+      ("module.missing_module_generators", missing_module_generators_parser);
+      ("module.system", module_system_parser);
       ("module.system.haste.module_ref_prefix", haste_module_ref_prefix_parser);
       ("module.system.haste.name_reducers", haste_name_reducers_parser);
       ("module.system.haste.paths.excludes", haste_paths_excludes_parser);
@@ -889,23 +824,25 @@ module Opts = struct
       ("module.system.node.main_field", node_main_field_parser);
       ("module.system.node.resolve_dirname", node_resolve_dirname_parser);
       ("module.system.node.root_relative_dirname", node_resolver_root_relative_dirnames_parser);
-      ("module.system", module_system_parser);
       ("module.use_strict", boolean (fun opts v -> Ok { opts with modules_are_use_strict = v }));
       ("munge_underscores", boolean (fun opts v -> Ok { opts with munge_underscores = v }));
       ("name", root_name_parser);
       ("no_flowlib", boolean (fun opts v -> Ok { opts with no_flowlib = v }));
       ("react.runtime", react_runtime_parser);
       ("recursion_limit", uint (fun opts v -> Ok { opts with recursion_limit = v }));
-      ("saved_state.fetcher", saved_state_fetcher_parser);
-      ( "saved_state.load_sighashes",
-        boolean (fun opts v -> Ok { opts with saved_state_load_sighashes = v })
+      ("relay_integration", boolean (fun opts v -> Ok { opts with relay_integration = v }));
+      ("relay_integration.excludes", relay_integration_excludes_parser);
+      ( "relay_integration.module_prefix",
+        string (fun opts v -> Ok { opts with relay_integration_module_prefix = Some v })
       );
-      ("server.max_workers", uint (fun opts v -> Ok { opts with max_workers = v }));
+      ("relay_integration.module_prefix.includes", relay_integration_module_prefix_includes_parser);
+      ("saved_state.allow_reinit", saved_state_allow_reinit_parser);
+      ("saved_state.fetcher", saved_state_fetcher_parser);
+      ("server.max_workers", uint (fun opts v -> Ok { opts with max_workers = Some v }));
       ("sharedmemory.hash_table_pow", shm_hash_table_pow_parser);
       ("sharedmemory.heap_size", uint (fun opts shm_heap_size -> Ok { opts with shm_heap_size }));
       ("sharedmemory.log_level", uint (fun opts shm_log_level -> Ok { opts with shm_log_level }));
       ("suppress_type", suppress_types_parser);
-      ("temp_dir", string (fun opts v -> Ok { opts with temp_dir = v }));
       ("traces", uint (fun opts v -> Ok { opts with traces = v }));
       ("trust_mode", trust_mode_parser);
       ("types_first.max_files_checked_per_worker", max_files_checked_per_worker_parser);
@@ -924,26 +861,24 @@ module Opts = struct
       in
       (line_num, msg)
     in
-    let rec loop
-        (acc : (raw_options * t, error) result)
-        (parsers : (string * (raw_values -> t -> (t, opt_error) result)) list) =
-      acc >>= fun (raw_opts, config) ->
-      match parsers with
-      | [] -> Ok (raw_opts, config)
-      | (key, f) :: rest ->
-        let acc =
-          match SMap.find_opt key raw_opts with
-          | None -> Ok (raw_opts, config)
-          | Some values ->
-            f values config |> Base.Result.map_error ~f:(error_of_opt_error key) >>= fun config ->
-            let new_raw_opts = SMap.remove key raw_opts in
-            Ok (new_raw_opts, config)
-        in
-        loop acc rest
-    in
     fun (init : t) (lines : line list) : (t * warning list, error) result ->
-      parse_lines lines >>= fun raw_options ->
-      loop (Ok (raw_options, init)) parsers >>= warn_on_unknown_opts
+      let%bind raw_options = parse_lines lines in
+      let%bind options =
+        Base.List.fold_result
+          parsers
+          ~init:(raw_options, init)
+          ~f:(fun (raw_opts, config) (key, f) ->
+            match SMap.find_opt key raw_opts with
+            | None -> Ok (raw_opts, config)
+            | Some values ->
+              let%bind config =
+                f values config |> Base.Result.map_error ~f:(error_of_opt_error key)
+              in
+              let new_raw_opts = SMap.remove key raw_opts in
+              Ok (new_raw_opts, config)
+        )
+      in
+      warn_on_unknown_opts options
 end
 
 type rollout = {
@@ -1005,7 +940,6 @@ end = struct
           pp_opt o "module.system" (module_system options.module_system);
         if options.all <> default_options.all then
           pp_opt o "all" (string_of_bool (Base.Option.value options.all ~default:false));
-        if options.temp_dir <> default_options.temp_dir then pp_opt o "temp_dir" options.temp_dir;
         if options.include_warnings <> default_options.include_warnings then
           pp_opt o "include_warnings" (string_of_bool options.include_warnings)
       )
@@ -1070,30 +1004,31 @@ let empty_config =
     version = None;
   }
 
-let group_into_sections : line list -> (section list, error) result =
+let group_into_sections =
   let is_section_header = Str.regexp "^\\[\\(.*\\)\\]$" in
-  let rec loop acc lines =
-    acc >>= fun (seen, sections, (section_name, section_lines)) ->
-    match lines with
-    | [] ->
-      let section = (section_name, Base.List.rev section_lines) in
-      Ok (Base.List.rev (section :: sections))
-    | (ln, line) :: rest ->
-      if Str.string_match is_section_header line 0 then
-        let sections = (section_name, Base.List.rev section_lines) :: sections in
-        let section_name = Str.matched_group 1 line in
-        if SSet.mem section_name seen then
-          Error (ln, spf "contains duplicate section: \"%s\"" section_name)
-        else
-          let seen = SSet.add section_name seen in
-          let section = ((ln, section_name), []) in
-          let acc = Ok (seen, sections, section) in
-          loop acc rest
-      else
-        let acc = Ok (seen, sections, (section_name, (ln, line) :: section_lines)) in
-        loop acc rest
-  in
-  (fun lines -> loop (Ok (SSet.empty, [], ((0, ""), []))) lines)
+  fun (lines : line list) : (section list, error) result ->
+    let%bind (_, sections, (section_name, section_lines)) =
+      Base.List.fold_result
+        lines
+        ~init:(SSet.empty, [], ((0, ""), []))
+        ~f:(fun (seen, sections, (section_name, section_lines)) (ln, line) ->
+          if Str.string_match is_section_header line 0 then
+            let sections = (section_name, Base.List.rev section_lines) :: sections in
+            let section_name = Str.matched_group 1 line in
+            if SSet.mem section_name seen then
+              Error (ln, spf "contains duplicate section: \"%s\"" section_name)
+            else
+              let seen = SSet.add section_name seen in
+              let section = ((ln, section_name), []) in
+              Ok (seen, sections, section)
+          else
+            Ok (seen, sections, (section_name, (ln, line) :: section_lines)))
+    in
+    let sections =
+      (* finalize last section *)
+      (section_name, Base.List.rev section_lines) :: sections
+    in
+    Ok (Base.List.rev sections)
 
 let trim_lines lines =
   lines
@@ -1127,7 +1062,7 @@ let parse_declarations lines config =
   Ok ({ config with declarations }, [])
 
 let parse_options lines config : (config * warning list, error) result =
-  Opts.parse config.options lines >>= fun (options, warnings) ->
+  let%bind (options, warnings) = Opts.parse config.options lines in
   Ok ({ config with options }, warnings)
 
 let parse_version lines config =
@@ -1151,20 +1086,13 @@ let parse_version lines config =
 
 let parse_lints lines config : (config * warning list, error) result =
   let lines = trim_labeled_lines lines in
-  LintSettings.of_lines config.lint_severities lines >>= fun (lint_severities, warnings) ->
+  let%bind (lint_severities, warnings) = LintSettings.of_lines config.lint_severities lines in
   Ok ({ config with lint_severities }, warnings)
 
 let parse_strict lines config =
   let lines = trim_labeled_lines lines in
-  StrictModeSettings.of_lines lines >>= fun strict_mode -> Ok ({ config with strict_mode }, [])
-
-(* Basically fold_left but with early exit when f returns an Error *)
-let rec fold_left_stop_on_error
-    (l : 'elem list) ~(acc : 'acc) ~(f : 'acc -> 'elem -> ('acc, 'error) result) :
-    ('acc, 'error) result =
-  match l with
-  | [] -> Ok acc
-  | elem :: rest -> f acc elem >>= fun acc -> fold_left_stop_on_error rest ~acc ~f
+  let%bind strict_mode = StrictModeSettings.of_lines lines in
+  Ok ({ config with strict_mode }, [])
 
 (* Rollouts are based on randomness, but we want it to be stable from run to run. So we seed our
  * pseudo random number generator with
@@ -1196,75 +1124,82 @@ let calculate_pct rollout_name =
 let parse_rollouts config lines =
   Base.Option.value_map lines ~default:(Ok config) ~f:(fun lines ->
       let lines = trim_labeled_lines lines in
-      fold_left_stop_on_error lines ~acc:SMap.empty ~f:(fun rollouts (line_num, line) ->
-          (* A rollout's name is can only contain [a-zA-Z0-9._] *)
-          if Str.string_match (Str.regexp "^\\([a-zA-Z0-9._]+\\)=\\(.*\\)$") line 0 then
-            let rollout_name = Str.matched_group 1 line in
-            let rollout_values_raw = Str.matched_group 2 line in
-            let my_pct = calculate_pct rollout_name in
-            fold_left_stop_on_error
-              (* Groups are delimited with commas *)
-              Str.(split (regexp ",") rollout_values_raw)
-              ~acc:(None, SSet.empty, 0)
-              ~f:(fun (enabled_group, disabled_groups, pct_total) raw_group ->
-                let raw_group = String.trim raw_group in
-                (* A rollout group has the for "X% label", where label can only contain
-                 * [a-zA-Z0-9._] *)
-                if Str.string_match (Str.regexp "^\\([0-9]+\\)% \\([a-zA-Z0-9._]+\\)$") raw_group 0
-                then
-                  let group_pct = Str.matched_group 1 raw_group |> int_of_string in
-                  let group_name = Str.matched_group 2 raw_group in
-                  if enabled_group = Some group_name || SSet.mem group_name disabled_groups then
-                    Error
-                      ( line_num,
-                        spf
-                          "Groups must have unique names. There is more than one %S group"
-                          group_name
-                      )
-                  else
-                    let (enabled_group, disabled_groups) =
-                      match enabled_group with
-                      | None when my_pct < group_pct + pct_total ->
-                        (* This is the first group that passes my_pct, so we enable it *)
-                        (Some group_name, disabled_groups)
-                      | _ ->
-                        (* Either we've already chosen the enabled group or we haven't passed my_pct *)
-                        (enabled_group, SSet.add group_name disabled_groups)
-                    in
-                    Ok (enabled_group, disabled_groups, pct_total + group_pct)
-                else
+      let%bind rollouts =
+        Base.List.fold_result lines ~init:SMap.empty ~f:(fun rollouts (line_num, line) ->
+            (* A rollout's name is can only contain [a-zA-Z0-9._] *)
+            if Str.string_match (Str.regexp "^\\([a-zA-Z0-9._]+\\)=\\(.*\\)$") line 0 then
+              let rollout_name = Str.matched_group 1 line in
+              let rollout_values_raw = Str.matched_group 2 line in
+              let my_pct = calculate_pct rollout_name in
+              let%bind (enabled_group, disabled_groups, pct_total) =
+                Base.List.fold_result
+                  (* Groups are delimited with commas *)
+                  Str.(split (regexp ",") rollout_values_raw)
+                  ~init:(None, SSet.empty, 0)
+                  ~f:(fun (enabled_group, disabled_groups, pct_total) raw_group ->
+                    let raw_group = String.trim raw_group in
+                    (* A rollout group has the for "X% label", where label can only contain
+                     * [a-zA-Z0-9._] *)
+                    if
+                      Str.string_match
+                        (Str.regexp "^\\([0-9]+\\)% \\([a-zA-Z0-9._]+\\)$")
+                        raw_group
+                        0
+                    then
+                      let group_pct = Str.matched_group 1 raw_group |> int_of_string in
+                      let group_name = Str.matched_group 2 raw_group in
+                      if enabled_group = Some group_name || SSet.mem group_name disabled_groups then
+                        Error
+                          ( line_num,
+                            spf
+                              "Groups must have unique names. There is more than one %S group"
+                              group_name
+                          )
+                      else
+                        let (enabled_group, disabled_groups) =
+                          match enabled_group with
+                          | None when my_pct < group_pct + pct_total ->
+                            (* This is the first group that passes my_pct, so we enable it *)
+                            (Some group_name, disabled_groups)
+                          | _ ->
+                            (* Either we've already chosen the enabled group or we haven't passed my_pct *)
+                            (enabled_group, SSet.add group_name disabled_groups)
+                        in
+                        Ok (enabled_group, disabled_groups, pct_total + group_pct)
+                    else
+                      Error
+                        ( line_num,
+                          "Malformed rollout group. A group should be a percentage and an identifier, "
+                          ^ "like `50% on`"
+                        ))
+              in
+              if pct_total = 100 then
+                if SMap.mem rollout_name rollouts then
                   Error
                     ( line_num,
-                      "Malformed rollout group. A group should be a percentage and an identifier, "
-                      ^ "like `50% on`"
-                    ))
-            >>= fun (enabled_group, disabled_groups, pct_total) ->
-            if pct_total = 100 then
-              if SMap.mem rollout_name rollouts then
+                      spf
+                        "Rollouts must have unique names. There already is a %S rollout"
+                        rollout_name
+                    )
+                else
+                  match enabled_group with
+                  | None -> Error (line_num, "Invariant violation: failed to choose a group")
+                  | Some enabled_group ->
+                    Ok (SMap.add rollout_name { enabled_group; disabled_groups } rollouts)
+              else
                 Error
                   ( line_num,
-                    spf
-                      "Rollouts must have unique names. There already is a %S rollout"
-                      rollout_name
+                    spf "Rollout groups must sum to 100%%. %S sums to %d%%" rollout_name pct_total
                   )
-              else
-                match enabled_group with
-                | None -> Error (line_num, "Invariant violation: failed to choose a group")
-                | Some enabled_group ->
-                  Ok (SMap.add rollout_name { enabled_group; disabled_groups } rollouts)
             else
               Error
                 ( line_num,
-                  spf "Rollout groups must sum to 100%%. %S sums to %d%%" rollout_name pct_total
+                  "Malformed rollout. A rollout should be an identifier followed by a list of groups, "
+                  ^ "like `myRollout=10% on, 50% off`"
                 )
-          else
-            Error
-              ( line_num,
-                "Malformed rollout. A rollout should be an identifier followed by a list of groups, "
-                ^ "like `myRollout=10% on, 50% off`"
-              )
-      )
-      >>= fun rollouts -> Ok { config with rollouts }
+        )
+      in
+      Ok { config with rollouts }
   )
 
 let parse_section config ((section_ln, section), lines) : (config * warning list, error) result =
@@ -1282,64 +1217,65 @@ let parse_section config ((section_ln, section), lines) : (config * warning list
   | ("version", _) -> parse_version lines config
   | _ -> Ok (config, [(section_ln, spf "Unsupported config section: \"%s\"" section)])
 
-let parse =
-  (* Filter every section (except the rollouts section) for disabled rollouts. For example, if a
-   * line starts with (my_rollout=on) and the "on" group is not enabled for the "my_rollout"
-   * rollout, then drop the line completely.
-   *
-   * Lines with enabled rollouts just have the prefix stripped
-   *)
-  let filter_sections_by_rollout sections config =
-    (* The rollout prefix looks like `(rollout_name=group_name)` *)
-    let rollout_regex = Str.regexp "^(\\([a-zA-Z0-9._]+\\)=\\([a-zA-Z0-9._]+\\))\\(.*\\)$" in
-    fold_left_stop_on_error sections ~acc:[] ~f:(fun acc (section_name, lines) ->
-        fold_left_stop_on_error lines ~acc:[] ~f:(fun acc (line_num, line) ->
-            if Str.string_match rollout_regex line 0 then
-              let rollout_name = Str.matched_group 1 line in
-              let group_name = Str.matched_group 2 line in
-              let line = Str.matched_group 3 line in
-              match SMap.find_opt rollout_name config.rollouts with
-              | None -> Error (line_num, spf "Unknown rollout %S" rollout_name)
-              | Some { enabled_group; disabled_groups } ->
-                if enabled_group = group_name then
-                  Ok ((line_num, line) :: acc)
-                else if SSet.mem group_name disabled_groups then
-                  Ok acc
-                else
-                  Error (line_num, spf "Unknown group %S in rollout %S" group_name rollout_name)
-            else
-              Ok ((line_num, line) :: acc)
-        )
-        >>= fun lines -> Ok ((section_name, Base.List.rev lines) :: acc)
-    )
-    >>= fun sections -> Ok (config, Base.List.rev sections)
-  in
-  let process_rollouts config sections =
-    let rollout_section_lines = ref None in
-    let sections =
-      Base.List.filter sections ~f:(function
-          | ((_, "rollouts"), lines) ->
-            rollout_section_lines := Some lines;
-            false
-          | _ -> true
-          )
-    in
-    parse_rollouts config !rollout_section_lines >>= filter_sections_by_rollout sections
-  in
-  let rec loop acc sections =
-    acc >>= fun (config, warn_acc) ->
-    match sections with
-    | [] -> Ok (config, Base.List.rev warn_acc)
-    | section :: rest ->
-      parse_section config section >>= fun (config, warnings) ->
-      let acc = Ok (config, Base.List.rev_append warnings warn_acc) in
-      loop acc rest
-  in
-  fun config lines ->
-    group_into_sections lines >>= process_rollouts config >>= fun (config, sections) ->
-    loop (Ok (config, [])) sections
+(** Filter every section (except the rollouts section) for disabled rollouts. For example, if a
+    line starts with (my_rollout=on) and the "on" group is not enabled for the "my_rollout"
+    rollout, then drop the line completely.
 
-let is_not_comment =
+    Lines with enabled rollouts just have the prefix stripped *)
+let filter_sections_by_rollout sections config =
+  (* The rollout prefix looks like `(rollout_name=group_name)` *)
+  let rollout_regex = Str.regexp "^(\\([a-zA-Z0-9._]+\\)=\\([a-zA-Z0-9._]+\\))\\(.*\\)$" in
+  let%bind sections =
+    Base.List.fold_result sections ~init:[] ~f:(fun acc (section_name, lines) ->
+        let%bind lines =
+          Base.List.fold_result lines ~init:[] ~f:(fun acc (line_num, line) ->
+              if Str.string_match rollout_regex line 0 then
+                let rollout_name = Str.matched_group 1 line in
+                let group_name = Str.matched_group 2 line in
+                let line = Str.matched_group 3 line in
+                match SMap.find_opt rollout_name config.rollouts with
+                | None -> Error (line_num, spf "Unknown rollout %S" rollout_name)
+                | Some { enabled_group; disabled_groups } ->
+                  if enabled_group = group_name then
+                    Ok ((line_num, line) :: acc)
+                  else if SSet.mem group_name disabled_groups then
+                    Ok acc
+                  else
+                    Error (line_num, spf "Unknown group %S in rollout %S" group_name rollout_name)
+              else
+                Ok ((line_num, line) :: acc)
+          )
+        in
+        Ok ((section_name, Base.List.rev lines) :: acc)
+    )
+  in
+  Ok (config, Base.List.rev sections)
+
+let process_rollouts config sections =
+  let rollout_section_lines = ref None in
+  let sections =
+    Base.List.filter sections ~f:(function
+        | ((_, "rollouts"), lines) ->
+          rollout_section_lines := Some lines;
+          false
+        | _ -> true
+        )
+  in
+  let%bind config = parse_rollouts config !rollout_section_lines in
+  filter_sections_by_rollout sections config
+
+let parse config lines =
+  let%bind sections = group_into_sections lines in
+  let%bind (config, sections) = process_rollouts config sections in
+  let%bind (config, warn_acc) =
+    Base.List.fold_result sections ~init:(config, []) ~f:(fun (config, warn_acc) section ->
+        let%bind (config, warnings) = parse_section config section in
+        Ok (config, Base.List.rev_append warnings warn_acc)
+    )
+  in
+  Ok (config, Base.List.rev warn_acc)
+
+let is_meaningful_line =
   let comment_regexps =
     [
       Str.regexp_string "#";
@@ -1351,10 +1287,11 @@ let is_not_comment =
     ]
   in
   fun (_, line) ->
-    not (Base.List.exists ~f:(fun regexp -> Str.string_match regexp line 0) comment_regexps)
+    String.length line > 0
+    && not (Base.List.exists ~f:(fun regexp -> Str.string_match regexp line 0) comment_regexps)
 
 let read filename =
-  let contents = Sys_utils.cat_no_fail filename in
+  let contents = Sys_utils.cat filename in
   let hash =
     let xx_state = Xx.init 0L in
     Xx.update xx_state contents;
@@ -1362,9 +1299,9 @@ let read filename =
   in
   let lines =
     contents
-    |> Sys_utils.split_lines
-    |> Base.List.mapi ~f:(fun i line -> (i + 1, String.trim line))
-    |> Base.List.filter ~f:is_not_comment
+    |> Base.String.split_lines
+    |> Base.List.rev_mapi ~f:(fun i line -> (i + 1, String.trim line))
+    |> Base.List.rev_filter ~f:is_meaningful_line
   in
   (lines, hash)
 
@@ -1372,9 +1309,9 @@ let init ~ignores ~untyped ~declarations ~includes ~libs ~options ~lints =
   let ( >>= )
       (acc : (config * warning list, error) result)
       (fn : config -> (config * warning list, error) result) =
-    let ( >>= ) = Base.Result.( >>= ) in
-    acc >>= fun (config, warn_acc) ->
-    fn config >>= fun (config, warnings) -> Ok (config, Base.List.rev_append warnings warn_acc)
+    let%bind (config, warn_acc) = acc in
+    let%bind (config, warnings) = fn config in
+    Ok (config, Base.List.rev_append warnings warn_acc)
   in
   let ignores_lines = Base.List.map ~f:(fun s -> (1, s)) ignores in
   let untyped_lines = Base.List.map ~f:(fun s -> (1, s)) untyped in
@@ -1448,51 +1385,35 @@ let all c = c.options.Opts.all
 
 let autoimports c = c.options.Opts.autoimports
 
+let autoimports_ranked_by_usage c = c.options.Opts.autoimports_ranked_by_usage
+
 let automatic_require_default c = c.options.Opts.automatic_require_default
 
 let babel_loose_array_spread c = c.options.Opts.babel_loose_array_spread
 
-let direct_dependent_files_fix c = c.options.Opts.direct_dependent_files_fix
+let conditional_type c = c.options.Opts.conditional_type
 
-let disable_live_non_parse_errors c = c.options.Opts.disable_live_non_parse_errors
+let cycle_errors c = c.options.Opts.cycle_errors
+
+let cycle_errors_includes c = c.options.Opts.cycle_errors_includes
+
+let direct_dependent_files_fix c = c.options.Opts.direct_dependent_files_fix
 
 let emoji c = c.options.Opts.emoji
 
-let format_bracket_spacing c = c.options.Opts.format_bracket_spacing
-
-let format_single_quotes c = c.options.Opts.format_single_quotes
-
-let max_literal_length c = c.options.Opts.max_literal_length
-
 let enable_const_params c = c.options.Opts.enable_const_params
-
-let enforce_local_inference_annotations c = c.options.Opts.enforce_local_inference_annotations
-
-let local_inference_annotation_dirs c = c.options.Opts.local_inference_annotation_dirs
-
-let enforce_this_annotations c = c.options.Opts.enforce_this_annotations
 
 let enforce_strict_call_arity c = c.options.Opts.enforce_strict_call_arity
 
 let enums c = c.options.Opts.enums
 
-let env_mode c = c.options.Opts.env_mode
+let inference_mode c = c.options.Opts.inference_mode
 
-let env_mode_constrain_write_dirs c = c.options.Opts.env_mode_constrain_write_dirs
+let inference_mode_lti_includes c = c.options.Opts.inference_mode_lti_includes
+
+let estimate_recheck_time c = c.options.Opts.estimate_recheck_time
 
 let exact_by_default c = c.options.Opts.exact_by_default
-
-let file_watcher c = c.options.Opts.file_watcher
-
-let file_watcher_mergebase_with c = c.options.Opts.file_watcher_mergebase_with
-
-let file_watcher_timeout c = c.options.Opts.file_watcher_timeout
-
-let watchman_sync_timeout c = c.options.Opts.watchman_sync_timeout
-
-let watchman_defer_states c = c.options.Opts.watchman_defer_states
-
-let watchman_survive_restarts c = c.options.Opts.watchman_survive_restarts
 
 let facebook_fbs c = c.options.Opts.facebook_fbs
 
@@ -1500,14 +1421,33 @@ let facebook_fbt c = c.options.Opts.facebook_fbt
 
 let facebook_module_interop c = c.options.Opts.facebook_module_interop
 
-let relay_integration c = c.options.Opts.relay_integration
+let file_watcher c = c.options.Opts.file_watcher
 
-let relay_integration_excludes c = c.options.Opts.relay_integration_excludes
+let file_watcher_mergebase_with c = c.options.Opts.file_watcher_mergebase_with
 
-let relay_integration_module_prefix c = c.options.Opts.relay_integration_module_prefix
+let file_watcher_mergebase_with_git c = c.options.Opts.file_watcher_mergebase_with_git
 
-let relay_integration_module_prefix_includes c =
-  c.options.Opts.relay_integration_module_prefix_includes
+let file_watcher_mergebase_with_hg c = c.options.Opts.file_watcher_mergebase_with_hg
+
+let file_watcher_timeout c = c.options.Opts.file_watcher_timeout
+
+let format_bracket_spacing c = c.options.Opts.format_bracket_spacing
+
+let format_single_quotes c = c.options.Opts.format_single_quotes
+
+let gc_worker_custom_major_ratio c = c.options.Opts.gc_worker_custom_major_ratio
+
+let gc_worker_custom_minor_max_size c = c.options.Opts.gc_worker_custom_minor_max_size
+
+let gc_worker_custom_minor_ratio c = c.options.Opts.gc_worker_custom_minor_ratio
+
+let gc_worker_major_heap_increment c = c.options.Opts.gc_worker_major_heap_increment
+
+let gc_worker_minor_heap_size c = c.options.Opts.gc_worker_minor_heap_size
+
+let gc_worker_space_overhead c = c.options.Opts.gc_worker_space_overhead
+
+let gc_worker_window_size c = c.options.Opts.gc_worker_window_size
 
 let haste_module_ref_prefix c = c.options.Opts.haste_module_ref_prefix
 
@@ -1525,13 +1465,16 @@ let include_warnings c = c.options.Opts.include_warnings
 
 let lazy_mode c = c.options.Opts.lazy_mode
 
-let log_file c = c.options.Opts.log_file
+(* global defaults for lint severities and strict mode *)
+let lint_severities c = c.lint_severities
 
 let log_saving c = c.options.Opts.log_saving
 
 let max_files_checked_per_worker c = c.options.Opts.max_files_checked_per_worker
 
 let max_header_tokens c = c.options.Opts.max_header_tokens
+
+let max_literal_length c = c.options.Opts.max_literal_length
 
 let max_rss_bytes_for_check_per_worker c = c.options.Opts.max_rss_bytes_for_check_per_worker
 
@@ -1540,6 +1483,8 @@ let max_seconds_for_check_per_worker c = c.options.Opts.max_seconds_for_check_pe
 let max_workers c = c.options.Opts.max_workers
 
 let merge_timeout c = c.options.Opts.merge_timeout
+
+let missing_module_generators c = c.options.Opts.missing_module_generators
 
 let module_file_exts c = c.options.Opts.module_file_exts
 
@@ -1553,7 +1498,9 @@ let modules_are_use_strict c = c.options.Opts.modules_are_use_strict
 
 let munge_underscores c = c.options.Opts.munge_underscores
 
-let new_merge c = c.options.Opts.new_merge
+let array_literal_providers c = c.options.Opts.array_literal_providers
+
+let array_literal_providers_includes c = c.options.Opts.array_literal_providers_includes
 
 let no_flowlib c = c.options.Opts.no_flowlib
 
@@ -1565,21 +1512,31 @@ let node_resolver_dirnames c = c.options.Opts.node_resolver_dirnames
 
 let node_resolver_root_relative_dirnames c = c.options.Opts.node_resolver_root_relative_dirnames
 
-let prioritize_dependency_checks c = c.options.Opts.prioritize_dependency_checks
-
 let react_runtime c = c.options.Opts.react_runtime
 
 let react_server_component_exts c = c.options.Opts.react_server_component_exts
 
 let recursion_limit c = c.options.Opts.recursion_limit
 
-let refactor c = c.options.Opts.refactor
+let relay_integration c = c.options.Opts.relay_integration
+
+let relay_integration_excludes c = c.options.Opts.relay_integration_excludes
+
+let relay_integration_module_prefix c = c.options.Opts.relay_integration_module_prefix
+
+let relay_integration_module_prefix_includes c =
+  c.options.Opts.relay_integration_module_prefix_includes
+
+let required_version c = c.version
 
 let root_name c = c.options.Opts.root_name
 
-let saved_state_fetcher c = c.options.Opts.saved_state_fetcher
+let run_post_inference_implicit_instantiation c =
+  c.options.Opts.run_post_inference_implicit_instantiation
 
-let saved_state_load_sighashes c = c.options.Opts.saved_state_load_sighashes
+let saved_state_allow_reinit c = c.options.Opts.saved_state_allow_reinit
+
+let saved_state_fetcher c = c.options.Opts.saved_state_fetcher
 
 let shm_hash_table_pow c = c.options.Opts.shm_hash_table_pow
 
@@ -1591,42 +1548,16 @@ let strict_es6_import_export c = c.options.Opts.strict_es6_import_export
 
 let strict_es6_import_export_excludes c = c.options.Opts.strict_es6_import_export_excludes
 
-let suppress_types c = c.options.Opts.suppress_types
+let strict_mode c = c.strict_mode
 
-let temp_dir c = c.options.Opts.temp_dir
+let suppress_types c = c.options.Opts.suppress_types
 
 let traces c = c.options.Opts.traces
 
 let trust_mode c = c.options.Opts.trust_mode
 
-let type_asserts c = c.options.Opts.type_asserts
-
-let required_version c = c.version
-
-let statement_reorder_checking c = c.options.Opts.statement_reorder_checking
-
-let cycle_errors c = c.options.Opts.cycle_errors
-
-let run_post_inference_implicit_instantiation c =
-  c.options.Opts.run_post_inference_implicit_instantiation
-
 let wait_for_recheck c = c.options.Opts.wait_for_recheck
 
-(* global defaults for lint severities and strict mode *)
-let lint_severities c = c.lint_severities
+let watchman_defer_states c = c.options.Opts.watchman_defer_states
 
-let strict_mode c = c.strict_mode
-
-let gc_worker_minor_heap_size c = c.options.Opts.gc_worker_minor_heap_size
-
-let gc_worker_major_heap_increment c = c.options.Opts.gc_worker_major_heap_increment
-
-let gc_worker_space_overhead c = c.options.Opts.gc_worker_space_overhead
-
-let gc_worker_window_size c = c.options.Opts.gc_worker_window_size
-
-let gc_worker_custom_major_ratio c = c.options.Opts.gc_worker_custom_major_ratio
-
-let gc_worker_custom_minor_ratio c = c.options.Opts.gc_worker_custom_minor_ratio
-
-let gc_worker_custom_minor_max_size c = c.options.Opts.gc_worker_custom_minor_max_size
+let watchman_sync_timeout c = c.options.Opts.watchman_sync_timeout

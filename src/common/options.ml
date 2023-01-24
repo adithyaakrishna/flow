@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -22,6 +22,7 @@ type jsx_mode =
 type saved_state_fetcher =
   | Dummy_fetcher
   | Local_fetcher
+  | Scm_fetcher
   | Fb_fetcher
 
 type trust_mode =
@@ -29,18 +30,9 @@ type trust_mode =
   | CheckTrust
   | SilentTrust
 
-type statement_order_mode =
-  | Lexical
-  | Dependency
-  | LexicalWithDependencyValidation
-
-type env_option =
+type inference_mode =
   | ConstrainWrites
-  | ClassicTypeAtPos
-
-type env_mode =
-  | ClassicEnv of env_option list
-  | SSAEnv of { resolved: bool }
+  | LTI
 
 type react_runtime =
   | ReactRuntimeAutomatic
@@ -72,28 +64,31 @@ type t = {
   opt_all: bool;
   opt_any_propagation: bool;
   opt_autoimports: bool;
+  opt_autoimports_ranked_by_usage: bool;
   opt_automatic_require_default: bool;
   opt_babel_loose_array_spread: bool;
+  opt_conditional_type: bool;
+  opt_cycle_errors: bool;
+  opt_cycle_errors_includes: string list;
   opt_debug: bool;
   opt_direct_dependent_files_fix: bool;
   opt_enable_const_params: bool;
+  opt_enable_relay_integration: bool;
   opt_enabled_rollouts: string SMap.t;
-  opt_enforce_local_inference_annotations: bool;
-  opt_local_inference_annotation_dirs: string list;
-  opt_enforce_this_annotations: bool;
-  opt_experimental_infer_indexers: bool;
   opt_enforce_strict_call_arity: bool;
   opt_enums: bool;
+  opt_inference_mode: inference_mode;
+  opt_inference_mode_lti_includes: string list;
+  opt_estimate_recheck_time: bool;
   opt_exact_by_default: bool;
   opt_facebook_fbs: string option;
   opt_facebook_fbt: string option;
   opt_facebook_module_interop: bool;
   opt_file_options: Files.options;
-  opt_flowconfig_name: string;
   opt_flowconfig_hash: string;
+  opt_flowconfig_name: string;
   opt_format: format;
   opt_gc_worker: gc_control;
-  opt_enable_relay_integration: bool;
   opt_haste_module_ref_prefix: string option;
   opt_haste_name_reducers: (Str.regexp * string) list;
   opt_haste_paths_excludes: string list;
@@ -113,46 +108,46 @@ type t = {
   opt_max_seconds_for_check_per_worker: float;
   opt_max_workers: int;
   opt_merge_timeout: float option;
-  opt_module_name_mappers: (Str.regexp * string) list;
+  opt_missing_module_generators: (Str.regexp * string) list;
   opt_module: module_system;
+  opt_module_name_mappers: (Str.regexp * string) list;
   opt_modules_are_use_strict: bool;
   opt_munge_underscores: bool;
+  opt_array_literal_providers: bool;
+  opt_array_literal_providers_includes: string list;
   opt_node_main_fields: string list;
-  opt_new_merge: bool;
   opt_node_resolver_allow_root_relative: bool;
   opt_node_resolver_root_relative_dirnames: string list;
-  opt_prioritize_dependency_checks: bool;
   opt_profile: bool;
   opt_quiet: bool;
   opt_react_runtime: react_runtime;
   opt_react_server_component_exts: SSet.t;
   opt_recursion_limit: int;
-  opt_refactor: bool;
   opt_relay_integration_excludes: Str.regexp list;
   opt_relay_integration_module_prefix: string option;
   opt_relay_integration_module_prefix_includes: Str.regexp list;
-  opt_statement_reorder_checking: statement_order_mode;
-  opt_cycle_errors: bool;
-  opt_root_name: string option;
   opt_root: Path.t;
+  opt_root_name: string option;
   opt_run_post_inference_implicit_instantiation: bool;
+  opt_enable_post_inference_targ_widened_check: bool;
+  opt_save_implicit_instantiation_results: bool;
+  opt_saved_state_allow_reinit: bool;
   opt_saved_state_fetcher: saved_state_fetcher;
-  opt_saved_state_load_sighashes: bool;
   opt_saved_state_force_recheck: bool;
   opt_saved_state_no_fallback: bool;
-  opt_strict_es6_import_export_excludes: string list;
+  opt_saved_state_skip_version_check: bool;
+  opt_saved_state_verify: bool;
   opt_strict_es6_import_export: bool;
+  opt_strict_es6_import_export_excludes: string list;
   opt_strict_mode: StrictModeSettings.t;
   opt_strip_root: bool;
   opt_suppress_types: SSet.t;
   opt_temp_dir: string;
-  opt_env_mode: env_mode;
-  opt_env_mode_constrain_write_dirs: string list;
   opt_traces: int;
   opt_trust_mode: trust_mode;
-  opt_type_asserts: bool;
   opt_verbose: Verbose.t option;
   opt_wait_for_recheck: bool;
+  opt_distributed: bool;
 }
 
 let abstract_locations opts = opts.opt_abstract_locations
@@ -163,13 +158,17 @@ let any_propagation opts = opts.opt_any_propagation
 
 let autoimports opts = opts.opt_autoimports
 
+let autoimports_ranked_by_usage opts = opts.opt_autoimports_ranked_by_usage
+
 let automatic_require_default opts = opts.opt_automatic_require_default
 
 let babel_loose_array_spread opts = opts.opt_babel_loose_array_spread
 
-let new_merge opts = opts.opt_new_merge
+let conditional_type opts = opts.opt_conditional_type
 
-let max_literal_length opts = opts.opt_max_literal_length
+let cycle_errors opts = opts.opt_cycle_errors
+
+let cycle_errors_includes opts = opts.opt_cycle_errors_includes
 
 let direct_dependent_files_fix opts = opts.opt_direct_dependent_files_fix
 
@@ -181,25 +180,33 @@ let enabled_rollouts opts = opts.opt_enabled_rollouts
 
 let enforce_strict_call_arity opts = opts.opt_enforce_strict_call_arity
 
-let enforce_local_inference_annotations opts = opts.opt_enforce_local_inference_annotations
-
-let local_inference_annotation_dirs opts = opts.opt_local_inference_annotation_dirs
-
-let enforce_this_annotations opts = opts.opt_enforce_this_annotations
-
-let experimental_infer_indexers opts = opts.opt_experimental_infer_indexers
-
 let enums opts = opts.opt_enums
+
+let inference_mode opts = opts.opt_inference_mode
+
+let inference_mode_lti_includes opts = opts.opt_inference_mode_lti_includes
+
+let estimate_recheck_time opts = opts.opt_estimate_recheck_time
+
+let exact_by_default opts = opts.opt_exact_by_default
+
+let facebook_fbs opts = opts.opt_facebook_fbs
+
+let facebook_fbt opts = opts.opt_facebook_fbt
+
+let facebook_module_interop opts = opts.opt_facebook_module_interop
+
+let file_options opts = opts.opt_file_options
+
+let flowconfig_hash opts = opts.opt_flowconfig_hash
+
+let flowconfig_name opts = opts.opt_flowconfig_name
 
 let format_bracket_spacing opts = opts.opt_format.opt_bracket_spacing
 
 let format_single_quotes opts = opts.opt_format.opt_single_quotes
 
-let env_mode opts = opts.opt_env_mode
-
-let env_mode_constrain_write_dirs opts = opts.opt_env_mode_constrain_write_dirs
-
-let exact_by_default opts = opts.opt_exact_by_default
+let gc_worker opts = opts.opt_gc_worker
 
 let haste_module_ref_prefix opts = opts.opt_haste_module_ref_prefix
 
@@ -211,17 +218,15 @@ let haste_paths_includes opts = opts.opt_haste_paths_includes
 
 let haste_use_name_reducers opts = opts.opt_haste_use_name_reducers
 
-let flowconfig_name opts = opts.opt_flowconfig_name
-
-let flowconfig_hash opts = opts.opt_flowconfig_hash
-
-let file_options opts = opts.opt_file_options
+let include_suppressions opts = opts.opt_include_suppressions
 
 let is_debug_mode opts = opts.opt_debug
 
+let is_quiet opts = opts.opt_quiet
+
 let lazy_mode opts = opts.opt_lazy_mode
 
-let is_quiet opts = opts.opt_quiet
+let lint_severities opts = opts.opt_lint_severities
 
 let log_file opts = opts.opt_log_file
 
@@ -230,6 +235,8 @@ let log_saving opts = opts.opt_log_saving
 let max_files_checked_per_worker opts = opts.opt_max_files_checked_per_worker
 
 let max_header_tokens opts = opts.opt_max_header_tokens
+
+let max_literal_length opts = opts.opt_max_literal_length
 
 let max_rss_bytes_for_check_per_worker opts = opts.opt_max_rss_bytes_for_check_per_worker
 
@@ -241,11 +248,17 @@ let max_workers opts = opts.opt_max_workers
 
 let merge_timeout opts = opts.opt_merge_timeout
 
+let missing_module_generators opts = opts.opt_missing_module_generators
+
 let module_name_mappers opts = opts.opt_module_name_mappers
 
 let module_system opts = opts.opt_module
 
 let modules_are_use_strict opts = opts.opt_modules_are_use_strict
+
+let array_literal_providers opts = opts.opt_array_literal_providers
+
+let array_literal_providers_includes opts = opts.opt_array_literal_providers_includes
 
 let node_main_fields opts = opts.opt_node_main_fields
 
@@ -253,15 +266,11 @@ let node_resolver_allow_root_relative opts = opts.opt_node_resolver_allow_root_r
 
 let node_resolver_root_relative_dirnames opts = opts.opt_node_resolver_root_relative_dirnames
 
-let prioritize_dependency_checks opts = opts.opt_prioritize_dependency_checks
-
 let react_runtime opts = opts.opt_react_runtime
 
 let react_server_component_exts opts = opts.opt_react_server_component_exts
 
 let recursion_limit opts = opts.opt_recursion_limit
-
-let refactor opts = opts.opt_refactor
 
 let relay_integration_excludes opts = opts.opt_relay_integration_excludes
 
@@ -274,28 +283,25 @@ let root opts = opts.opt_root
 
 let root_name opts = opts.opt_root_name
 
-let facebook_fbs opts = opts.opt_facebook_fbs
-
-let facebook_fbt opts = opts.opt_facebook_fbt
-
-let facebook_module_interop opts = opts.opt_facebook_module_interop
-
-let gc_worker opts = opts.opt_gc_worker
-
-let statement_reorder_checking opts = opts.opt_statement_reorder_checking
-
-let cycle_errors opts = opts.opt_cycle_errors
-
 let run_post_inference_implicit_instantiation opts =
   opts.opt_run_post_inference_implicit_instantiation
 
-let saved_state_fetcher opts = opts.opt_saved_state_fetcher
+let enable_post_inference_targ_widened_check opts =
+  opts.opt_enable_post_inference_targ_widened_check
 
-let saved_state_load_sighashes opts = opts.opt_saved_state_load_sighashes
+let save_implicit_instantiation_results opts = opts.opt_save_implicit_instantiation_results
+
+let saved_state_allow_reinit opts = opts.opt_saved_state_allow_reinit
+
+let saved_state_fetcher opts = opts.opt_saved_state_fetcher
 
 let saved_state_force_recheck opts = opts.opt_saved_state_force_recheck
 
 let saved_state_no_fallback opts = opts.opt_saved_state_no_fallback
+
+let saved_state_skip_version_check opts = opts.opt_saved_state_skip_version_check
+
+let saved_state_verify opts = opts.opt_saved_state_verify
 
 let should_ignore_non_literal_requires opts = opts.opt_ignore_non_literal_requires
 
@@ -311,20 +317,16 @@ let strict_es6_import_export opts = opts.opt_strict_es6_import_export
 
 let strict_es6_import_export_excludes opts = opts.opt_strict_es6_import_export_excludes
 
+let strict_mode opts = opts.opt_strict_mode
+
 let suppress_types opts = opts.opt_suppress_types
 
 let temp_dir opts = opts.opt_temp_dir
+
+let trust_mode opts = opts.opt_trust_mode
 
 let verbose opts = opts.opt_verbose
 
 let wait_for_recheck opts = opts.opt_wait_for_recheck
 
-let include_suppressions opts = opts.opt_include_suppressions
-
-let lint_severities opts = opts.opt_lint_severities
-
-let strict_mode opts = opts.opt_strict_mode
-
-let trust_mode opts = opts.opt_trust_mode
-
-let type_asserts opts = opts.opt_type_asserts
+let distributed opts = opts.opt_distributed

@@ -1,15 +1,15 @@
 // @flow
 
-import React from 'react';
+import * as React from 'react';
 
 {
-  const Context = React.createContext('div');
+  const Context = React.createContext<string>('div');
   const {Consumer, Provider} = Context;
 
   class Foo extends React.Component<{}> {
     divRef: {current: null | HTMLDivElement} = React.createRef();
 
-    render() {
+    render(): React.Node {
       return (
         <React.Fragment>
           <Provider value='span'>

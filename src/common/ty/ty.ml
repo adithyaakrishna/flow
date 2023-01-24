@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,18 +16,17 @@ type aloc = (ALoc.t[@printer (fun fmt loc -> fprintf fmt "%s" (ALoc.to_string_no
  * variant type. To ensure that all such methods have been overridden, check the
  * file generated with
  *
- *  ocamlfind ppx_tools/rewriter \
- *    -ppx ' \
+ * ocamlfind ocamlopt \
+ *  -ppx '\
  *    `ocamlfind query ppx_deriving`/ppx_deriving \
  *    `ocamlfind query -predicates ppx_driver,byte -format '%d/%a' ppx_deriving.show` \
  *    `ocamlfind query -predicates ppx_driver,byte -format '%d/%a' visitors.ppx`' \
- *    src/common/ty/ty.ml
+ *  -dsource -c src/common/ty/ty.ml
  *
  * and make sure all fail_* methods in the iter_ty class are overridden in
  * comparator_ty.
  *)
 type t =
-  | TVar of tvar * t list option
   | Bound of aloc * string
   | Generic of generic_t
   | Any of any_kind
@@ -39,19 +38,20 @@ type t =
   | Num of string option
   | Str of Reason.name option
   | Bool of bool option
+  | BigInt of string option
   | NumLit of string
   | StrLit of Reason.name
   | BoolLit of bool
+  | BigIntLit of string
   | Fun of fun_t
   | Obj of obj_t
   | Arr of arr_t
-  | Tup of t list
+  | Tup of tuple_element list
   | Union of bool (* from annotation *) * t * t * t list
   | Inter of t * t * t list
   | InlineInterface of interface_t
   | TypeOf of builtin_or_symbol
   | Utility of utility
-  | Mu of int * t
   | CharSet of string
   | IndexedAccess of {
       _object: t;
@@ -59,18 +59,20 @@ type t =
       optional: bool;
     }
 
-and tvar = RVar of int [@@unboxed]
-
 (* Recursive variable *)
 and generic_t = symbol * gen_kind * t list option
 
 and any_kind =
   | Annotated of aloc
   | AnyError of any_error_kind option
+  | Recursive
   | Unsound of unsoundness_kind
   | Untyped
+  | Placeholder
 
-and any_error_kind = UnresolvedName
+and any_error_kind =
+  | UnresolvedName
+  | MissingAnnotation
 
 and unsoundness_kind =
   | BoundFunctionThis
@@ -86,6 +88,7 @@ and unsoundness_kind =
   | Unchecked
   | Unimplemented
   | UnresolvedType
+  | NonBindingParameter
 
 (* The purpose of adding this distinction is to enable normalized types to mimic
  * the behavior of the signature optimizer when exporting types that contain
@@ -129,6 +132,7 @@ and obj_kind =
   | IndexedObj of dict
 
 and obj_t = {
+  obj_def_loc: aloc option;
   obj_frozen: bool;
   (* `None` means that this field was not computed, because the normalizer config
      option preserve_inferred_literal_types was set to false. `Some b` means that
@@ -147,6 +151,14 @@ and arr_t = {
   arr_elt_t: t;
 }
 
+and tuple_element =
+  | TupleElement of {
+      name: string option;
+      t: t;
+      polarity: polarity;
+    }
+(* caution: be sure to implement fail_tuple_element if >1 constructor! *)
+
 and interface_t = {
   if_extends: generic_t list;
   if_props: prop list;
@@ -159,7 +171,8 @@ and prop =
   | NamedProp of {
       name: Reason.name;
       prop: named_prop;
-      from_proto: bool;
+      inherited: bool;
+      source: prop_source;
       def_loc: aloc option;
     }
   | CallProp of fun_t
@@ -174,6 +187,11 @@ and named_prop =
   | Method of fun_t
   | Get of t
   | Set of t
+
+and prop_source =
+  | Interface
+  | PrimitiveProto of string
+  | Other
 
 and dict = {
   dict_polarity: polarity;
@@ -213,6 +231,8 @@ and utility =
   | ReactElementConfigType of t
   | ReactElementRefType of t
   | ReactConfigType of t * t
+  (* Idx *)
+  | IdxUnwrapType of t
 
 and polarity =
   | Positive
@@ -338,11 +358,27 @@ class ['A] comparator_ty =
         (name_1 : Reason.name)
         (prop_0 : named_prop)
         (prop_1 : named_prop)
-        (from_proto_0 : bool)
-        (from_proto_1 : bool)
+        (inherited_0 : bool)
+        (inherited_1 : bool)
+        (source_0 : prop_source)
+        (source_1 : prop_source)
         (_def_loc_0 : aloc option)
         (_def_loc_1 : aloc option) =
-      super#on_NamedProp env name_0 name_1 prop_0 prop_1 from_proto_0 from_proto_1 None None
+      super#on_NamedProp
+        env
+        name_0
+        name_1
+        prop_0
+        prop_1
+        inherited_0
+        inherited_1
+        source_0
+        source_1
+        None
+        None
+
+    method! on_obj_t env obj_1 obj_2 =
+      super#on_obj_t env { obj_1 with obj_def_loc = None } { obj_2 with obj_def_loc = None }
 
     method! on_name env name0 name1 =
       (* TODO consider implementing this without the string conversion. For now, leaving it this
@@ -355,21 +391,19 @@ class ['A] comparator_ty =
     method! private on_string env x y =
       (* In order to sort integer literals we try to parse all strings as integers *)
       match int_of_string x with
-      | x ->
-        begin
-          match int_of_string y with
-          (* If both parse as integers then we compare them as integers *)
-          | y -> this#on_int env x y
-          (* If xor parses as an integer then that one is "less than" the other *)
-          | exception Failure _ -> raise (Difference (-1))
-        end
-      | exception Failure _ ->
-        begin
-          match int_of_string y with
-          | _ -> raise (Difference 1)
-          (* If neither parse as integers then we compare them as strings *)
-          | exception Failure _ -> assert0 (String.compare x y)
-        end
+      | x -> begin
+        match int_of_string y with
+        (* If both parse as integers then we compare them as integers *)
+        | y -> this#on_int env x y
+        (* If xor parses as an integer then that one is "less than" the other *)
+        | exception Failure _ -> raise (Difference (-1))
+      end
+      | exception Failure _ -> begin
+        match int_of_string y with
+        | _ -> raise (Difference 1)
+        (* If neither parse as integers then we compare them as strings *)
+        | exception Failure _ -> assert0 (String.compare x y)
+      end
 
     method! private on_bool _env x y = assert0 (Stdlib.compare x y)
 
@@ -406,6 +440,8 @@ class ['A] comparator_ty =
 
     method! private fail_named_prop env x y = fail_gen this#tag_of_named_prop env x y
 
+    method! private fail_prop_source env x y = fail_gen this#tag_of_prop_source env x y
+
     method! private fail_utility env x y = fail_gen this#tag_of_utility env x y
 
     method! private fail_polarity env x y = fail_gen this#tag_of_polarity env x y
@@ -434,24 +470,24 @@ class ['A] comparator_ty =
       | Bool _ -> 6
       | NumLit _ -> 7
       | Num _ -> 8
-      | StrLit _ -> 9
-      | Str _ -> 10
-      | Symbol -> 11
-      | TVar _ -> 12
-      | Bound _ -> 13
-      | Generic _ -> 14
-      | TypeOf _ -> 15
-      | Utility _ -> 16
-      | IndexedAccess _ -> 17
-      | Tup _ -> 18
-      | Arr _ -> 19
-      | Fun _ -> 20
-      | Obj _ -> 21
-      | Inter _ -> 22
-      | Union _ -> 23
-      | Mu _ -> 24
-      | InlineInterface _ -> 25
-      | CharSet _ -> 26
+      | BigIntLit _ -> 9
+      | BigInt _ -> 10
+      | StrLit _ -> 11
+      | Str _ -> 12
+      | Symbol -> 13
+      | Bound _ -> 15
+      | Generic _ -> 16
+      | TypeOf _ -> 17
+      | Utility _ -> 18
+      | IndexedAccess _ -> 19
+      | Tup _ -> 20
+      | Arr _ -> 21
+      | Fun _ -> 22
+      | Obj _ -> 23
+      | Inter _ -> 24
+      | Union _ -> 25
+      | InlineInterface _ -> 26
+      | CharSet _ -> 27
 
     method tag_of_decl _ =
       function
@@ -484,8 +520,10 @@ class ['A] comparator_ty =
       function
       | Annotated _ -> 0
       | AnyError _ -> 1
-      | Unsound _ -> 2
-      | Untyped -> 3
+      | Recursive -> 2
+      | Unsound _ -> 3
+      | Untyped -> 4
+      | Placeholder -> 5
 
     method tag_of_unsoundness_kind _ =
       function
@@ -502,6 +540,7 @@ class ['A] comparator_ty =
       | Unchecked -> 11
       | Unimplemented -> 12
       | UnresolvedType -> 13
+      | NonBindingParameter -> 14
 
     method tag_of_prop _env =
       function
@@ -515,6 +554,12 @@ class ['A] comparator_ty =
       | Method _ -> 1
       | Get _ -> 2
       | Set _ -> 3
+
+    method tag_of_prop_source _env =
+      function
+      | Interface -> 0
+      | PrimitiveProto _ -> 1
+      | Other -> 2
 
     method tag_of_utility _ =
       function
@@ -539,6 +584,7 @@ class ['A] comparator_ty =
       | ObjKeyMirror _ -> 22
       | Partial _ -> 23
       | ObjMapConst _ -> 24
+      | IdxUnwrapType _ -> 25
 
     method tag_of_polarity _ =
       function
@@ -603,28 +649,13 @@ let is_dynamic = function
 
 let mk_maybe ~from_bounds t = mk_union ~from_bounds (Null, [Void; t])
 
-let mk_field_props prop_list =
-  Base.List.map
-    ~f:(fun (id, t, opt) ->
-      NamedProp
-        {
-          name = id;
-          prop = Field { t; polarity = Neutral; optional = opt };
-          from_proto = false;
-          def_loc = None;
-        })
-    prop_list
-
-let mk_object ?(obj_kind = InexactObj) ?(obj_frozen = false) ?obj_literal obj_props =
-  Obj { obj_kind; obj_frozen; obj_literal; obj_props }
-
 let mk_generic_class symbol targs = Generic (symbol, ClassKind, targs)
 
 let mk_generic_interface symbol targs = Generic (symbol, InterfaceKind, targs)
 
 let mk_generic_talias symbol targs = Generic (symbol, TypeAliasKind, targs)
 
-let rec mk_exact ty =
+let mk_exact ty =
   match ty with
   | Obj o ->
     let obj_kind =
@@ -633,7 +664,6 @@ let rec mk_exact ty =
       | _ -> o.obj_kind
     in
     Obj { o with obj_kind }
-  | Mu (i, t) -> Mu (i, mk_exact t)
   (* Not applicable *)
   | Any _
   | Top
@@ -644,9 +674,11 @@ let rec mk_exact ty =
   | Num _
   | Str _
   | Bool _
+  | BigInt _
   | NumLit _
   | StrLit _
   | BoolLit _
+  | BigIntLit _
   | Fun _
   | Arr _
   | Tup _
@@ -657,7 +689,6 @@ let rec mk_exact ty =
   | Utility (Exact _) -> ty
   (* Wrap in $Exact<...> *)
   | Generic _
-  | TVar _
   | Bound _
   | Union _
   | Inter _
@@ -697,6 +728,7 @@ let string_of_utility_ctor = function
   | ReactElementConfigType _ -> "React$ElementConfig"
   | ReactElementRefType _ -> "React$ElementRef"
   | ReactConfigType _ -> "React$Config"
+  | IdxUnwrapType _ -> "$Facebookism$IdxUnwrapper"
 
 let types_of_utility = function
   | Keys t -> Some [t]
@@ -720,3 +752,9 @@ let types_of_utility = function
   | ReactElementConfigType t -> Some [t]
   | ReactElementRefType t -> Some [t]
   | ReactConfigType (t1, t2) -> Some [t1; t2]
+  | IdxUnwrapType t -> Some [t]
+
+let string_of_prop_source = function
+  | Interface -> "interface"
+  | PrimitiveProto s -> s ^ ".prototype"
+  | Other -> "other"

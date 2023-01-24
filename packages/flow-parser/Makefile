@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -17,6 +17,8 @@ clean:
 flow_parser.js:
 	if [ -e dist/flow_parser.js ]; then \
 		[ $@ -nt dist/flow_parser.js ] || cp dist/flow_parser.js $@; \
+	elif [[ "${INTERNAL_BUILD}" -eq 1 ]]; then \
+		buck2 build @//mode/opt //flow/src/parser:flow_parser.js --out $@; \
 	else \
 		$(MAKE) -C ../../src/parser js; \
 		cp ../../src/parser/flow_parser.js $@; \

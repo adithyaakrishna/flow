@@ -5,7 +5,7 @@ var x = 42;
 class A<X> {
   s: X;
   f() {
-    var y = 42;
+    var y: number = 42;
     x = this.s;
     y = this.s;
   }
@@ -26,7 +26,7 @@ class B<X> {
 var z = 42;
 
 class C<X> {
-  s;
+  s: mixed;
   f<Y>(y: Y, x: X) {
     this.s = y;
     if (y) {
@@ -65,27 +65,6 @@ class C1<Y> {
     return this.x;
   }
 }
-
-
-class O<T> {
-  a = this;
-  b;
-  f(t: T) {
-    const x = this;
-    this.b = t;
-    return t;
-  }
-}
-
-class H<T> {
-  static _wa;
-  static #pa;
-  f(x: T) {
-    H._wa = x;
-    H.#pa = x;
-  }
-}
-
 
 let globalCtor;
 

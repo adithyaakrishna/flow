@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,36 +8,34 @@
 open Utils_js
 
 type denormalized_file_data = {
-  resolved_requires: Module_heaps.resolved_requires;
+  requires: string array;
+  resolved_modules: Parsing_heaps.resolved_module array;
+  phantom_dependencies: Modulename.Set.t;
   exports: Exports.t;
   hash: Xx.hash;
+  imports: Imports.t;
+  cas_digest: Cas_digest.t option;
 }
 
 type normalized_file_data = denormalized_file_data
 
 (* For each parsed file, this is what we will save *)
 type parsed_file_data = {
-  info: Module_heaps.info;
+  module_name: string option;
   normalized_file_data: normalized_file_data;
-  (* Right now there is no guarantee that this is Some, for two reasons:
-   * - We allow saved state to be saved from a lazy server, meaning that it's possible that *no*
-   *   files will have been merged, and therefore none will have a sig hash.
-   * - We do not typecheck all parsed files, so even on a full init some files may have None here.
-   *
-   * The sig hashes drive optimizations, so whether or not they are included for any given file
-   * should not affect correctness.
-   *
-   * The landscape around merging and sig hashing will change dramatically with types-first 2.0, so
-   * I think that it makes sense to wait for it before deciding upon any stronger invariant to
-   * enforce here.
-   *)
-  sig_hash: Xx.hash option;
 }
 
 (* We also need to store the info for unparsed files *)
 type unparsed_file_data = {
-  unparsed_info: Module_heaps.info;
+  unparsed_module_name: string option;
   unparsed_hash: Xx.hash;
+}
+
+(** info for package.json files *)
+type package_file_data = {
+  package_module_name: string option;
+  package_hash: Xx.hash;
+  package_info: (Package_json.t, unit) result;
 }
 
 type saved_state_dependency_graph =
@@ -52,8 +50,7 @@ type saved_state_data = {
   flowconfig_hash: Xx.hash;
   parsed_heaps: (File_key.t * parsed_file_data) list;
   unparsed_heaps: (File_key.t * unparsed_file_data) list;
-  (* package.json info *)
-  package_heaps: (Package_json.t, unit) result FilenameMap.t;
+  package_heaps: (File_key.t * package_file_data) list;  (** package.json info *)
   ordered_non_flowlib_libs: string list;
   (* Why store local errors and not merge_errors/suppressions/etc? Well, I have a few reasons:
    *
@@ -64,7 +61,6 @@ type saved_state_data = {
    *    for the other members of env.errors which are filled in during typechecking
    *)
   local_errors: Flow_error.ErrorSet.t Utils_js.FilenameMap.t;
-  warnings: Flow_error.ErrorSet.t Utils_js.FilenameMap.t;
   node_modules_containers: SSet.t SMap.t;
   dependency_graph: saved_state_dependency_graph;
 }
@@ -72,6 +68,10 @@ type saved_state_data = {
 let modulename_map_fn ~f = function
   | Modulename.Filename fn -> Modulename.Filename (f fn)
   | Modulename.String _ as module_name -> module_name
+
+let resolved_module_map_fn ~f = function
+  | Ok mname -> Ok (modulename_map_fn ~f mname)
+  | Error _ as err -> err
 
 let update_dependency_graph_filenames f graph =
   let update_set set = FilenameSet.map f set in
@@ -192,58 +192,78 @@ end = struct
     in
     loop 0 saved_state_version_length
 
-  let normalize_resolved_requires
-      ~normalizer { Module_heaps.file_key; resolved_modules; phantom_dependents; hash } =
-    let file_key = FileNormalizer.normalize_file_key normalizer file_key in
-    let phantom_dependents =
-      SSet.map (FileNormalizer.normalize_path normalizer) phantom_dependents
-    in
+  let normalize_resolved_requires ~normalizer resolved_modules phantom_dependencies =
     let resolved_modules =
-      SMap.map
-        (modulename_map_fn ~f:(FileNormalizer.normalize_file_key normalizer))
+      Array.map
+        (resolved_module_map_fn ~f:(FileNormalizer.normalize_file_key normalizer))
         resolved_modules
     in
-    { Module_heaps.file_key; resolved_modules; phantom_dependents; hash }
+    let phantom_dependencies =
+      Modulename.Set.map
+        (modulename_map_fn ~f:(FileNormalizer.normalize_file_key normalizer))
+        phantom_dependencies
+    in
+    (resolved_modules, phantom_dependencies)
 
-  let normalize_file_data ~normalizer { resolved_requires; exports; hash } =
-    let resolved_requires = normalize_resolved_requires ~normalizer resolved_requires in
-    { resolved_requires; exports; hash }
+  let normalize_file_data
+      ~normalizer
+      { requires; resolved_modules; phantom_dependencies; exports; hash; imports; cas_digest } =
+    let (resolved_modules, phantom_dependencies) =
+      normalize_resolved_requires ~normalizer resolved_modules phantom_dependencies
+    in
+    { requires; resolved_modules; phantom_dependencies; exports; hash; imports; cas_digest }
 
-  let normalize_parsed_data ~normalizer { info; normalized_file_data; sig_hash } =
+  let normalize_parsed_data ~normalizer { module_name; normalized_file_data } =
     let normalized_file_data = normalize_file_data ~normalizer normalized_file_data in
-    { info; normalized_file_data; sig_hash }
+    { module_name; normalized_file_data }
 
   (* Collect all the data for a single parsed file *)
   let collect_normalized_data_for_parsed_file ~normalizer ~reader fn parsed_heaps =
+    let addr = Parsing_heaps.get_file_addr_unsafe fn in
+    let parse = Parsing_heaps.Reader.get_typed_parse_unsafe ~reader fn addr in
+    let imports = Parsing_heaps.read_imports parse in
+    let requires = Parsing_heaps.read_requires parse in
+    let resolved_requires = Parsing_heaps.Reader.get_resolved_requires_unsafe fn ~reader parse in
     let file_data =
       {
-        info = Module_heaps.Reader.get_info_unsafe ~reader ~audit:Expensive.ok fn;
+        module_name = Parsing_heaps.Reader.get_haste_name ~reader addr;
         normalized_file_data =
           {
-            resolved_requires =
-              Module_heaps.Reader.get_resolved_requires_unsafe ~reader ~audit:Expensive.ok fn;
-            exports = Parsing_heaps.Reader.get_exports_unsafe ~reader fn;
-            hash = Parsing_heaps.Reader.get_file_hash_unsafe ~reader fn;
+            requires;
+            resolved_modules = Parsing_heaps.read_resolved_modules resolved_requires;
+            phantom_dependencies = Parsing_heaps.read_phantom_dependencies resolved_requires;
+            exports = Parsing_heaps.read_exports parse;
+            hash = Parsing_heaps.read_file_hash parse;
+            imports;
+            cas_digest = Parsing_heaps.read_cas_digest parse;
           };
-        sig_hash = Context_heaps.Reader.sig_hash_opt ~reader fn;
       }
     in
     let relative_fn = FileNormalizer.normalize_file_key normalizer fn in
     let relative_file_data = normalize_parsed_data ~normalizer file_data in
     (relative_fn, relative_file_data) :: parsed_heaps
 
-  let collect_normalized_data_for_package_json_file ~normalizer fn package_heaps =
-    let str = File_key.to_string fn in
-    let package = Package_heaps.For_saved_state.get_package_json_unsafe str in
+  let collect_normalized_data_for_package_json_file ~normalizer ~reader fn package_heaps =
+    let addr = Parsing_heaps.get_file_addr_unsafe fn in
+    let parse = Parsing_heaps.Reader.get_package_parse_unsafe ~reader fn addr in
+    let relative_file_data =
+      {
+        package_module_name = Parsing_heaps.Reader.get_haste_name ~reader addr;
+        package_hash = Parsing_heaps.read_file_hash parse;
+        package_info = Parsing_heaps.read_package_info parse;
+      }
+    in
     let relative_fn = FileNormalizer.normalize_file_key normalizer fn in
-    FilenameMap.add relative_fn package package_heaps
+    (relative_fn, relative_file_data) :: package_heaps
 
   (* Collect all the data for a single unparsed file *)
   let collect_normalized_data_for_unparsed_file ~normalizer ~reader fn unparsed_heaps =
+    let addr = Parsing_heaps.get_file_addr_unsafe fn in
+    let parse = Parsing_heaps.Reader.get_parse_unsafe ~reader fn addr in
     let relative_file_data =
       {
-        unparsed_info = Module_heaps.Reader.get_info_unsafe ~reader ~audit:Expensive.ok fn;
-        unparsed_hash = Parsing_heaps.Reader.get_file_hash_unsafe ~reader fn;
+        unparsed_module_name = Parsing_heaps.Reader.get_haste_name ~reader addr;
+        unparsed_hash = Parsing_heaps.read_file_hash parse;
       }
     in
     let relative_fn = FileNormalizer.normalize_file_key normalizer fn in
@@ -284,10 +304,10 @@ end = struct
     in
     let package_heaps =
       Profiling_js.with_timer profiling ~timer:"CollectPackageJson" ~f:(fun () ->
-          Base.List.fold
-            ~f:(fun m fn -> collect_normalized_data_for_package_json_file ~normalizer fn m)
+          FilenameSet.fold
+            (collect_normalized_data_for_package_json_file ~normalizer ~reader)
             env.ServerEnv.package_json_files
-            ~init:FilenameMap.empty
+            []
       )
     in
     let ordered_non_flowlib_libs =
@@ -302,15 +322,6 @@ end = struct
           let normalized_error_set = normalize_error_set ~normalizer error_set in
           FilenameMap.add normalized_fn normalized_error_set acc)
         env.ServerEnv.errors.ServerEnv.local_errors
-        FilenameMap.empty
-    in
-    let warnings =
-      FilenameMap.fold
-        (fun fn warning_set acc ->
-          let normalized_fn = FileNormalizer.normalize_file_key normalizer fn in
-          let normalized_error_set = normalize_error_set ~normalizer warning_set in
-          FilenameMap.add normalized_fn normalized_error_set acc)
-        env.ServerEnv.errors.ServerEnv.warnings
         FilenameMap.empty
     in
     let node_modules_containers =
@@ -354,7 +365,6 @@ end = struct
         package_heaps;
         ordered_non_flowlib_libs;
         local_errors;
-        warnings;
         node_modules_containers;
         dependency_graph;
       }
@@ -473,51 +483,70 @@ end = struct
   let verify_version =
     (* Flow_build_id should always be 16 bytes *)
     let rec read_version fd buf offset len =
-      if len > 0 then (
-        let%lwt bytes_read = Lwt_unix.read fd buf offset len in
-        if bytes_read = 0 then (
-          Hh_logger.error
-            "Invalid saved state version header. It should be %d bytes but only read %d bytes"
-            saved_state_version_length
-            (saved_state_version_length - len);
-          raise (Invalid_saved_state Bad_header)
-        );
-        let offset = offset + bytes_read in
-        let len = len - bytes_read in
+      let%lwt bytes_read = Lwt_unix.read fd buf offset len in
+      if bytes_read = 0 then (
+        Hh_logger.error
+          "Invalid saved state version header. It should be %d bytes but only read %d bytes"
+          saved_state_version_length
+          (saved_state_version_length - len);
+        raise (Invalid_saved_state Bad_header)
+      );
+      let offset = offset + bytes_read in
+      let len = len - bytes_read in
+      if len > 0 then
         read_version fd buf offset len
+      else
+        Lwt.return (Bytes.to_string buf)
+    in
+    let assert_version result =
+      let flow_build_id = saved_state_version () in
+      if result <> flow_build_id then (
+        Hh_logger.error
+          "Saved-state file failed version check. Expected version %S but got %S"
+          flow_build_id
+          result;
+        raise (Invalid_saved_state Build_mismatch)
       ) else
-        let result = Bytes.to_string buf in
-        let flow_build_id = saved_state_version () in
-        if result <> flow_build_id then (
-          Hh_logger.error
-            "Saved-state file failed version check. Expected version %S but got %S"
-            flow_build_id
-            result;
-          raise (Invalid_saved_state Build_mismatch)
-        ) else
-          Lwt.return_unit
+        ()
     in
-    fun fd ->
-      read_version fd (Bytes.create saved_state_version_length) 0 saved_state_version_length
+    fun options fd ->
+      let%lwt version =
+        read_version fd (Bytes.create saved_state_version_length) 0 saved_state_version_length
+      in
+      if Options.saved_state_skip_version_check options then
+        (* This is really unsafe! Saved state is marshal'd OCaml data and it's
+           easy to introduce serialization differences that would lead to
+           segfaults. This is only for debugging.
 
-  let denormalize_resolved_requires
-      ~root { Module_heaps.file_key; resolved_modules; phantom_dependents; hash = _ } =
+           We still have to read the version because it consumes from the fd. *)
+        Lwt.return_unit
+      else
+        Lwt.return (assert_version version)
+
+  let denormalize_resolved_requires ~root resolved_modules phantom_dependencies =
     (* We do our best to avoid reading the file system (which Path.make will do) *)
-    let phantom_dependents = SSet.map (Files.absolute_path root) phantom_dependents in
-    let resolved_modules =
-      SMap.map (modulename_map_fn ~f:(denormalize_file_key_nocache ~root)) resolved_modules
+    let phantom_dependencies =
+      Modulename.Set.map
+        (modulename_map_fn ~f:(denormalize_file_key_nocache ~root))
+        phantom_dependencies
     in
-    let file_key = denormalize_file_key_nocache ~root file_key in
-    Module_heaps.mk_resolved_requires file_key ~resolved_modules ~phantom_dependents
+    let resolved_modules =
+      Array.map (resolved_module_map_fn ~f:(denormalize_file_key_nocache ~root)) resolved_modules
+    in
+    (resolved_modules, phantom_dependencies)
 
   (** Turns all the relative paths in a file's data back into absolute paths. *)
-  let denormalize_file_data ~root { resolved_requires; exports; hash } =
-    let resolved_requires = denormalize_resolved_requires ~root resolved_requires in
-    { resolved_requires; exports; hash }
+  let denormalize_file_data
+      ~root { requires; resolved_modules; phantom_dependencies; exports; hash; imports; cas_digest }
+      =
+    let (resolved_modules, phantom_dependencies) =
+      denormalize_resolved_requires ~root resolved_modules phantom_dependencies
+    in
+    { requires; resolved_modules; phantom_dependencies; exports; hash; imports; cas_digest }
 
   let progress_fn real_total ~total:_ ~start ~length:_ =
     MonitorRPC.status_update
-      ServerStatus.(Load_saved_state_progress { total = Some real_total; finished = start })
+      ~event:ServerStatus.(Load_saved_state_progress { total = Some real_total; finished = start })
 
   (* Denormalize the data for all the parsed files. This is kind of slow :( *)
   let denormalize_parsed_heaps ~denormalizer parsed_heaps =
@@ -542,6 +571,13 @@ end = struct
       ~merge:List.rev_append
       ~next
 
+  let denormalize_package_heaps ~denormalizer package_heaps =
+    Base.List.map
+      ~f:(fun (relative_fn, package) ->
+        let fn = FileDenormalizer.denormalize_file_key denormalizer relative_fn in
+        (fn, package))
+      package_heaps
+
   let denormalize_error_set ~denormalizer = Flow_error.ErrorSet.map (denormalize_error ~denormalizer)
 
   (* Denormalize all the data *)
@@ -555,7 +591,6 @@ end = struct
       package_heaps;
       ordered_non_flowlib_libs;
       local_errors;
-      warnings;
       node_modules_containers;
       dependency_graph;
     } =
@@ -571,14 +606,8 @@ end = struct
       raise (Invalid_saved_state Flowconfig_mismatch)
     );
 
-    let package_heaps =
-      FilenameMap.fold
-        (fun fn package heap ->
-          FilenameMap.add (FileDenormalizer.denormalize_file_key denormalizer fn) package heap)
-        package_heaps
-        FilenameMap.empty
-    in
-
+    Hh_logger.info "Denormalizing the data for the package.json files";
+    let package_heaps = denormalize_package_heaps ~denormalizer package_heaps in
     Hh_logger.info "Denormalizing the data for the parsed files";
     let parsed_heaps = denormalize_parsed_heaps ~denormalizer parsed_heaps in
     Hh_logger.info "Denormalizing the data for the unparsed files";
@@ -598,15 +627,6 @@ end = struct
         local_errors
         FilenameMap.empty
     in
-    let warnings =
-      FilenameMap.fold
-        (fun normalized_fn normalized_warning_set acc ->
-          let fn = FileDenormalizer.denormalize_file_key denormalizer normalized_fn in
-          let warning_set = denormalize_error_set ~denormalizer normalized_warning_set in
-          FilenameMap.add fn warning_set acc)
-        warnings
-        FilenameMap.empty
-    in
     let node_modules_containers =
       SMap.fold
         (fun key value acc ->
@@ -623,7 +643,6 @@ end = struct
         package_heaps;
         ordered_non_flowlib_libs;
         local_errors;
-        warnings;
         node_modules_containers;
         dependency_graph;
       }
@@ -632,7 +651,7 @@ end = struct
     let filename = Path.to_string saved_state_filename in
     Hh_logger.info "Reading saved-state file at %S" filename;
 
-    MonitorRPC.status_update ServerStatus.Read_saved_state;
+    MonitorRPC.status_update ~event:ServerStatus.Read_saved_state;
 
     let%lwt fd =
       try%lwt Lwt_unix.openfile filename [Unix.O_RDONLY; Unix.O_NONBLOCK] 0o666 with
@@ -641,7 +660,7 @@ end = struct
         Hh_logger.error "Failed to open %S\n%s" filename (Exception.to_string exn);
         raise (Invalid_saved_state File_does_not_exist)
     in
-    let%lwt () = verify_version fd in
+    let%lwt () = verify_version options fd in
     let%lwt (compressed_data : Saved_state_compression.compressed) =
       Profiling_js.with_timer_lwt profiling ~timer:"Read" ~f:(fun () ->
           try%lwt Marshal_tools_lwt.from_fd_with_preamble fd with

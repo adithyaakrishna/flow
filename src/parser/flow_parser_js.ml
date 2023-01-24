@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -30,17 +30,17 @@ end = struct
 
   let null = Js.Unsafe.inject Js.null
 
-  let regexp loc pattern flags =
+  let regexp _loc pattern flags =
     let regexp =
-      try Js.Unsafe.new_obj (Js.Unsafe.variable "RegExp") [| string pattern; string flags |] with
+      try
+        Js.Unsafe.new_obj (Js.Unsafe.pure_js_expr "RegExp") [| string pattern; string flags |]
+      with
       | _ ->
-        translation_errors := (loc, Parse_error.InvalidRegExp) :: !translation_errors;
-
-        (* Invalid RegExp. We already validated the flags, but we've been
-         * too lazy to write a JS regexp parser in Ocaml, so we didn't know
-         * the pattern was invalid. We'll recover with an empty pattern.
-         *)
-        Js.Unsafe.new_obj (Js.Unsafe.variable "RegExp") [| string ""; string flags |]
+        (* We don't implement regexp validation other than checking the flags. The regex
+           might be invalid, or the runtime might not support certain flags like y or u
+           or d, which prevents instantiating a native RegExp object. Return `null` instead
+           per https://github.com/estree/estree/blob/master/es5.md#regexpliteral *)
+        Js.null
     in
     Js.Unsafe.inject regexp
 end
@@ -66,17 +66,7 @@ let parse_options jsopts =
   let defaults = Parser_env.default_parse_options in
   {
     enums = bool_opt defaults.enums jsopts "enums";
-    esproposal_class_instance_fields =
-      bool_opt defaults.esproposal_class_instance_fields jsopts "esproposal_class_instance_fields";
-    esproposal_class_static_fields =
-      bool_opt defaults.esproposal_class_static_fields jsopts "esproposal_class_static_fields";
     esproposal_decorators = bool_opt defaults.esproposal_decorators jsopts "esproposal_decorators";
-    esproposal_export_star_as =
-      bool_opt defaults.esproposal_export_star_as jsopts "esproposal_export_star_as";
-    esproposal_optional_chaining =
-      bool_opt defaults.esproposal_optional_chaining jsopts "esproposal_optional_chaining";
-    esproposal_nullish_coalescing =
-      bool_opt defaults.esproposal_nullish_coalescing jsopts "esproposal_nullish_coalescing";
     types = bool_opt defaults.types jsopts "types";
     use_strict = bool_opt defaults.use_strict jsopts "use_strict";
   }

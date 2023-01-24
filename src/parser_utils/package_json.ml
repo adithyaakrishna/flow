@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,48 +10,34 @@ module Ast = Flow_ast
 type t = {
   name: string option;
   main: string option;
+  haste_commonjs: bool;
 }
 
-type 'a t_or_error = (t, 'a * string) result
+let empty = { name = None; main = None; haste_commonjs = false }
 
-let ( >>= ) = Base.Result.( >>= )
-
-let empty = { name = None; main = None }
-
-let create ~name ~main = { name; main }
+let create ~name ~main ~haste_commonjs = { name; main; haste_commonjs }
 
 let name package = package.name
 
 let main package = package.main
 
-let statement_of_program = function
-  | (_, { Ast.Program.statements = [statement]; _ }) -> Ok statement
-  | (loc, _) -> Error (loc, "Expected a single statement.")
+let haste_commonjs package = package.haste_commonjs
 
-let object_of_statement statement =
-  let open Ast in
-  match statement with
-  | ( _,
-      Statement.Expression
-        {
-          Statement.Expression.expression =
-            ( _,
-              Expression.Assignment
-                { Expression.Assignment.operator = None; left = _; right = obj; comments = _ }
-            );
-          directive = _;
-          comments = _;
-        }
-    ) ->
-    Ok obj
-  | (loc, _) -> Error (loc, "Expected an assignment")
+let string_opt = function
+  | Some (Ast.Literal.String value) -> Some value
+  | Some _
+  | None ->
+    None
 
-let properties_of_object = function
-  | (_, Ast.Expression.Object { Ast.Expression.Object.properties; comments = _ }) -> Ok properties
-  | (loc, _) -> Error (loc, "Expected an object literal")
+let bool_opt = function
+  | Some (Ast.Literal.Boolean value) -> Some value
+  | Some _
+  | None ->
+    None
 
-(* Given a list of JSON properties, extract the string properties and turn it into a string SMap.t
- *)
+(** Given a list of JSON properties, loosely extract the properties and turn it into a
+    [Literal.value SMap.t]. We aren't looking to validate the file, and don't currently
+    care about any non-literal properties, so we skip over everything else. *)
 let extract_property map property =
   let open Ast in
   let open Expression.Object in
@@ -61,7 +47,7 @@ let extract_property map property =
         Property.Init
           {
             key = Property.Literal (_, { Literal.value = Literal.String key; _ });
-            value = (_, Expression.Literal { Literal.value = Literal.String value; _ });
+            value = (_, Expression.Literal { Literal.value; _ });
             _;
           }
       ) ->
@@ -79,12 +65,14 @@ let rec find_main_property prop_map = function
     if ret = None then
       find_main_property prop_map rest
     else
-      ret
+      string_opt ret
   | [] -> None
 
-let parse ~node_main_fields ast : 'a t_or_error =
-  statement_of_program ast >>= object_of_statement >>= properties_of_object >>= fun properties ->
+let parse ~node_main_fields { Ast.Expression.Object.properties; comments = _ } =
   let prop_map = List.fold_left extract_property SMap.empty properties in
-  let name = SMap.find_opt "name" prop_map in
+  let name = SMap.find_opt "name" prop_map |> string_opt in
   let main = find_main_property prop_map node_main_fields in
-  Ok { name; main }
+  let haste_commonjs =
+    SMap.find_opt "haste_commonjs" prop_map |> bool_opt |> Base.Option.value ~default:false
+  in
+  { name; main; haste_commonjs }

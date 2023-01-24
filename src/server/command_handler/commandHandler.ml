@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -25,15 +25,14 @@ type 'a workload = profiling:Profiling_js.running -> env:ServerEnv.env -> 'a Lwt
 (* Returns the result of calling `type_parse_artifacts`, along with a bool option indicating
  * whether the cache was hit -- None if no cache was available, Some true if it was hit, and Some
  * false if it was missed. *)
-let type_parse_artifacts_with_cache
-    ~options ~env ~profiling ~type_parse_artifacts_cache file artifacts =
+let type_parse_artifacts_with_cache ~options ~profiling ~type_parse_artifacts_cache file artifacts =
   match type_parse_artifacts_cache with
   | None ->
-    let result = Type_contents.type_parse_artifacts ~options ~env ~profiling file artifacts in
+    let result = Type_contents.type_parse_artifacts ~options ~profiling file artifacts in
     (result, None)
   | Some cache ->
     let lazy_result =
-      lazy (Type_contents.type_parse_artifacts ~options ~env ~profiling file artifacts)
+      lazy (Type_contents.type_parse_artifacts ~options ~profiling file artifacts)
     in
     let (result, did_hit) = FilenameCache.with_cache_sync file lazy_result cache in
     (result, Some did_hit)
@@ -118,8 +117,8 @@ let fold_json_of_parse_errors parse_errors acc =
   match parse_errors with
   | err :: _ ->
     ("parse_error", json_of_parse_error err)
-    ::
-    ("parse_error_count", Hh_json.JSON_Number (parse_errors |> List.length |> string_of_int)) :: acc
+    :: ("parse_error_count", Hh_json.JSON_Number (parse_errors |> List.length |> string_of_int))
+    :: acc
   | [] -> acc
 
 let file_input_of_text_document_identifier ~client t =
@@ -164,7 +163,7 @@ let check_that_we_care_about_this_file =
   let check_file_included ~options ~file_options ~file_path () =
     let file_is_implicitly_included =
       let root_str = spf "%s%s" (Path.to_string (Options.root options)) Filename.dir_sep in
-      String_utils.string_starts_with file_path root_str
+      String.starts_with ~prefix:root_str file_path
     in
     if file_is_implicitly_included then
       Ok ()
@@ -184,7 +183,7 @@ let check_that_we_care_about_this_file =
       Ok ()
     else
       let (_, docblock) =
-        Parsing_service_js.(parse_docblock docblock_max_tokens file_key content)
+        Parsing_service_js.(parse_docblock ~max_tokens:docblock_max_tokens file_key content)
       in
       if Docblock.is_flow docblock then
         Ok ()
@@ -248,11 +247,22 @@ let get_status ~profiling ~reader ~options env =
   in
   (status_response, lazy_stats)
 
-let autocomplete ~trigger_character ~reader ~options ~env ~profiling ~input ~cursor ~imports =
+let autocomplete
+    ~trigger_character
+    ~reader
+    ~options
+    ~env
+    ~profiling
+    ~input
+    ~cursor
+    ~imports
+    ~imports_ranked_usage =
   match of_file_input ~options ~env input with
   | Error (Failed e) -> (Error e, None)
   | Error (Skipped reason) ->
-    let response = (None, { ServerProt.Response.Completion.items = []; is_incomplete = false }) in
+    let response =
+      (None, { ServerProt.Response.Completion.items = []; is_incomplete = false }, None)
+    in
     let extra_data = json_of_skipped reason in
     (Ok response, extra_data)
   | Ok (filename, contents) ->
@@ -262,12 +272,12 @@ let autocomplete ~trigger_character ~reader ~options ~env ~profiling ~input ~cur
     in
     let (contents, broader_context) =
       let (line, column) = cursor in
-      AutocompleteService_js.add_autocomplete_token contents line column
+      Autocomplete_sigil.add contents line column
     in
     Autocomplete_js.autocomplete_set_hooks ~cursor:cursor_loc;
     let file_artifacts_result =
       let parse_result = Type_contents.parse_contents ~options ~profiling contents filename in
-      Type_contents.type_parse_artifacts ~options ~env ~profiling filename parse_result
+      Type_contents.type_parse_artifacts ~options ~profiling filename parse_result
     in
     Autocomplete_js.autocomplete_unset_hooks ();
     let initial_json_props =
@@ -284,9 +294,9 @@ let autocomplete ~trigger_character ~reader ~options ~env ~profiling ~input ~cur
         let open Hh_json in
         JSON_Object
           (("errors", JSON_Array [JSON_String err_str])
-           ::
-           ("result", JSON_String "FAILURE_CHECK_CONTENTS")
-           :: ("count", JSON_Number "0") :: initial_json_props
+          :: ("result", JSON_String "FAILURE_CHECK_CONTENTS")
+          :: ("count", JSON_Number "0")
+          :: initial_json_props
           )
       in
       (Error err_str, Some json_data_to_log)
@@ -296,7 +306,7 @@ let autocomplete ~trigger_character ~reader ~options ~env ~profiling ~input ~cur
         ) ->
       Profiling_js.with_timer profiling ~timer:"GetResults" ~f:(fun () ->
           let open AutocompleteService_js in
-          let (token_opt, (ac_type_string, results_res)) =
+          let (token_opt, ac_loc, ac_type_string, results_res) =
             autocomplete_get_results
               ~env
               ~options
@@ -306,19 +316,18 @@ let autocomplete ~trigger_character ~reader ~options ~env ~profiling ~input ~cur
               ~ast
               ~typed_ast
               ~imports
+              ~imports_ranked_usage
               trigger_character
               cursor_loc
           in
           let json_props_to_log =
             ("ac_type", Hh_json.JSON_String ac_type_string)
-            ::
-            ("docblock", Docblock.json_of_docblock info)
-            ::
-            ( "token",
-              match token_opt with
-              | None -> Hh_json.JSON_Null
-              | Some token -> Hh_json.JSON_String token
-            )
+            :: ("docblock", Docblock.json_of_docblock info)
+            :: ( "token",
+                 match token_opt with
+                 | None -> Hh_json.JSON_Null
+                 | Some token -> Hh_json.JSON_String token
+               )
             :: initial_json_props
           in
           let (response, json_props_to_log) =
@@ -339,27 +348,29 @@ let autocomplete ~trigger_character ~reader ~options ~env ~profiling ~input ~cur
                     Base.Option.is_some documentation
                 )
               in
-              ( Ok (token_opt, result),
+              ( Ok (token_opt, result, ac_loc),
                 ("result", JSON_String result_string)
-                ::
-                ("count", JSON_Number (items |> List.length |> string_of_int))
-                ::
-                ("errors", JSON_Array (Base.List.map ~f:(fun s -> JSON_String s) errors_to_log))
-                ::
-                ("documentation", JSON_Bool at_least_one_result_has_documentation)
+                :: ("count", JSON_Number (items |> List.length |> string_of_int))
+                :: ("errors", JSON_Array (Base.List.map ~f:(fun s -> JSON_String s) errors_to_log))
+                :: ("documentation", JSON_Bool at_least_one_result_has_documentation)
                 :: json_props_to_log
               )
             | AcEmpty reason ->
-              ( Ok (token_opt, { ServerProt.Response.Completion.items = []; is_incomplete = false }),
+              ( Ok
+                  ( token_opt,
+                    { ServerProt.Response.Completion.items = []; is_incomplete = false },
+                    ac_loc
+                  ),
                 ("result", JSON_String "SUCCESS")
-                ::
-                ("count", JSON_Number "0")
-                :: ("empty_reason", JSON_String reason) :: json_props_to_log
+                :: ("count", JSON_Number "0")
+                :: ("empty_reason", JSON_String reason)
+                :: json_props_to_log
               )
             | AcFatalError error ->
               ( Error error,
                 ("result", JSON_String "FAILURE")
-                :: ("errors", JSON_Array [JSON_String error]) :: json_props_to_log
+                :: ("errors", JSON_Array [JSON_String error])
+                :: json_props_to_log
               )
           in
           let json_props_to_log = fold_json_of_parse_errors parse_errors json_props_to_log in
@@ -372,18 +383,18 @@ let check_file ~options ~env ~profiling ~force file_input =
   | Error (Failed _reason)
   | Error (Skipped _reason) ->
     ServerProt.Response.NOT_COVERED
-  | Ok (file, content) ->
+  | Ok (file_key, content) ->
     let result =
       let ((_, parse_errs) as intermediate_result) =
-        Type_contents.parse_contents ~options ~profiling content file
+        Type_contents.parse_contents ~options ~profiling content file_key
       in
       if not (Flow_error.ErrorSet.is_empty parse_errs) then
         Error parse_errs
       else
-        Type_contents.type_parse_artifacts ~options ~env ~profiling file intermediate_result
+        Type_contents.type_parse_artifacts ~options ~profiling file_key intermediate_result
     in
     let (errors, warnings) =
-      Type_contents.printable_errors_of_file_artifacts_result ~options ~env file result
+      Type_contents.printable_errors_of_file_artifacts_result ~options ~env file_key result
     in
     convert_errors ~errors ~warnings ~suppressed_errors:[]
 
@@ -392,11 +403,12 @@ let check_file ~options ~env ~profiling ~force file_input =
 let get_def_of_check_result ~options ~reader ~profiling ~check_result (file, line, col) =
   Profiling_js.with_timer profiling ~timer:"GetResult" ~f:(fun () ->
       let loc = Loc.cursor (Some file) line col in
-      let (Parse_artifacts { file_sig; parse_errors; _ }, Typecheck_artifacts { cx; typed_ast }) =
+      let (Parse_artifacts { ast; file_sig; parse_errors; _ }, Typecheck_artifacts { cx; typed_ast })
+          =
         check_result
       in
       let file_sig = File_sig.abstractify_locs file_sig in
-      GetDef_js.get_def ~options ~reader ~cx ~file_sig ~typed_ast loc |> fun result ->
+      GetDef_js.get_def ~options ~reader ~cx ~file_sig ~ast ~typed_ast loc |> fun result ->
       let open GetDef_js.Get_def_result in
       let json_props = fold_json_of_parse_errors parse_errors [] in
       match result with
@@ -405,7 +417,8 @@ let get_def_of_check_result ~options ~reader ~profiling ~check_result (file, lin
         ( Ok loc,
           Some
             (("result", Hh_json.JSON_String "PARTIAL_FAILURE")
-             :: ("error", Hh_json.JSON_String msg) :: json_props
+            :: ("error", Hh_json.JSON_String msg)
+            :: json_props
             )
         )
       | Bad_loc -> (Ok Loc.none, Some (("result", Hh_json.JSON_String "BAD_LOC") :: json_props))
@@ -413,7 +426,8 @@ let get_def_of_check_result ~options ~reader ~profiling ~check_result (file, lin
         ( Error msg,
           Some
             (("result", Hh_json.JSON_String "FAILURE")
-             :: ("error", Hh_json.JSON_String msg) :: json_props
+            :: ("error", Hh_json.JSON_String msg)
+            :: json_props
             )
         )
   )
@@ -456,16 +470,15 @@ let infer_type
     in
     let extra_data = json_of_skipped reason in
     (Ok response, extra_data)
-  | Ok (file, content) ->
+  | Ok (file_key, content) ->
     let options = { options with Options.opt_verbose = verbose } in
     let (file_artifacts_result, did_hit_cache) =
-      let parse_result = Type_contents.parse_contents ~options ~profiling content file in
+      let parse_result = Type_contents.parse_contents ~options ~profiling content file_key in
       type_parse_artifacts_with_cache
         ~options
-        ~env
         ~profiling
         ~type_parse_artifacts_cache
-        file
+        file_key
         parse_result
     in
     (match file_artifacts_result with
@@ -475,6 +488,12 @@ let infer_type
       (Error err_str, Some (Hh_json.JSON_Object json_props))
     | Ok ((Parse_artifacts { file_sig; _ }, Typecheck_artifacts { cx; typed_ast }) as check_result)
       ->
+      let evaluate_type_destructors =
+        if evaluate_type_destructors then
+          Ty_normalizer_env.EvaluateAll
+        else
+          Ty_normalizer_env.EvaluateNone
+      in
       let ((loc, ty), type_at_pos_json_props) =
         Type_info_service.type_at_pos
           ~cx
@@ -484,13 +503,18 @@ let infer_type
           ~evaluate_type_destructors
           ~max_depth
           ~verbose_normalizer
-          file
+          file_key
           line
           column
       in
       let (getdef_loc_result, _) =
         try_with_json (fun () ->
-            get_def_of_check_result ~options ~reader ~profiling ~check_result (file, line, column)
+            get_def_of_check_result
+              ~options
+              ~reader
+              ~profiling
+              ~check_result
+              (file_key, line, column)
         )
       in
       let documentation =
@@ -534,10 +558,10 @@ let insert_type
     ~location_is_strict
     ~ambiguity_strategy
 
-let autofix_exports ~options ~env ~profiling ~input =
+let autofix_exports ~options ~profiling ~input =
   let file_key = file_key_of_file_input ~options input in
   File_input.content_of_file_input input >>= fun file_content ->
-  Code_action_service.autofix_exports ~options ~env ~profiling ~file_key ~file_content
+  Code_action_service.autofix_exports ~options ~profiling ~file_key ~file_content
 
 let collect_rage ~profiling ~options ~reader ~env ~files =
   let items = [] in
@@ -605,6 +629,7 @@ let collect_rage ~profiling ~options ~reader ~env ~files =
                 match Sys_utils.cat_or_failed file with
                 | None -> "ERROR! FAILED TO READ"
                 | Some content ->
+                  let reader = Abstract_state_reader.State_reader reader in
                   if Parsing_service_js.does_content_match_file_hash ~reader file_key content then
                     "OK"
                   else
@@ -615,31 +640,22 @@ let collect_rage ~profiling ~options ~reader ~env ~files =
         ("file hash check", Buffer.contents buf) :: items
     )
   in
-  let items =
-    let buf = Buffer.create 127 in
-    let log str =
-      Buffer.add_string buf str;
-      Buffer.add_char buf '\n'
-    in
-    LoggingUtils.dump_server_options ~server_options:options ~log;
-    ("server_options", Buffer.contents buf) :: items
-  in
   items
 
-let dump_types ~options ~env ~profiling ~evaluate_type_destructors file_input =
+let dump_types ~options ~profiling ~evaluate_type_destructors file_input =
   let open Base.Result in
-  let file = file_key_of_file_input ~options file_input in
+  let file_key = file_key_of_file_input ~options file_input in
   File_input.content_of_file_input file_input >>= fun content ->
   let file_artifacts_result =
-    let parse_result = Type_contents.parse_contents ~options ~profiling content file in
-    Type_contents.type_parse_artifacts ~options ~env ~profiling file parse_result
+    let parse_result = Type_contents.parse_contents ~options ~profiling content file_key in
+    Type_contents.type_parse_artifacts ~options ~profiling file_key parse_result
   in
   match file_artifacts_result with
   | Error _parse_errors -> Error "Couldn't parse file in parse_contents"
   | Ok (Parse_artifacts { file_sig; _ }, Typecheck_artifacts { cx; typed_ast }) ->
     Ok (Type_info_service.dump_types ~evaluate_type_destructors cx file_sig typed_ast)
 
-let coverage ~options ~env ~profiling ~type_parse_artifacts_cache ~force ~trust file content =
+let coverage ~options ~profiling ~type_parse_artifacts_cache ~force ~trust file_key content =
   if Options.trust_mode options = Options.NoTrust && trust then
     ( Error
         "Coverage cannot be run in trust mode if the server is not in trust mode. \n\nRestart the Flow server with --trust-mode=check' to enable this command.",
@@ -647,13 +663,12 @@ let coverage ~options ~env ~profiling ~type_parse_artifacts_cache ~force ~trust 
     )
   else
     let (file_artifacts_result, did_hit_cache) =
-      let parse_result = Type_contents.parse_contents ~options ~profiling content file in
+      let parse_result = Type_contents.parse_contents ~options ~profiling content file_key in
       type_parse_artifacts_with_cache
         ~options
-        ~env
         ~profiling
         ~type_parse_artifacts_cache
-        file
+        file_key
         parse_result
     in
     let extra_data =
@@ -664,7 +679,7 @@ let coverage ~options ~env ~profiling ~type_parse_artifacts_cache ~force ~trust 
     | Ok (_, Typecheck_artifacts { cx; typed_ast }) ->
       let coverage =
         Profiling_js.with_timer profiling ~timer:"Coverage" ~f:(fun () ->
-            Type_info_service.coverage ~cx ~typed_ast ~force ~trust file content
+            Type_info_service.coverage ~cx ~typed_ast ~force ~trust file_key content
         )
       in
       (Ok coverage, Some extra_data)
@@ -678,12 +693,9 @@ let batch_coverage ~options ~env ~trust ~batch =
     Error
       "Batch coverage cannot be run in lazy mode.\n\nRestart the Flow server with '--no-lazy' to enable this command."
   else
-    let is_checked key = CheckedSet.mem key env.checked_files in
     let filter key = Base.List.exists ~f:(fun elt -> Files.is_prefix elt key) batch in
     let coverage_map =
-      FilenameMap.filter
-        (fun key _ -> is_checked key && File_key.to_string key |> filter)
-        env.coverage
+      FilenameMap.filter (fun key _ -> File_key.to_string key |> filter) env.coverage
     in
     let response =
       FilenameMap.fold (fun key coverage -> List.cons (key, coverage)) coverage_map []
@@ -754,17 +766,26 @@ let get_cycle ~env fn types_only =
 
 let find_module ~options ~reader (moduleref, filename) =
   let file = File_key.SourceFile filename in
-  let loc = { Loc.none with Loc.source = Some file } in
-  let module_name =
+  let resolved_module =
     Module_js.imported_module
       ~options
       ~reader:(Abstract_state_reader.State_reader reader)
       ~node_modules_containers:!Files.node_modules_containers
       file
-      (ALoc.of_loc loc)
       moduleref
   in
-  Module_heaps.Reader.get_file ~reader ~audit:Expensive.warn module_name
+  let provider =
+    match resolved_module with
+    | Ok m -> Parsing_heaps.Reader.get_provider ~reader m
+    | Error _ ->
+      (* TODO: We reach this codepath for requires that might resolve to
+       * builtin modules. During check we check the master context, which we
+       * can also do here. *)
+      None
+  in
+  match provider with
+  | Some addr -> Some (Parsing_heaps.read_file_key addr)
+  | None -> None
 
 let get_def ~options ~reader ~env ~profiling ~type_parse_artifacts_cache (file_input, line, col) =
   match of_file_input ~options ~env file_input with
@@ -772,16 +793,15 @@ let get_def ~options ~reader ~env ~profiling ~type_parse_artifacts_cache (file_i
   | Error (Skipped reason) ->
     let json_props = ("result", Hh_json.JSON_String "SKIPPED") :: json_props_of_skipped reason in
     (Ok Loc.none, Some (Hh_json.JSON_Object json_props))
-  | Ok (file, content) ->
+  | Ok (file_key, content) ->
     let (check_result, did_hit_cache) =
       match
-        let parse_result = Type_contents.parse_contents ~options ~profiling content file in
+        let parse_result = Type_contents.parse_contents ~options ~profiling content file_key in
         type_parse_artifacts_with_cache
           ~options
-          ~env
           ~profiling
           ~type_parse_artifacts_cache
-          file
+          file_key
           parse_result
       with
       | (Ok result, did_hit_cache) -> (Ok result, did_hit_cache)
@@ -795,7 +815,7 @@ let get_def ~options ~reader ~env ~profiling ~type_parse_artifacts_cache (file_i
       (Error msg, Some (Hh_json.JSON_Object json_props))
     | Ok check_result ->
       let (result, json_props) =
-        get_def_of_check_result ~options ~reader ~profiling ~check_result (file, line, col)
+        get_def_of_check_result ~options ~reader ~profiling ~check_result (file_key, line, col)
       in
       let json =
         let json_props = Base.Option.value ~default:[] json_props in
@@ -815,33 +835,37 @@ let module_name_of_string ~options module_name_str =
 let get_imports ~options ~reader module_names =
   let add_to_results (map, non_flow) module_name_str =
     let module_name = module_name_of_string ~options module_name_str in
-    match Module_heaps.Reader.get_file ~reader ~audit:Expensive.warn module_name with
-    | Some file ->
+    match Parsing_heaps.Reader.get_provider ~reader module_name with
+    | Some addr ->
       (* We do not process all modules which are stored in our module
        * database. In case we do not process a module its requirements
        * are not kept track of. To avoid confusing results we notify the
        * client that these modules have not been processed.
        *)
-      let { Module_heaps.checked; _ } =
-        Module_heaps.Reader.get_info_unsafe ~reader ~audit:Expensive.warn file
-      in
-      if checked then
-        let { Module_heaps.resolved_modules; _ } =
-          Module_heaps.Reader.get_resolved_requires_unsafe ~reader ~audit:Expensive.warn file
+      (match Parsing_heaps.Reader.get_typed_parse ~reader addr with
+      | Some parse ->
+        let file = Parsing_heaps.read_file_key addr in
+        let resolved_modules =
+          Parsing_heaps.Reader.get_resolved_modules_unsafe ~reader file parse
         in
-        let fsig = Parsing_heaps.Reader.get_file_sig_unsafe ~reader file in
+        let fsig = Parsing_heaps.read_file_sig_unsafe file parse in
         let requires = File_sig.With_Loc.(require_loc_map fsig.module_sig) in
         let mlocs =
           SMap.fold
             (fun mref locs acc ->
-              let m = SMap.find mref resolved_modules in
-              Modulename.Map.add m locs acc)
+              let mname =
+                match SMap.find mref resolved_modules with
+                | Ok m -> m
+                | Error mapped_name ->
+                  let name = Option.value mapped_name ~default:mref in
+                  Modulename.String name
+              in
+              Modulename.Map.add mname locs acc)
             requires
             Modulename.Map.empty
         in
         (SMap.add module_name_str mlocs map, non_flow)
-      else
-        (map, SSet.add module_name_str non_flow)
+      | None -> (map, SSet.add module_name_str non_flow))
     | None ->
       (* We simply ignore non existent modules *)
       (map, non_flow)
@@ -856,18 +880,40 @@ let save_state ~saved_state_filename ~genv ~env ~profiling =
   let%lwt () = Saved_state.save ~saved_state_filename ~genv ~env ~profiling in
   Lwt.return (Ok ())
 
-let handle_autocomplete ~trigger_character ~reader ~options ~profiling ~env ~input ~cursor ~imports
-    =
+let handle_autocomplete
+    ~trigger_character
+    ~reader
+    ~options
+    ~profiling
+    ~env
+    ~input
+    ~cursor
+    ~imports
+    ~imports_ranked_usage =
   let (result, json_data) =
     try_with_json (fun () ->
-        autocomplete ~trigger_character ~reader ~options ~env ~profiling ~input ~cursor ~imports
+        autocomplete
+          ~trigger_character
+          ~reader
+          ~options
+          ~env
+          ~profiling
+          ~input
+          ~cursor
+          ~imports
+          ~imports_ranked_usage
     )
   in
-  let result = Base.Result.map result ~f:snd in
+  let result =
+    Base.Result.map result ~f:(fun x ->
+        match x with
+        | (_, b, _) -> b
+    )
+  in
   Lwt.return (ServerProt.Response.AUTOCOMPLETE result, json_data)
 
-let handle_autofix_exports ~options ~input ~profiling ~env =
-  let result = try_with (fun () -> autofix_exports ~options ~env ~profiling ~input) in
+let handle_autofix_exports ~options ~input ~profiling ~env:_ =
+  let result = try_with (fun () -> autofix_exports ~options ~profiling ~input) in
   Lwt.return (ServerProt.Response.AUTOFIX_EXPORTS result, None)
 
 let handle_check_file ~options ~force ~input ~profiling ~env =
@@ -884,7 +930,6 @@ let handle_coverage ~options ~force ~input ~trust ~profiling ~env =
         | Ok (file_key, file_contents) ->
           coverage
             ~options
-            ~env
             ~profiling
             ~type_parse_artifacts_cache:None
             ~force
@@ -903,9 +948,9 @@ let handle_cycle ~fn ~types_only ~profiling:_ ~env =
   let response = get_cycle ~env fn types_only in
   Lwt.return (env, ServerProt.Response.CYCLE response, None)
 
-let handle_dump_types ~options ~input ~evaluate_type_destructors ~profiling ~env =
+let handle_dump_types ~options ~input ~evaluate_type_destructors ~profiling ~env:_ =
   let response =
-    try_with (fun () -> dump_types ~options ~env ~profiling ~evaluate_type_destructors input)
+    try_with (fun () -> dump_types ~options ~profiling ~evaluate_type_destructors input)
   in
   Lwt.return (ServerProt.Response.DUMP_TYPES response, None)
 
@@ -913,32 +958,22 @@ let handle_find_module ~options ~reader ~moduleref ~filename ~profiling:_ ~env:_
   let response = find_module ~options ~reader (moduleref, filename) in
   Lwt.return (ServerProt.Response.FIND_MODULE response, None)
 
-let handle_force_recheck ~files ~focus ~profiling:_ =
+let handle_force_recheck ~files ~focus ~missed_changes ~changed_mergebase ~profiling:_ =
   let fileset = SSet.of_list files in
-  let reason =
-    match files with
-    | [filename] -> LspProt.Single_file_changed { filename }
-    | _ -> LspProt.Many_files_changed { file_count = List.length files }
-  in
+  let metadata = { MonitorProt.missed_changes; changed_mergebase = Some changed_mergebase } in
   (* `flow force-recheck --focus a.js` not only marks a.js as a focused file, but it also
    * tells Flow that `a.js` has changed. In that case we push a.js to be rechecked and to be
    * focused *)
   if focus then
-    ServerMonitorListenerState.push_files_to_force_focused_and_recheck ~reason fileset
+    ServerMonitorListenerState.push_files_to_force_focused_and_recheck fileset
   else
-    ServerMonitorListenerState.push_files_to_recheck ?metadata:None ~reason fileset;
+    ServerMonitorListenerState.push_files_to_recheck ~metadata fileset;
   (ServerProt.Response.FORCE_RECHECK, None)
 
-let handle_get_def ~reader ~options ~filename ~line ~char ~profiling ~env =
+let handle_get_def ~reader ~options ~input ~line ~char ~profiling ~env =
   let (result, json_data) =
     try_with_json (fun () ->
-        get_def
-          ~reader
-          ~options
-          ~env
-          ~profiling
-          ~type_parse_artifacts_cache:None
-          (filename, line, char)
+        get_def ~reader ~options ~env ~profiling ~type_parse_artifacts_cache:None (input, line, char)
     )
   in
   Lwt.return (ServerProt.Response.GET_DEF result, json_data)
@@ -954,7 +989,7 @@ let handle_graph_dep_graph ~root ~strip_root ~outfile ~types_only ~profiling:_ ~
 let handle_infer_type
     ~options
     ~reader
-    ~input
+    ~file_input
     ~line
     ~char
     ~verbose
@@ -966,7 +1001,7 @@ let handle_infer_type
     ~env =
   let input =
     {
-      file_input = input;
+      file_input;
       query_position = { Loc.line; column = char };
       verbose;
       omit_targ_defaults;
@@ -1024,7 +1059,7 @@ let handle_save_state ~saved_state_filename ~genv ~profiling ~env =
 
 let find_code_actions ~reader ~options ~env ~profiling ~params ~client =
   let CodeActionRequest.{ textDocument; range; context = { only; diagnostics } } = params in
-  if not (Code_action_service.kind_is_supported ~options only) then
+  if not (Code_action_service.kind_is_supported only) then
     (* bail out early if we don't support any of the code actions requested *)
     (Ok [], None)
   else
@@ -1044,7 +1079,6 @@ let find_code_actions ~reader ~options ~env ~profiling ~params ~client =
         in
         type_parse_artifacts_with_cache
           ~options
-          ~env
           ~profiling
           ~type_parse_artifacts_cache
           file_key
@@ -1105,7 +1139,6 @@ let add_missing_imports ~reader ~options ~env ~profiling ~client textDocument =
       let parse_result = Type_contents.parse_contents ~options ~profiling file_contents file_key in
       type_parse_artifacts_with_cache
         ~options
-        ~env
         ~profiling
         ~type_parse_artifacts_cache
         file_key
@@ -1167,12 +1200,20 @@ let get_ephemeral_handler genv command =
   let options = genv.options in
   let reader = State_reader.create () in
   match command with
-  | ServerProt.Request.AUTOCOMPLETE { input; cursor; trigger_character; wait_for_recheck; imports }
-    ->
+  | ServerProt.Request.AUTOCOMPLETE
+      { input; cursor; trigger_character; wait_for_recheck; imports; imports_ranked_usage } ->
     mk_parallelizable
       ~wait_for_recheck
       ~options
-      (handle_autocomplete ~trigger_character ~reader ~options ~input ~cursor ~imports)
+      (handle_autocomplete
+         ~trigger_character
+         ~reader
+         ~options
+         ~input
+         ~cursor
+         ~imports
+         ~imports_ranked_usage
+      )
   | ServerProt.Request.AUTOFIX_EXPORTS { input; verbose; wait_for_recheck } ->
     let options = { options with Options.opt_verbose = verbose } in
     mk_parallelizable ~wait_for_recheck ~options (handle_autofix_exports ~input ~options)
@@ -1195,6 +1236,12 @@ let get_ephemeral_handler genv command =
     let fn = Files.filename_from_string ~options:file_options filename in
     Handle_nonparallelizable (handle_cycle ~fn ~types_only)
   | ServerProt.Request.DUMP_TYPES { input; evaluate_type_destructors; wait_for_recheck } ->
+    let evaluate_type_destructors =
+      if evaluate_type_destructors then
+        Ty_normalizer_env.EvaluateAll
+      else
+        Ty_normalizer_env.EvaluateNone
+    in
     mk_parallelizable
       ~wait_for_recheck
       ~options
@@ -1204,13 +1251,10 @@ let get_ephemeral_handler genv command =
       ~wait_for_recheck
       ~options
       (handle_find_module ~options ~reader ~moduleref ~filename)
-  | ServerProt.Request.FORCE_RECHECK { files; focus } ->
-    Handle_immediately (handle_force_recheck ~files ~focus)
-  | ServerProt.Request.GET_DEF { filename; line; char; wait_for_recheck } ->
-    mk_parallelizable
-      ~wait_for_recheck
-      ~options
-      (handle_get_def ~reader ~options ~filename ~line ~char)
+  | ServerProt.Request.FORCE_RECHECK { files; focus; missed_changes; changed_mergebase } ->
+    Handle_immediately (handle_force_recheck ~files ~focus ~missed_changes ~changed_mergebase)
+  | ServerProt.Request.GET_DEF { input; line; char; wait_for_recheck } ->
+    mk_parallelizable ~wait_for_recheck ~options (handle_get_def ~reader ~options ~input ~line ~char)
   | ServerProt.Request.GET_IMPORTS { module_names; wait_for_recheck } ->
     mk_parallelizable ~wait_for_recheck ~options (handle_get_imports ~options ~reader ~module_names)
   | ServerProt.Request.GRAPH_DEP_GRAPH { root; strip_root; outfile; types_only } ->
@@ -1218,7 +1262,7 @@ let get_ephemeral_handler genv command =
     Handle_nonparallelizable (handle_graph_dep_graph ~root ~strip_root ~types_only ~outfile)
   | ServerProt.Request.INFER_TYPE
       {
-        input;
+        input = file_input;
         line;
         char;
         verbose;
@@ -1234,7 +1278,7 @@ let get_ephemeral_handler genv command =
       (handle_infer_type
          ~options
          ~reader
-         ~input
+         ~file_input
          ~line
          ~char
          ~verbose
@@ -1247,7 +1291,7 @@ let get_ephemeral_handler genv command =
     mk_parallelizable ~wait_for_recheck:None ~options (handle_rage ~reader ~options ~files)
   | ServerProt.Request.INSERT_TYPE
       {
-        input;
+        input = file_input;
         target;
         wait_for_recheck;
         verbose;
@@ -1259,7 +1303,7 @@ let get_ephemeral_handler genv command =
       ~wait_for_recheck
       ~options
       (handle_insert_type
-         ~file_input:input
+         ~file_input
          ~options
          ~target
          ~verbose
@@ -1283,17 +1327,12 @@ let get_ephemeral_handler genv command =
      * of date data. So save-state is not parallelizable *)
     Handle_nonparallelizable (handle_save_state ~saved_state_filename:outfile ~genv)
 
-let send_finished_status_update profiling cmd_str =
-  let event =
-    ServerStatus.(
-      Finishing_up
-        { duration = Profiling_js.get_profiling_duration profiling; info = CommandSummary cmd_str }
-    )
-  in
-  MonitorRPC.status_update ~event
+let send_command_summary profiling name =
+  MonitorRPC.send_telemetry
+    (LspProt.Command_summary { name; duration = Profiling_js.get_profiling_duration profiling });
+  MonitorRPC.status_update ~event:ServerStatus.Handling_request_end
 
 let send_ephemeral_response ~profiling ~client_context ~cmd_str ~request_id result =
-  send_finished_status_update profiling cmd_str;
   match result with
   | Ok (ret, response, json_data) ->
     FlowEventLogger.ephemeral_command_success ~json_data ~client_context ~profiling;
@@ -1330,12 +1369,12 @@ let wrap_ephemeral_handler handler ~genv ~request_id ~client_context ~workload ~
           Lwt.return (handle_ephemeral_uncaught_exception cmd_str exn)
     )
   in
+  send_command_summary profiling cmd_str;
   Lwt.return (send_ephemeral_response ~profiling ~client_context ~cmd_str ~request_id result)
 
 let wrap_immediate_ephemeral_handler
     handler ~genv ~request_id ~client_context ~workload ~cmd_str arg =
   Hh_logger.info "%s" cmd_str;
-  MonitorRPC.status_update ~event:ServerStatus.Handling_request_start;
 
   let should_print_summary = Options.should_profile genv.options in
   let (profiling, result) =
@@ -1487,7 +1526,7 @@ let with_error ?(stack : Utils.callstack option) ~(reason : string) (metadata : 
   let stack =
     match stack with
     | Some stack -> stack
-    | None -> Utils.Callstack (Exception.get_current_callstack_string 100)
+    | None -> Utils.Callstack ""
   in
   let error_info = Some (ExpectedError, reason, stack) in
   { metadata with error_info }
@@ -1503,8 +1542,8 @@ let with_data ~(extra_data : Hh_json.json option) (metadata : LspProt.metadata) 
   let extra_data = metadata.extra_data @ keyvals_of_json extra_data in
   { metadata with extra_data }
 
-(* This is commonly called by persistent handlers when something goes wrong and we need to return
-  * an error response *)
+(** This is commonly called by persistent handlers when something goes wrong and we need to return
+  an error response *)
 let mk_lsp_error_response ~id ~reason ?stack metadata =
   let metadata = with_error ?stack ~reason metadata in
   let (_, reason, Utils.Callstack stack) = Base.Option.value_exn metadata.LspProt.error_info in
@@ -1602,8 +1641,21 @@ let handle_persistent_did_change_configuration_notification ~params ~metadata ~c
   let client_config =
     let suggest = Jget.obj_opt json "suggest" in
     match Jget.bool_opt suggest "autoImports" with
-    | Some suggest_autoimports -> { Client_config.suggest_autoimports }
+    | Some suggest_autoimports -> { client_config with Client_config.suggest_autoimports }
     | None -> client_config
+  in
+  let client_config =
+    let suggest = Jget.obj_opt json "suggest" in
+    match Jget.val_opt suggest "rankAutoimportsByUsage" with
+    | Some (Hh_json.JSON_String "true")
+    | Some (Hh_json.JSON_Bool true) ->
+      { client_config with Client_config.rank_autoimports_by_usage = `True }
+    | Some (Hh_json.JSON_String "false")
+    | Some (Hh_json.JSON_Bool false) ->
+      { client_config with Client_config.rank_autoimports_by_usage = `False }
+    | Some _
+    | None ->
+      { client_config with Client_config.rank_autoimports_by_usage = `Default }
   in
   client_did_change_configuration client client_config;
   (LspProt.LspFromServer None, metadata)
@@ -1632,8 +1684,7 @@ let handle_persistent_get_def
     let { TextDocumentPositionParams.textDocument; position = _ } = params in
     let default_uri = textDocument.TextDocumentIdentifier.uri in
     let location = Flow_lsp_conversions.loc_to_lsp_with_default ~default_uri loc in
-    let definition_location = { Lsp.DefinitionLocation.location; title = None } in
-    let response = ResponseMessage (id, DefinitionResult [definition_location]) in
+    let response = ResponseMessage (id, DefinitionResult [location]) in
     Lwt.return (LspProt.LspFromServer (Some response), metadata)
   | Error reason -> Lwt.return (mk_lsp_error_response ~id:(Some id) ~reason metadata)
 
@@ -1711,14 +1762,25 @@ let handle_persistent_code_action_request
       (LspProt.LspFromServer (Some (ResponseMessage (id, CodeActionResult code_actions))), metadata)
   | Error reason -> Lwt.return (mk_lsp_error_response ~id:(Some id) ~reason metadata)
 
+let rank_autoimports_by_usage ~options client =
+  let client_config = Persistent_connection.client_config client in
+  match Persistent_connection.Client_config.rank_autoimports_by_usage client_config with
+  | `Default -> Options.autoimports_ranked_by_usage options
+  | `True -> true
+  | `False -> false
+
 let handle_persistent_autocomplete_lsp
     ~reader ~options ~id ~params ~file_input ~metadata ~client ~profiling ~env =
   let client_config = Persistent_connection.client_config client in
   let lsp_init_params = Persistent_connection.lsp_initialize_params client in
   let is_snippet_supported = Lsp_helpers.supports_snippets lsp_init_params in
+  let is_tags_supported = Lsp_helpers.supports_tags lsp_init_params in
   let is_preselect_supported = Lsp_helpers.supports_preselect lsp_init_params in
   let is_label_detail_supported =
     Lsp_helpers.supports_completion_item_label_details lsp_init_params
+  in
+  let is_insert_replace_supported =
+    Lsp_helpers.supports_completion_item_insert_replace lsp_init_params
   in
   let { Completion.loc = lsp_loc; context } = params in
   let file_input =
@@ -1740,6 +1802,7 @@ let handle_persistent_autocomplete_lsp
     Persistent_connection.Client_config.suggest_autoimports client_config
     && Options.autoimports options
   in
+  let imports_ranked_usage = rank_autoimports_by_usage ~options client in
   let (result, extra_data) =
     autocomplete
       ~trigger_character
@@ -1750,16 +1813,50 @@ let handle_persistent_autocomplete_lsp
       ~input:file_input
       ~cursor:(line, char)
       ~imports
+      ~imports_ranked_usage
   in
   let metadata = with_data ~extra_data metadata in
   match result with
-  | Ok (token, completions) ->
+  | Ok (token, completions, ac_loc) ->
+    let token_loc =
+      match ac_loc with
+      | None -> None
+      | Some ac_loc -> Some (Parsing_heaps.Reader.loc_of_aloc ~reader ac_loc)
+    in
+    let file_key =
+      match token_loc with
+      | None -> None
+      | Some token_loc -> token_loc.Loc.source
+    in
+    let (token_line, token_char) =
+      match token_loc with
+      | None -> (None, None)
+      | Some token_loc -> (Some token_loc.Loc.start.Loc.line, Some token_loc.Loc.start.Loc.column)
+    in
+    let autocomplete_session_length =
+      match (token_line, token_char, file_key) with
+      | (None, _, _)
+      | (_, None, _)
+      | (_, _, None) ->
+        None
+      | (Some token_line, Some token_char, file_key) ->
+        Some (Persistent_connection.autocomplete_session client (token_line, token_char, file_key))
+    in
+    let typed_len =
+      match token_char with
+      | None -> None
+      | Some token_char -> Some (char - token_char)
+    in
     let result =
       Flow_lsp_conversions.flow_completions_to_lsp
         ?token
+        ?autocomplete_session_length
+        ?typed_len
         ~is_snippet_supported
+        ~is_tags_supported
         ~is_preselect_supported
         ~is_label_detail_supported
+        ~is_insert_replace_supported
         completions
     in
     let response = ResponseMessage (id, CompletionResult result) in
@@ -1767,7 +1864,7 @@ let handle_persistent_autocomplete_lsp
   | Error reason -> Lwt.return (mk_lsp_error_response ~id:(Some id) ~reason metadata)
 
 let handle_persistent_signaturehelp_lsp
-    ~reader ~options ~id ~params ~file_input ~metadata ~client ~profiling ~env =
+    ~reader ~options ~id ~params ~file_input ~metadata ~client ~profiling ~env:_ =
   let file_input =
     match file_input with
     | Some file_input -> file_input
@@ -1802,7 +1899,6 @@ let handle_persistent_signaturehelp_lsp
       in
       type_parse_artifacts_with_cache
         ~options
-        ~env
         ~profiling
         ~type_parse_artifacts_cache
         path
@@ -1821,11 +1917,11 @@ let handle_persistent_signaturehelp_lsp
            ~reason:"Couldn't parse file in parse_artifacts"
            metadata
         )
-    | Ok (Parse_artifacts { file_sig; _ }, Typecheck_artifacts { cx; typed_ast }) ->
+    | Ok (Parse_artifacts { ast; file_sig; _ }, Typecheck_artifacts { cx; typed_ast }) ->
       let func_details =
         let file_sig = File_sig.abstractify_locs file_sig in
         let cursor_loc = Loc.cursor (Some path) line col in
-        Signature_help.find_signatures ~options ~reader ~cx ~file_sig ~typed_ast cursor_loc
+        Signature_help.find_signatures ~options ~reader ~cx ~file_sig ~ast ~typed_ast cursor_loc
       in
       (match func_details with
       | Ok details ->
@@ -1863,7 +1959,7 @@ let handle_persistent_document_highlight
     | Ok (file_key, content) ->
       let (line, col) = Flow_lsp_conversions.position_of_document_position params in
       let local_refs =
-        FindRefs_js.find_local_refs ~reader ~options ~env ~profiling ~file_key ~content ~line ~col
+        FindRefs_js.find_local_refs ~reader ~options ~profiling ~file_key ~content ~line ~col
       in
       let extra_data =
         Some
@@ -1938,7 +2034,6 @@ let handle_persistent_coverage ~options ~id ~params ~file_input ~metadata ~clien
       in
       coverage
         ~options
-        ~env
         ~profiling
         ~type_parse_artifacts_cache
         ~force
@@ -2200,7 +2295,6 @@ let handle_live_errors_request =
                     in
                     type_parse_artifacts_with_cache
                       ~options
-                      ~env
                       ~profiling
                       ~type_parse_artifacts_cache
                       file_key
@@ -2425,7 +2519,24 @@ let get_persistent_handler ~genv ~client_id ~request:(request, metadata) :
     in
     let metadata = with_data ~extra_data metadata in
     (match command with
-    | "log" -> Handle_persistent_immediately (handle_persistent_log_command ~id ~arguments ~metadata)
+    | "log" ->
+      let extra_data =
+        let open Hh_json in
+        match arguments with
+        | Some (JSON_String "textDocument/completion" :: _) ->
+          (* add extra metadata to completion logs that we don't want to have to include
+             on every result. *)
+          (match Persistent_connection.get_client client_id with
+          | None -> None
+          | Some client ->
+            let props =
+              [("rank_autoimports_by_usage", JSON_Bool (rank_autoimports_by_usage ~options client))]
+            in
+            Some (JSON_Object props))
+        | _ -> None
+      in
+      let metadata = with_data ~extra_data metadata in
+      Handle_persistent_immediately (handle_persistent_log_command ~id ~arguments ~metadata)
     | "source.addMissingImports" ->
       (match arguments with
       | Some [json] ->
@@ -2481,7 +2592,7 @@ let handle_persistent_uncaught_exception request e =
   let stack = Exception.get_backtrace_string e in
   LspProt.UncaughtException { request; exception_constructor; stack }
 
-let send_persistent_response ~profiling ~client request result =
+let send_persistent_response ~profiling ~client result =
   let server_profiling = Some profiling in
   let server_logging_context = Some (FlowEventLogger.get_context ()) in
   let (ret, lsp_response, metadata) = result in
@@ -2489,8 +2600,6 @@ let send_persistent_response ~profiling ~client request result =
   let response = (lsp_response, metadata) in
   Persistent_connection.send_response response client;
   Hh_logger.info "Persistent response: %s" (LspProt.string_of_response lsp_response);
-  (* we'll send this "Finishing_up" event only after sending the LSP response *)
-  send_finished_status_update profiling (LspProt.string_of_request request);
   ret
 
 let wrap_persistent_handler
@@ -2534,7 +2643,10 @@ let wrap_persistent_handler
               Lwt.return (default_ret, response, metadata))
       )
     in
-    Lwt.return (send_persistent_response ~profiling ~client request result)
+    let ret = send_persistent_response ~profiling ~client result in
+    (* we'll send this "Finishing_up" event only after sending the LSP response *)
+    send_command_summary profiling (LspProt.string_of_request request);
+    Lwt.return ret
 
 let wrap_immediate_persistent_handler
     (type a b c)
@@ -2559,8 +2671,6 @@ let wrap_immediate_persistent_handler
     default_ret
   | Some client ->
     Hh_logger.info "Persistent request: %s" (LspProt.string_of_request request);
-    MonitorRPC.status_update ~event:ServerStatus.Handling_request_start;
-
     let should_print_summary = Options.should_profile genv.options in
     let (profiling, result) =
       Profiling_js.with_profiling_sync ~label:"Command" ~should_print_summary (fun profiling ->
@@ -2573,7 +2683,7 @@ let wrap_immediate_persistent_handler
               (default_ret, response, metadata))
       )
     in
-    send_persistent_response ~profiling ~client request result
+    send_persistent_response ~profiling ~client result
 
 let handle_persistent_immediately_unsafe ~genv:_ ~workload ~client ~profiling () =
   let (response, json_data) = workload ~client ~profiling in

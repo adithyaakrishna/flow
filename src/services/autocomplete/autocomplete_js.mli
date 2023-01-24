@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -9,6 +9,7 @@ type ac_id = {
   include_super: bool;
   include_this: bool;
   type_: Type.t;
+  enclosing_class_t: Type.t option;
 }
 
 type autocomplete_type =
@@ -16,9 +17,18 @@ type autocomplete_type =
   | Ac_binding  (** binding identifiers introduce new names *)
   | Ac_comment  (** inside a comment *)
   | Ac_id of ac_id  (** identifier references *)
-  | Ac_class_key  (** class method name or property name *)
+  | Ac_class_key of { enclosing_class_t: Type.t option }  (** class method name or property name *)
   | Ac_enum  (** identifier in enum declaration *)
-  | Ac_key of { obj_type: Type.t }  (** object key *)
+  | Ac_import_specifier of {
+      module_type: Type.t;
+      used_keys: SSet.t;
+      is_type: bool;
+    }  (** Import named specifiers *)
+  | Ac_key of {
+      obj_type: Type.t;
+      used_keys: SSet.t;
+      spreads: (Loc.t * Type.t) list;
+    }  (** object key *)
   | Ac_literal of { lit_type: Type.t }  (** inside a literal like a string or regex *)
   | Ac_module  (** a module name *)
   | Ac_type  (** type identifiers *)

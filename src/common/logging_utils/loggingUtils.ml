@@ -1,12 +1,12 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 let hh_logger_level_of_env env =
-  match Sys_utils.get_env env with
+  match Sys.getenv_opt env with
   | Some "off" -> Some Hh_logger.Level.Off
   | Some "fatal" -> Some Hh_logger.Level.Fatal
   | Some "error" -> Some Hh_logger.Level.Error
@@ -69,7 +69,7 @@ let (set_server_options, dump_server_options) =
       ~log_file
   in
   let dump_server_options ~server_options ~log =
-    let (lazy_mode, abstract_locations, max_workers, enabled_rollouts, debug, log_saving, log_file)
+    let (lazy_mode, abstract_locations, max_workers, enabled_rollouts, debug, log_saving, _log_file)
         =
       format server_options
     in
@@ -93,7 +93,6 @@ let (set_server_options, dump_server_options) =
              rate
           ))
       log_saving;
-    log (Printf.sprintf "log_file=%s" log_file);
     SMap.iter (fun r g -> log (Printf.sprintf "Rollout %S set to %S" r g)) enabled_rollouts
   in
   (set_server_options, dump_server_options)
@@ -101,5 +100,4 @@ let (set_server_options, dump_server_options) =
 let disable_logging () =
   EventLogger.disable_logging ();
   FlowEventLogger.disable_logging ();
-  FlowInteractionLogger.disable_logging ();
-  Flow_server_profile.disable_logging ()
+  FlowInteractionLogger.disable_logging ()

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -53,19 +53,12 @@ val get_message :
   ]
   Lwt.t
 
-(* 'respond to_this with_that' is for replying to a JsonRPC request. It will send either *)
-(* a response or an error depending on whether 'with_that' has an error id in it.        *)
-(* [powered_by] is our own non-standard extension to JsonRPC, which lets the
-   client know which back-end served the request. *)
-val respond : writer -> ?powered_by:string -> message -> Hh_json.json -> unit
+(** [respond to_this with_that] is for replying to a JsonRPC request.
+    It will send either a response or an error depending on whether
+    [with_that] has an error id in it. *)
+val respond : writer -> message -> Hh_json.json -> unit
 
-(* notify/request are for initiating JsonRPC messages *)
-val notify : writer -> ?powered_by:string -> string -> Hh_json.json -> unit
+(** notify/request are for initiating JsonRPC messages *)
+val notify : writer -> string -> Hh_json.json -> unit
 
 val get_next_request_id : unit -> int
-
-(* For logging purposes, you can get a copy of which JsonRPC message was last    *)
-(* sent by this module - be it a response, notification, request or cancellation *)
-val last_sent : unit -> Hh_json.json option
-
-val clear_last_sent : unit -> unit

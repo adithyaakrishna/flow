@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -61,6 +61,12 @@ coverage() {
   echo "-----------------------------"
   assert_ok rm a.js
   assert_ok "$FLOW" force-recheck a.js
+  assert_ok "$FLOW" batch-coverage --strip-root --wait-for-recheck true .
+  echo "-----------------------------"
+  echo "parsed -> unparsed file"
+  echo "-----------------------------"
+  assert_ok cp non_flow.js b.js
+  assert_ok "$FLOW" force-recheck b.js
   assert_ok "$FLOW" batch-coverage --strip-root --wait-for-recheck true .
 }
 

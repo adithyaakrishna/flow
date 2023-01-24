@@ -1429,7 +1429,7 @@ Cannot assign `b.onClick !== null ? b.onClick?.() : 42` to `f` because undefined
 
    method_calls.js:20:37
    20| var f: empty = b.onClick !== null ? b.onClick?.() : 42;
-                                           ^^^^^^^^^^^^^
+                                           ^^^^^^^^^
 
 References:
    method_calls.js:19:27
@@ -2132,7 +2132,7 @@ References:
 
 Error -------------------------------------------------------------------------------------------- refinements.js:111:10
 
-Property `u` is missing in undefined [1]. [incompatible-type]
+Cannot get `b?.w.u` because property `u` is missing in undefined [1]. [incompatible-type]
 
    refinements.js:111:10
    111| if (b?.w.u) { // error here
@@ -2146,7 +2146,7 @@ References:
 
 Error -------------------------------------------------------------------------------------------- refinements.js:116:14
 
-Property `u` is missing in undefined [1]. [incompatible-type]
+Cannot get `b.w.u` because property `u` is missing in undefined [1]. [incompatible-type]
 
    refinements.js:116:14
    116| if (b && b.w.u) { // error consistent with above
@@ -2308,6 +2308,30 @@ References:
    refinements.js:140:33
    140| declare var d: ?{a?: () => {b?: {c: number}}, d: number};
                                         ^^^^^^^^^^^ [1]
+
+
+Error -------------------------------------------------------------------------------------------- refinements.js:148:18
+
+Sketchy null check on string [1] which is potentially an empty string. Perhaps you meant to check for null or
+undefined [2]? [sketchy-null-string]
+
+   refinements.js:148:18
+   148| var x11: empty = a11?.a || b11?.a;
+                         ^^^^^^ [2]
+
+References:
+   refinements.js:145:24
+   145| declare var a11: ?({a: string} | {});
+                               ^^^^^^ [1]
+
+
+Error -------------------------------------------------------------------------------------------- refinements.js:148:18
+
+Sketchy null check on mixed [1] which is potentially false. Perhaps you meant to check for null or undefined [1]?
+[sketchy-null-mixed]
+
+   148| var x11: empty = a11?.a || b11?.a;
+                         ^^^^^^ [1]
 
 
 Error -------------------------------------------------------------------------------------------- refinements.js:148:18
@@ -3657,7 +3681,7 @@ References:
 
 
 
-Found 229 errors
+Found 231 errors
 
 Only showing the most relevant union/intersection branches.
 To see all branches, re-run Flow with --show-all-branches

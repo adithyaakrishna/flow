@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -17,7 +17,6 @@ type env = {
   tmp_dir: string;
   shm_hash_table_pow: int option;
   shm_log_level: int option;
-  log_file: string;
   ignore_version: bool;
   emoji: bool;
   quiet: bool;
@@ -194,27 +193,26 @@ let rec connect ~flowconfig_name ~client_handshake env retries start_time =
           Flow_version.version
       in
       Exit.(exit ~msg Build_id_mismatch)
-  | Error CCS.Server_socket_missing ->
-    begin
-      try
+  | Error CCS.Server_socket_missing -> begin
+    try
+      if not env.quiet then
+        Utils_js.prerr_endlinef "Attempting to kill server for `%s`" (Path.to_string env.root);
+      CommandMeanKill.mean_kill ~flowconfig_name ~tmp_dir:env.tmp_dir env.root;
+      if not env.quiet then
+        Utils_js.prerr_endlinef "Successfully killed server for `%s`" (Path.to_string env.root);
+      let start_time = Unix.gettimeofday () in
+      handle_missing_server ~flowconfig_name ~client_handshake env retries start_time
+    with
+    | CommandMeanKill.FailedToKill err ->
+      begin
         if not env.quiet then
-          Utils_js.prerr_endlinef "Attempting to kill server for `%s`" (Path.to_string env.root);
-        CommandMeanKill.mean_kill ~flowconfig_name ~tmp_dir:env.tmp_dir env.root;
-        if not env.quiet then
-          Utils_js.prerr_endlinef "Successfully killed server for `%s`" (Path.to_string env.root);
-        let start_time = Unix.gettimeofday () in
-        handle_missing_server ~flowconfig_name ~client_handshake env retries start_time
-      with
-      | CommandMeanKill.FailedToKill err ->
-        begin
-          if not env.quiet then
-            match err with
-            | Some err -> prerr_endline err
-            | None -> ()
-        end;
-        let msg = Utils_js.spf "Failed to kill server for `%s`" (Path.to_string env.root) in
-        Exit.(exit ~msg Kill_error)
-    end
+          match err with
+          | Some err -> prerr_endline err
+          | None -> ()
+      end;
+      let msg = Utils_js.spf "Failed to kill server for `%s`" (Path.to_string env.root) in
+      Exit.(exit ~msg Kill_error)
+  end
 
 and handle_missing_server ~flowconfig_name ~client_handshake env retries start_time =
   if env.autostart then (

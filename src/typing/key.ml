@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -47,8 +47,7 @@ let is_simple (_, ps) = List.length ps = 0
 let reason_desc =
   Reason.(
     function
-    | ((OrdinaryName _ as name), []) -> RIdentifier name
-    | (name, []) -> RCustom (display_string_of_name name)
+    | (name, []) -> RIdentifier name
     | (_, projs) ->
       (match List.hd (List.rev projs) with
       | Prop x -> RProperty (Some (OrdinaryName x))

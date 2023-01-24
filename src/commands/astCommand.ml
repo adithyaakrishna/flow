@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -33,22 +33,23 @@ let spec =
     args =
       CommandSpec.ArgSpec.(
         empty
-        |> flag "--tokens" no_arg ~doc:"Include a list of syntax tokens in the output"
-        |> flag "--pretty" no_arg ~doc:"Pretty-print JSON output"
+        |> flag "--tokens" truthy ~doc:"Include a list of syntax tokens in the output"
+        |> flag "--pretty" truthy ~doc:"Pretty-print JSON output"
         |> flag
              "--check"
-             no_arg
+             truthy
              ~doc:"Checks whether the file parses, returning any errors but not the AST"
-        |> flag "--debug" no_arg ~doc:"" (* undocumented *)
+        |> flag "--debug" truthy ~doc:"" (* undocumented *)
         |> flag
              "--pattern"
-             no_arg
+             truthy
              ~doc:"Prints the AST structurally without locations to be used in pattern matching"
         |> flag
              "--type"
              (enum [("js", File_js); ("json", File_json)])
              ~doc:"Type of input file (js or json)"
-        |> flag "--strict" no_arg ~doc:"Parse in strict mode"
+        |> flag "--strict" truthy ~doc:"Parse in strict mode"
+        |> flag "--no-enums" truthy ~doc:"Disable enum support"
         |> flag
              "--include-comments"
              (required
@@ -80,7 +81,7 @@ type ast_result_type =
 
 let get_file path = function
   | Some filename -> File_input.FileName (CommandUtils.expand_path filename)
-  | None -> File_input.FileContent (path, Sys_utils.read_stdin_to_string ())
+  | None -> File_input.FileContent (path, Sys_utils.read_all stdin)
 
 module Token_translator = Token_translator.Translate (Json_of_estree)
 
@@ -94,6 +95,7 @@ let main
     pattern
     file_type_opt
     use_strict
+    no_enums
     include_comments
     include_locs
     offset_style
@@ -106,16 +108,15 @@ let main
   let file_type =
     match file_type_opt with
     | Some t -> t
-    | None ->
-      begin
-        match filename with
-        | Some fn ->
-          if Files.is_json_file fn then
-            File_json
-          else
-            File_js
-        | None -> File_js
-      end
+    | None -> begin
+      match filename with
+      | Some fn ->
+        if Files.is_json_file fn then
+          File_json
+        else
+          File_js
+      | None -> File_js
+    end
   in
 
   let module Translate =
@@ -148,19 +149,12 @@ let main
            TODO: make these CLI flags *)
         let parse_options =
           Some
-            Parser_env.
-              {
-                enums = true;
-                esproposal_class_instance_fields = true;
-                esproposal_class_static_fields = true;
-                esproposal_decorators = true;
-                esproposal_export_star_as = true;
-                esproposal_optional_chaining = true;
-                esproposal_nullish_coalescing = true;
-                types = true;
-                use_strict;
-              }
-            
+            {
+              Parser_env.enums = not no_enums;
+              esproposal_decorators = true;
+              types = true;
+              use_strict;
+            }
         in
 
         let filename = File_input.path_of_file_input file in
@@ -233,7 +227,7 @@ let main
             JSON_Object (errors_prop :: tokens_prop :: params)
           | _ -> assert false
       with
-      | Parse_error.Error l -> JSON_Object [("errors", Translate.errors l)]
+      | Parse_error.Error (e, es) -> JSON_Object [("errors", Translate.errors (e :: es))]
     in
     print_json_endline ~pretty results
   )

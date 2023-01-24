@@ -4,10 +4,6 @@ type MyType = {|
 
 let x: $Shape<MyType> = {foo : 3}; //no error
 
-let o = {};
-o.p = 3;
-let z:$Shape<typeof o> = {s : 4}; //no error
-
 let o2 = {p : 4};
 let z2:$Shape<typeof o2> = {s : 4}; // flow error
 
@@ -16,12 +12,7 @@ let z3:$Shape<Object> = {x : 3}; // no error
 
 let z5:$Shape<any> = {x : 3}; // no error
 
-let method = () => {
-  return;
-};
-let z7 : $Shape<typeof method> = {m : 5, k : 5}; // no error
-
-let a = [];
+let a: Array<mixed> = [];
 let z8 : $Shape<typeof a> = {y : 4}; // flow error
 
 let n = 4;
@@ -30,18 +21,13 @@ let z9 : $Shape<number> = {x : 3}; // flow error
 let s = "asdf";
 let z11 : $Shape<string> = {x : 3}; // flow error
 
-let o7 = {};
-o7.p = 3;
-let z13 : $Shape<typeof o7> = {p : "3"}; // no error
-(z13.p : empty); //flow error
-
 let z14 : $Shape<{}> = {p : 'foo'}; // flow error
 
 type Props = {};
 const React = require('react');
 
 class MyComponent extends React.Component<Props, MyType> {
-  state = this._createState();
+  state: MyType = this._createState();
 
   componentWillReceiveProps(nextProps: Props): void {
     this.setState(this._createState());
@@ -71,10 +57,10 @@ class Empt {}
 let _a : $Shape<A> = { x : 4 }; // no error
 let _b : $Shape<A> = { y : 4 }; // flow error
 let _c : $Shape<B> = { x : 4 }; // no error
-let _d : $Shape<B> = { y : "4" }; // no error
+let _d : $Shape<B> = { y : "4" }; // no error in old inference, error in LTI
 let _e : $Shape<B> = { z : 4 }; // flow error
 let _f : $Shape<C> = { x : 4 }; // no error
-let _g : $Shape<C> = { y : "4" }; // no error
+let _g : $Shape<C> = { y : "4" }; // no error in old inference, error in LTI
 let _h : $Shape<C> = { z : "4" }; // no error
 let _i : $Shape<C> = { a : 4 }; // flow error
 let _j : $Shape<Empt> = {}; // no error

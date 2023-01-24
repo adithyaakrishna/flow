@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,7 +16,8 @@ let tests =
                {
                  name = Reason.OrdinaryName "foo";
                  prop = Ty.Get (Ty.Str None);
-                 from_proto = false;
+                 inherited = false;
+                 source = Ty.Other;
                  def_loc = None;
                }
            in
@@ -24,6 +25,7 @@ let tests =
              Ty.Obj
                {
                  Ty.obj_kind = Ty.ExactObj;
+                 obj_def_loc = None;
                  obj_frozen = false;
                  obj_literal = None;
                  obj_props = [getter];
@@ -38,7 +40,8 @@ let tests =
                {
                  name = Reason.OrdinaryName "foo";
                  prop = Ty.Set (Ty.Str None);
-                 from_proto = false;
+                 inherited = false;
+                 source = Ty.Other;
                  def_loc = None;
                }
            in
@@ -46,6 +49,7 @@ let tests =
              Ty.Obj
                {
                  Ty.obj_kind = Ty.ExactObj;
+                 obj_def_loc = None;
                  obj_frozen = false;
                  obj_literal = None;
                  obj_props = [setter];

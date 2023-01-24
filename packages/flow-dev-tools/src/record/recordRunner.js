@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,11 +8,11 @@
  * @format
  */
 
-const colors = require('colors/safe');
+const chalk = require('chalk');
 const {isAbsolute, join} = require('path');
 const {format} = require('util');
 
-const {readFile, writeFile} = require('../utils/async');
+const {readFile, writeFile} = require('fs').promises;
 const {default: Builder} = require('../test/builder');
 const {findTestsByName, findTestsByRun} = require('../test/findTests');
 const parser = require('flow-parser');
@@ -20,13 +20,15 @@ const {loadSuite} = require('../test/findTests');
 const {default: RunQueue} = require('../test/RunQueue');
 const {getTestsDir} = require('../constants');
 
+import type {Suite} from '../test/Suite';
 import type {Args} from './recordCommand';
+import type {CallSuggestion} from '../test/assertions/assertionTypes';
 
 function escapeString(str: string): string {
   return str.replace(/`/g, '\\`').replace(/\${/g, '\\${');
 }
 
-function indent(str, size) {
+function indent(str: string, size: number) {
   const indent = Array(size + 1).join(' ');
   return str
     .split('\n')
@@ -34,7 +36,10 @@ function indent(str, size) {
     .join('\n');
 }
 
-function suggestionToString(suggestion, indentSize): string {
+function suggestionToString(
+  suggestion: CallSuggestion,
+  indentSize: number,
+): string {
   const args = suggestion.args
     .map(arg => {
       switch (typeof arg) {
@@ -66,7 +71,7 @@ function suggestionToString(suggestion, indentSize): string {
   }
 }
 
-function dfsForRange(node, line, col): ?[number, number] {
+function dfsForRange(node: any, line: number, col: number): ?[number, number] {
   const todo = [];
   if (typeof node === 'object' && node != null && node.hasOwnProperty('type')) {
     if (node.type === 'CallExpression') {
@@ -96,6 +101,8 @@ function dfsForRange(node, line, col): ?[number, number] {
 }
 
 async function runner(args: Args): Promise<void> {
+  process.stderr.write(`Using flow binary: ${args.bin}\n`);
+
   const builder = new Builder(args.errorCheckCommand);
   let suites;
   if (args.rerun != null) {
@@ -104,7 +111,7 @@ async function runner(args: Args): Promise<void> {
     suites = await findTestsByName(args.suites);
   }
 
-  const loadedSuites = {};
+  const loadedSuites: {[string]: Suite} = {};
   for (const suiteName of suites) {
     loadedSuites[suiteName] = loadSuite(suiteName);
   }
@@ -128,13 +135,13 @@ async function runner(args: Args): Promise<void> {
     suiteName = 0;
 
   function printStatus(status: 'RECORDING' | 'RECORDED' | 'FAIL'): void {
-    let statusText = colors.bold('[ ] RECORDING:       ');
+    let statusText = chalk.bold('[ ] RECORDING:       ');
     let newline = '';
     if (status === 'RECORDED') {
-      statusText = colors.green.bold('[✓] RECORDED:        ');
+      statusText = chalk.green.bold('[✓] RECORDED:        ');
       newline = '\n';
     } else if (status === 'FAIL') {
-      statusText = colors.red.bold('[✗] FAILED TO RECORD:');
+      statusText = chalk.red.bold('[✗] FAILED TO RECORD:');
       newline = '\n';
     }
     if (process.stdout.isTTY) {
@@ -170,7 +177,7 @@ async function runner(args: Args): Promise<void> {
   }
 
   const results = runQueue.results;
-  for (suiteName in results) {
+  for (const suiteName in results) {
     const suiteResult = results[suiteName];
     if (suiteResult.type === 'exceptional') {
       printStatus('FAIL');
@@ -207,7 +214,7 @@ async function runner(args: Args): Promise<void> {
                   if (!isAbsolute(filename)) {
                     filename = join(getTestsDir(), suiteName, filename);
                   }
-                  const code = await readFile(filename);
+                  const code = await readFile(filename, 'utf8');
                   const ast = parser.parse(code, {});
                   const range =
                     assertLoc &&

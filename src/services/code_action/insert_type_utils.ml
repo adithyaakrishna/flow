@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -59,7 +59,7 @@ let is_react_file_key = function
   | _ -> false
 
 let is_react_redux_file_key = function
-  | File_key.LibFile x -> Filename.basename x = "react-redux_v5.x.x.js"
+  | File_key.LibFile x -> Base.String.is_substring ~substring:"react-redux" (Filename.basename x)
   | _ -> false
 
 let is_react_loc loc =
@@ -191,13 +191,11 @@ module Error = struct
 
   type import_error =
     | Loc_source_none
-    | Parsing_heaps_get_sig_error
     | Indeterminate_module_type
-    | No_matching_export of string * ALoc.t
+    | No_matching_export of string * Loc.t
 
   type import_error_counts = {
     loc_source_none: int;
-    parsing_heaps_get_sig_error: int;
     indeterminate_module_type: int;
     no_matching_export: int;
   }
@@ -221,13 +219,7 @@ module Error = struct
     {
       missing_annotation_or_normalizer_error = 0;
       validation_error = 0;
-      import_error =
-        {
-          loc_source_none = 0;
-          parsing_heaps_get_sig_error = 0;
-          indeterminate_module_type = 0;
-          no_matching_export = 0;
-        };
+      import_error = { loc_source_none = 0; indeterminate_module_type = 0; no_matching_export = 0 };
       serializer_error = 0;
       unsupported_error_kind = 0;
     }
@@ -235,7 +227,6 @@ module Error = struct
   let combine_import_errors c1 c2 =
     {
       loc_source_none = c1.loc_source_none + c2.loc_source_none;
-      parsing_heaps_get_sig_error = c1.parsing_heaps_get_sig_error + c2.parsing_heaps_get_sig_error;
       indeterminate_module_type = c1.indeterminate_module_type + c2.indeterminate_module_type;
       no_matching_export = c1.no_matching_export + c2.no_matching_export;
     }
@@ -252,9 +243,8 @@ module Error = struct
 
   let serialize_import_error = function
     | Loc_source_none -> "Loc_source_none"
-    | Parsing_heaps_get_sig_error -> "Parsing_heaps_get_sig_error"
     | Indeterminate_module_type -> "Indeterminate_module_type"
-    | No_matching_export (x, loc) -> spf "No_matching_export (%s, %s)" x (Reason.string_of_aloc loc)
+    | No_matching_export (x, loc) -> spf "No_matching_export %s %s" x (Reason.string_of_loc loc)
 
   let serialize = function
     | Missing_annotation_or_normalizer_error -> "Missing_annotation_or_normalizer_error"
@@ -273,10 +263,6 @@ module Error = struct
         string_of_row ~indent:2 "Validation Error" c.validation_error;
         "  Import Error:";
         string_of_row ~indent:4 "Loc source none" c.import_error.loc_source_none;
-        string_of_row
-          ~indent:4
-          "Parsing heaps get ast error"
-          c.import_error.parsing_heaps_get_sig_error;
         string_of_row ~indent:4 "Indeterminate module type" c.import_error.indeterminate_module_type;
         string_of_row ~indent:4 "No matching export" c.import_error.no_matching_export;
         string_of_row ~indent:2 "Serializer error" c.serializer_error;
@@ -287,8 +273,6 @@ module Error = struct
 
   let add_import_error c = function
     | Loc_source_none -> { c with loc_source_none = c.loc_source_none + 1 }
-    | Parsing_heaps_get_sig_error ->
-      { c with parsing_heaps_get_sig_error = c.parsing_heaps_get_sig_error + 1 }
     | Indeterminate_module_type ->
       { c with indeterminate_module_type = c.indeterminate_module_type + 1 }
     | No_matching_export _ -> { c with no_matching_export = c.no_matching_export + 1 }
@@ -315,6 +299,18 @@ module type BASE_STATS = sig
   val serialize : t -> string list
 
   val report : t -> string list
+end
+
+module UnitStats : BASE_STATS with type t = unit = struct
+  type t = unit
+
+  let empty = ()
+
+  let combine _ _ = ()
+
+  let serialize _s = []
+
+  let report _s = []
 end
 
 module Stats (Extra : BASE_STATS) = struct
@@ -506,8 +502,7 @@ module Validator = struct
       method! on_t env t =
         match t with
         (* Recursive types unsupported *)
-        | Ty.Mu _
-        | Ty.TVar _ ->
+        | Ty.Any Ty.Recursive ->
           env := Recursive :: !env;
           Ty.explicit_any
         | Ty.Bot (Ty.NoLowerWithUpper (Ty.SomeUnknownUpper u)) ->
@@ -640,8 +635,8 @@ class patch_up_react_mapper ?(imports_react = false) () =
                 Ty.sym_name =
                   Reason.OrdinaryName
                     ( ( "AbstractComponent" | "ChildrenArray" | "ComponentType" | "Config"
-                      | "Context" | "Element" | "ElementConfig" | "ElementProps" | "ElementRef"
-                      | "ElementType" | "Key" | "Node" | "Portal" | "Ref"
+                      | "Context" | "Element" | "MixedElement" | "ElementConfig" | "ElementProps"
+                      | "ElementRef" | "ElementType" | "Key" | "Node" | "Portal" | "Ref"
                       | "StatelessFunctionalComponent" ) as name
                     );
                 sym_provenance = Ty_symbol.Library { Ty_symbol.imported_as = None };
@@ -666,7 +661,7 @@ class patch_up_react_mapper ?(imports_react = false) () =
     method! on_prop loc prop =
       let prop =
         match prop with
-        | Ty.NamedProp { name; prop = named_prop; from_proto; def_loc }
+        | Ty.NamedProp { name; prop = named_prop; inherited; source; def_loc }
           when Reason.is_internal_name name ->
           Hh_logger.warn
             "ShadowProp %s at %s"
@@ -674,7 +669,7 @@ class patch_up_react_mapper ?(imports_react = false) () =
             (Reason.string_of_loc loc);
           (* Shadow props appear as regular props *)
           let name = Reason.OrdinaryName (Reason.uninternal_name name) in
-          Ty.NamedProp { name; prop = named_prop; from_proto; def_loc }
+          Ty.NamedProp { name; prop = named_prop; inherited; source; def_loc }
         | prop -> prop
       in
       super#on_prop loc prop

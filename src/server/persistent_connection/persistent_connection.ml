@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,9 +8,20 @@
 module Prot = LspProt
 
 module Client_config = struct
-  type t = { suggest_autoimports: bool }
+  type rank_autoimports_by_usage =
+    [ `Default
+    | `True
+    | `False
+    ]
 
-  let suggest_autoimports { suggest_autoimports } = suggest_autoimports
+  type t = {
+    rank_autoimports_by_usage: rank_autoimports_by_usage;
+    suggest_autoimports: bool;
+  }
+
+  let rank_autoimports_by_usage { rank_autoimports_by_usage; _ } = rank_autoimports_by_usage
+
+  let suggest_autoimports { suggest_autoimports; _ } = suggest_autoimports
 end
 
 type single_client = {
@@ -23,6 +34,8 @@ type single_client = {
     (Types_js_types.file_artifacts, Flow_error.ErrorSet.t) result FilenameCache.t;
   mutable client_config: Client_config.t;
   mutable outstanding_handlers: unit Lsp.lsp_handler Lsp.IdMap.t;
+  mutable token_loc: int * int * File_key.t option;
+  mutable autocomplete_session_length: int;
 }
 
 type t = Prot.client_id list
@@ -102,8 +115,11 @@ let add_client client_id lsp_initialize_params =
       client_id;
       lsp_initialize_params;
       type_parse_artifacts_cache = FilenameCache.make ~max_size:cache_max_size;
-      client_config = { Client_config.suggest_autoimports = true };
+      client_config =
+        { Client_config.suggest_autoimports = true; rank_autoimports_by_usage = `Default };
       outstanding_handlers = Lsp.IdMap.empty;
+      token_loc = (-1, -1, None);
+      autocomplete_session_length = 0;
     }
   in
   active_clients := IMap.add client_id new_client !active_clients;
@@ -118,20 +134,12 @@ let add_client_to_clients clients client_id = client_id :: clients
 let remove_client_from_clients clients client_id = List.filter (fun id -> id != client_id) clients
 
 let get_subscribed_clients =
-  List.fold_left
-    (fun acc client_id ->
+  Base.List.fold
+    ~f:(fun acc client_id ->
       match get_client client_id with
       | Some client when client.subscribed -> client :: acc
       | _ -> acc)
-    []
-
-let get_subscribed_lsp_clients =
-  List.fold_left
-    (fun acc client_id ->
-      match get_client client_id with
-      | Some client when client.subscribed -> client :: acc
-      | _ -> acc)
-    []
+    ~init:[]
 
 let update_clients ~clients ~errors_reason ~calc_errors_and_warnings =
   let subscribed_clients = get_subscribed_clients clients in
@@ -150,7 +158,7 @@ let update_clients ~clients ~errors_reason ~calc_errors_and_warnings =
     List.iter (send_errors ~errors_reason ~errors ~warnings) subscribed_clients
   )
 
-let send_lsp clients json = clients |> get_subscribed_lsp_clients |> List.iter (send_single_lsp json)
+let send_lsp clients json = clients |> get_subscribed_clients |> List.iter (send_single_lsp json)
 
 let send_start_recheck clients =
   clients |> get_subscribed_clients |> List.iter send_single_start_recheck
@@ -225,10 +233,26 @@ let client_did_close (client : single_client) ~(filenames : string Nel.t) : bool
 let client_did_change_configuration (client : single_client) (new_config : Client_config.t) : unit =
   Hh_logger.info "Client #%d changed configuration" client.client_id;
   let old_config = client.client_config in
+
   let old_suggest_autoimports = Client_config.suggest_autoimports old_config in
   let new_suggest_autoimports = Client_config.suggest_autoimports new_config in
   if new_suggest_autoimports <> old_suggest_autoimports then
     Hh_logger.info "  suggest_autoimports: %b -> %b" old_suggest_autoimports new_suggest_autoimports;
+
+  let old_rank_autoimports_by_usage = Client_config.rank_autoimports_by_usage old_config in
+  let new_rank_autoimports_by_usage = Client_config.rank_autoimports_by_usage new_config in
+  ( if new_rank_autoimports_by_usage <> old_rank_autoimports_by_usage then
+    let to_string = function
+      | `Default -> "default"
+      | `True -> "true"
+      | `False -> "false"
+    in
+    Hh_logger.info
+      "  rank_autoimports_by_usage: %s -> %s"
+      (to_string old_rank_autoimports_by_usage)
+      (to_string new_rank_autoimports_by_usage)
+  );
+
   client.client_config <- new_config
 
 let get_file (client : single_client) (fn : string) : File_input.t =
@@ -259,3 +283,12 @@ let pop_outstanding_handler client id =
     client.outstanding_handlers <- Lsp.IdMap.remove id client.outstanding_handlers;
     Some handler
   | None -> None
+
+let autocomplete_session client token_loc =
+  if token_loc = client.token_loc then
+    client.autocomplete_session_length <- client.autocomplete_session_length + 1
+  else (
+    client.token_loc <- token_loc;
+    client.autocomplete_session_length <- 1
+  );
+  client.autocomplete_session_length

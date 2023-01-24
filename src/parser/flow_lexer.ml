@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,9 +7,9 @@
 
 [@@@warning "-39"] (* sedlex inserts some unnecessary `rec`s *)
 
-module Sedlexing = Flow_sedlexing
 open Token
 open Lex_env
+module Sedlexing = Flow_sedlexing
 
 let lexeme = Sedlexing.Utf8.lexeme
 
@@ -151,6 +151,31 @@ let whitespace =
     | 0x2000 .. 0x200a
     | 0x202f | 0x205f | 0x3000 )]
 
+let is_whitespace = function
+  | 0x0009
+  | 0x000B
+  | 0x000C
+  | 0x0020
+  | 0x00A0
+  | 0xfeff
+  | 0x1680
+  | 0x2000
+  | 0x2001
+  | 0x2002
+  | 0x2003
+  | 0x2004
+  | 0x2005
+  | 0x2006
+  | 0x2007
+  | 0x2008
+  | 0x2009
+  | 0x200a
+  | 0x202f
+  | 0x205f
+  | 0x3000 ->
+    true
+  | _ -> false
+
 (* minus sign in front of negative numbers
    (only for types! regular numbers use T_MINUS!) *)
 let neg = [%sedlex.regexp? ('-', Star whitespace)]
@@ -171,8 +196,43 @@ let ascii_id_start = [%sedlex.regexp? '$' | '_' | 'a' .. 'z' | 'A' .. 'Z']
 
 let ascii_id_continue = [%sedlex.regexp? '$' | '_' | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9']
 
-let js_id_continue =
-  [%sedlex.regexp? '$' | '_' | 0x200C | 0x200D | id_continue | unicode_escape | codepoint_escape]
+(* Assuming that the first code point is already lexed
+   return true means that the whole [lexbuf] is valid identifier
+*)
+let rec loop_id_continues lexbuf =
+  match%sedlex lexbuf with
+  | unicode_escape
+  | codepoint_escape
+  | ascii_id_continue ->
+    loop_id_continues lexbuf
+  | eof -> true
+  | any ->
+    (* TODO: Optimize later *)
+    let s = Sedlexing.current_code_point lexbuf in
+    if Js_id.is_valid_unicode_id s then
+      loop_id_continues lexbuf
+    else begin
+      Sedlexing.backoff lexbuf 1;
+      false
+    end
+  | _ -> assert false
+
+(* Assuming that the first code point is already lexed *)
+let rec loop_jsx_id_continues lexbuf : unit =
+  match%sedlex lexbuf with
+  | '-'
+  | ascii_id_continue
+  | unicode_escape
+  | codepoint_escape ->
+    loop_jsx_id_continues lexbuf
+  | eof -> ()
+  | any ->
+    let s = Sedlexing.current_code_point lexbuf in
+    if Js_id.is_valid_unicode_id s then
+      loop_jsx_id_continues lexbuf
+    else
+      Sedlexing.backoff lexbuf 1
+  | _ -> assert false
 
 let pos_at_offset env offset =
   { Loc.line = Lex_env.line env; column = offset - Lex_env.bol_offset env }
@@ -199,7 +259,10 @@ let loc_of_lexbuf env (lexbuf : Sedlexing.lexbuf) =
 
 let loc_of_token env lex_token =
   match lex_token with
-  | T_STRING (loc, _, _, _) -> loc
+  | T_IDENTIFIER { loc; _ }
+  | T_JSX_IDENTIFIER { loc; _ }
+  | T_STRING (loc, _, _, _) ->
+    loc
   | T_JSX_TEXT (loc, _, _) -> loc
   | T_TEMPLATE_PART (loc, _, _) -> loc
   | T_REGEXP (loc, _, _) -> loc
@@ -252,33 +315,43 @@ let mk_comment
   let c = { kind; text; on_newline } in
   (loc, c)
 
-let mk_num_singleton number_type raw =
-  let (neg, num) =
-    if raw.[0] = '-' then
-      (true, String.sub raw 1 (String.length raw - 1))
+let split_number_type =
+  let rec strip_whitespace i len lexeme =
+    if is_whitespace lexeme.(i) then
+      (strip_whitespace [@tailcall]) (i + 1) len lexeme
     else
-      (false, raw)
+      Sedlexing.string_of_utf8 (Array.sub lexeme i (len - i))
   in
+  fun (lexeme : int array) ->
+    (* quickly check whether the number is negative *)
+    if lexeme.(0) = Char.code '-' then
+      (* if it is, we re-scan it to remove whitespace *)
+      let num = strip_whitespace 1 (Array.length lexeme) lexeme in
+      let raw = Sedlexing.string_of_utf8 lexeme in
+      (true, num, raw)
+    else
+      let raw = Sedlexing.string_of_utf8 lexeme in
+      (false, raw, raw)
+
+let mk_num_singleton number_type (lexeme : int array) =
+  let (neg, num, raw) = split_number_type lexeme in
   (* convert singleton number type into a float *)
   let value =
     match number_type with
-    | LEGACY_OCTAL ->
-      begin
-        try Int64.to_float (Int64.of_string ("0o" ^ num)) with
-        | Failure _ -> failwith ("Invalid legacy octal " ^ num)
-      end
+    | LEGACY_OCTAL -> begin
+      try Int64.to_float (Int64.of_string ("0o" ^ num)) with
+      | Failure _ -> failwith ("Invalid legacy octal " ^ num)
+    end
     | BINARY
-    | OCTAL ->
-      begin
-        try Int64.to_float (Int64.of_string num) with
-        | Failure _ -> failwith ("Invalid binary/octal " ^ num)
-      end
+    | OCTAL -> begin
+      try Int64.to_float (Int64.of_string num) with
+      | Failure _ -> failwith ("Invalid binary/octal " ^ num)
+    end
     | LEGACY_NON_OCTAL
-    | NORMAL ->
-      begin
-        try float_of_string num with
-        | Failure _ -> failwith ("Invalid number " ^ num)
-      end
+    | NORMAL -> begin
+      try float_of_string num with
+      | Failure _ -> failwith ("Invalid number " ^ num)
+    end
   in
   let value =
     if neg then
@@ -288,49 +361,28 @@ let mk_num_singleton number_type raw =
   in
   T_NUMBER_SINGLETON_TYPE { kind = number_type; value; raw }
 
-let mk_bignum_singleton kind raw =
-  let (neg, num) =
-    if raw.[0] = '-' then
-      (true, String.sub raw 1 (String.length raw - 1))
-    else
-      (false, raw)
-  in
-  (* convert singleton number type into a float *)
+let mk_bignum_singleton kind lexeme =
+  let (neg, num, raw) = split_number_type lexeme in
+  let postraw = bigint_strip_n num in
   let value =
-    match kind with
-    | BIG_BINARY
-    | BIG_OCTAL ->
-      let postraw = bigint_strip_n num in
-      begin
-        try Int64.to_float (Int64.of_string postraw) with
-        | Failure _ -> failwith ("Invalid (lexer) bigint binary/octal " ^ postraw)
-      end
-    | BIG_NORMAL ->
-      let postraw = bigint_strip_n num in
-      begin
-        try float_of_string postraw with
-        | Failure _ -> failwith ("Invalid (lexer) bigint " ^ postraw)
-      end
+    Int64.of_string_opt postraw
+    |> Option.map (fun value ->
+           if neg then
+             Int64.neg value
+           else
+             value
+       )
   in
-  let approx_value =
-    if neg then
-      ~-.value
-    else
-      value
-  in
-  T_BIGINT_SINGLETON_TYPE { kind; approx_value; raw }
+  T_BIGINT_SINGLETON_TYPE { kind; value; raw }
+
+(* This is valid since the escapes are already tackled*)
+let assert_valid_unicode_in_identifier env loc code =
+  if Js_id.is_valid_unicode_id code then
+    env
+  else
+    lex_error env loc Parse_error.IllegalUnicodeEscape
 
 let decode_identifier =
-  let assert_valid_unicode_in_identifier env loc code =
-    let lexbuf = Sedlexing.from_int_array [| code |] in
-    match%sedlex lexbuf with
-    | js_id_start -> env
-    | js_id_continue -> env
-    | any
-    | eof ->
-      lex_error env loc Parse_error.IllegalUnicodeEscape
-    | _ -> failwith "unreachable assert_valid_unicode_in_identifier"
-  in
   let loc_and_sub_lexeme env offset lexbuf trim_start trim_end =
     let start_offset = offset + Sedlexing.lexeme_start lexbuf in
     let end_offset = offset + Sedlexing.lexeme_end lexbuf in
@@ -599,9 +651,6 @@ let token (env : Lex_env.t) lexbuf : result =
   | line_terminator_sequence ->
     let env = new_line env lexbuf in
     Continue env
-  | '\\' ->
-    let env = illegal env (loc_of_lexbuf env lexbuf) in
-    Continue env
   | Plus whitespace -> Continue env
   | "/*" ->
     let start_pos = start_pos_of_lexbuf env lexbuf in
@@ -811,70 +860,8 @@ let token (env : Lex_env.t) lexbuf : result =
   | wholenumber
   | floatnumber ->
     Token (env, T_NUMBER { kind = NORMAL; raw = lexeme lexbuf })
-  (* Keywords *)
-  | "async" -> Token (env, T_ASYNC)
-  | "await" -> Token (env, T_AWAIT)
-  | "break" -> Token (env, T_BREAK)
-  | "case" -> Token (env, T_CASE)
-  | "catch" -> Token (env, T_CATCH)
-  | "class" -> Token (env, T_CLASS)
-  | "const" -> Token (env, T_CONST)
-  | "continue" -> Token (env, T_CONTINUE)
-  | "debugger" -> Token (env, T_DEBUGGER)
-  | "declare" -> Token (env, T_DECLARE)
-  | "default" -> Token (env, T_DEFAULT)
-  | "delete" -> Token (env, T_DELETE)
-  | "do" -> Token (env, T_DO)
-  | "else" -> Token (env, T_ELSE)
-  | "enum" -> Token (env, T_ENUM)
-  | "export" -> Token (env, T_EXPORT)
-  | "extends" -> Token (env, T_EXTENDS)
-  | "false" -> Token (env, T_FALSE)
-  | "finally" -> Token (env, T_FINALLY)
-  | "for" -> Token (env, T_FOR)
-  | "function" -> Token (env, T_FUNCTION)
-  | "if" -> Token (env, T_IF)
-  | "implements" -> Token (env, T_IMPLEMENTS)
-  | "import" -> Token (env, T_IMPORT)
-  | "in" -> Token (env, T_IN)
-  | "instanceof" -> Token (env, T_INSTANCEOF)
-  | "interface" -> Token (env, T_INTERFACE)
-  | "let" -> Token (env, T_LET)
-  | "new" -> Token (env, T_NEW)
-  | "null" -> Token (env, T_NULL)
-  | "of" -> Token (env, T_OF)
-  | "opaque" -> Token (env, T_OPAQUE)
-  | "package" -> Token (env, T_PACKAGE)
-  | "private" -> Token (env, T_PRIVATE)
-  | "protected" -> Token (env, T_PROTECTED)
-  | "public" -> Token (env, T_PUBLIC)
-  | "return" -> Token (env, T_RETURN)
-  | "static" -> Token (env, T_STATIC)
-  | "super" -> Token (env, T_SUPER)
-  | "switch" -> Token (env, T_SWITCH)
-  | "this" -> Token (env, T_THIS)
-  | "throw" -> Token (env, T_THROW)
-  | "true" -> Token (env, T_TRUE)
-  | "try" -> Token (env, T_TRY)
-  | "type" -> Token (env, T_TYPE)
-  | "typeof" -> Token (env, T_TYPEOF)
-  | "var" -> Token (env, T_VAR)
-  | "void" -> Token (env, T_VOID)
-  | "while" -> Token (env, T_WHILE)
-  | "with" -> Token (env, T_WITH)
-  | "yield" -> Token (env, T_YIELD)
-  (* Identifiers *)
-  | (ascii_id_start, Star ascii_id_continue) ->
-    (* fast path *)
-    let loc = loc_of_lexbuf env lexbuf in
-    let raw = lexeme lexbuf in
-    Token (env, T_IDENTIFIER { loc; value = raw; raw })
-  | (js_id_start, Star js_id_continue) ->
-    let loc = loc_of_lexbuf env lexbuf in
-    let raw = lexeme lexbuf in
-    let (env, value) = decode_identifier env (Sedlexing.lexeme lexbuf) in
-    Token (env, T_IDENTIFIER { loc; value; raw })
   (* TODO: Use [Symbol.iterator] instead of @@iterator. *)
+  (* `@` is not a valid unicode name *)
   | "@@iterator"
   | "@@asyncIterator" ->
     let loc = loc_of_lexbuf env lexbuf in
@@ -924,6 +911,9 @@ let token (env : Lex_env.t) lexbuf : result =
   | "&=" -> Token (env, T_BIT_AND_ASSIGN)
   | "|=" -> Token (env, T_BIT_OR_ASSIGN)
   | "^=" -> Token (env, T_BIT_XOR_ASSIGN)
+  | "??=" -> Token (env, T_NULLISH_ASSIGN)
+  | "&&=" -> Token (env, T_AND_ASSIGN)
+  | "||=" -> Token (env, T_OR_ASSIGN)
   | "<" -> Token (env, T_LESS_THAN)
   | ">" -> Token (env, T_GREATER_THAN)
   | "+" -> Token (env, T_PLUS)
@@ -942,7 +932,78 @@ let token (env : Lex_env.t) lexbuf : result =
   | "/" -> Token (env, T_DIV)
   | "@" -> Token (env, T_AT)
   | "#" -> Token (env, T_POUND)
-  (* Others *)
+  (* To reason about its correctness:
+     1. all tokens are still matched
+     2. tokens like opaque, opaquex are matched correctly
+       the most fragile case is `opaquex` (matched with `opaque,x` instead)
+     3. \a is disallowed
+     4. a世界 recognized
+  *)
+  | '\\' ->
+    let env = illegal env (loc_of_lexbuf env lexbuf) in
+    Continue env
+  | js_id_start ->
+    let start_offset = Sedlexing.lexeme_start lexbuf in
+    loop_id_continues lexbuf |> ignore;
+    let end_offset = Sedlexing.lexeme_end lexbuf in
+    let loc = loc_of_offsets env start_offset end_offset in
+    Sedlexing.set_lexeme_start lexbuf start_offset;
+    (match lexeme lexbuf with
+    | "async" -> Token (env, T_ASYNC)
+    | "await" -> Token (env, T_AWAIT)
+    | "break" -> Token (env, T_BREAK)
+    | "case" -> Token (env, T_CASE)
+    | "catch" -> Token (env, T_CATCH)
+    | "class" -> Token (env, T_CLASS)
+    | "const" -> Token (env, T_CONST)
+    | "continue" -> Token (env, T_CONTINUE)
+    | "debugger" -> Token (env, T_DEBUGGER)
+    | "declare" -> Token (env, T_DECLARE)
+    | "default" -> Token (env, T_DEFAULT)
+    | "delete" -> Token (env, T_DELETE)
+    | "do" -> Token (env, T_DO)
+    | "else" -> Token (env, T_ELSE)
+    | "enum" -> Token (env, T_ENUM)
+    | "export" -> Token (env, T_EXPORT)
+    | "extends" -> Token (env, T_EXTENDS)
+    | "false" -> Token (env, T_FALSE)
+    | "finally" -> Token (env, T_FINALLY)
+    | "for" -> Token (env, T_FOR)
+    | "function" -> Token (env, T_FUNCTION)
+    | "if" -> Token (env, T_IF)
+    | "implements" -> Token (env, T_IMPLEMENTS)
+    | "import" -> Token (env, T_IMPORT)
+    | "in" -> Token (env, T_IN)
+    | "instanceof" -> Token (env, T_INSTANCEOF)
+    | "interface" -> Token (env, T_INTERFACE)
+    | "let" -> Token (env, T_LET)
+    | "new" -> Token (env, T_NEW)
+    | "null" -> Token (env, T_NULL)
+    | "of" -> Token (env, T_OF)
+    | "opaque" -> Token (env, T_OPAQUE)
+    | "package" -> Token (env, T_PACKAGE)
+    | "private" -> Token (env, T_PRIVATE)
+    | "protected" -> Token (env, T_PROTECTED)
+    | "public" -> Token (env, T_PUBLIC)
+    | "return" -> Token (env, T_RETURN)
+    | "static" -> Token (env, T_STATIC)
+    | "super" -> Token (env, T_SUPER)
+    | "switch" -> Token (env, T_SWITCH)
+    | "this" -> Token (env, T_THIS)
+    | "throw" -> Token (env, T_THROW)
+    | "true" -> Token (env, T_TRUE)
+    | "try" -> Token (env, T_TRY)
+    | "type" -> Token (env, T_TYPE)
+    | "typeof" -> Token (env, T_TYPEOF)
+    | "var" -> Token (env, T_VAR)
+    | "void" -> Token (env, T_VOID)
+    | "while" -> Token (env, T_WHILE)
+    | "with" -> Token (env, T_WITH)
+    | "yield" -> Token (env, T_YIELD)
+    | _ ->
+      let raw = Sedlexing.lexeme lexbuf in
+      let (nenv, value) = decode_identifier env raw in
+      Token (nenv, T_IDENTIFIER { loc; value; raw = Sedlexing.string_of_utf8 raw }))
   | eof ->
     let env =
       if is_in_comment_syntax env then
@@ -970,8 +1031,13 @@ let rec regexp_class env buf lexbuf =
   | ']' ->
     Buffer.add_char buf ']';
     env
+  | line_terminator_sequence ->
+    let loc = loc_of_lexbuf env lexbuf in
+    let env = lex_error env loc Parse_error.UnterminatedRegExp in
+    let env = new_line env lexbuf in
+    env
   (* match multi-char substrings that don't contain the start chars of the above patterns *)
-  | Plus (Compl (eof | '\\' | ']'))
+  | Plus (Compl (eof | '\\' | ']' | line_terminator_sequence_start))
   | any ->
     let str = lexeme lexbuf in
     Buffer.add_string buf str;
@@ -1395,8 +1461,6 @@ let jsx_tag env lexbuf =
   | ':' -> Token (env, T_COLON)
   | '.' -> Token (env, T_PERIOD)
   | '=' -> Token (env, T_ASSIGN)
-  | (js_id_start, Star ('-' | js_id_continue)) ->
-    Token (env, T_JSX_IDENTIFIER { raw = lexeme lexbuf })
   | "'"
   | '"' ->
     let quote = lexeme lexbuf in
@@ -1417,6 +1481,15 @@ let jsx_tag env lexbuf =
     let raw = Buffer.contents raw in
     let loc = { Loc.source = Lex_env.source env; start; _end } in
     Token (env, T_JSX_TEXT (loc, value, raw))
+  | js_id_start ->
+    let start_offset = Sedlexing.lexeme_start lexbuf in
+    (* see #3837, we should fix it - the work could be done in decoding later - cold path*)
+    loop_jsx_id_continues lexbuf;
+    let end_offset = Sedlexing.lexeme_end lexbuf in
+    Sedlexing.set_lexeme_start lexbuf start_offset;
+    let raw = Sedlexing.lexeme lexbuf in
+    let loc = loc_of_offsets env start_offset end_offset in
+    Token (env, T_JSX_IDENTIFIER { raw = Sedlexing.string_of_utf8 raw; loc })
   | any -> Token (env, T_ERROR (lexeme lexbuf))
   | _ -> failwith "unreachable jsx_tag"
 
@@ -1567,98 +1640,98 @@ let type_token env lexbuf =
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, binbigint) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_bignum_singleton BIG_BINARY num)
         | _ -> failwith "unreachable type_token bigbigint"
     )
   | (Opt neg, binbigint) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_bignum_singleton BIG_BINARY num)
   | (Opt neg, binnumber, (letter | '2' .. '9'), Star alphanumeric) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, binnumber) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_num_singleton BINARY num)
         | _ -> failwith "unreachable type_token binnumber"
     )
   | (Opt neg, binnumber) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_num_singleton BINARY num)
   | (Opt neg, octbigint, word) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, octbigint) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_bignum_singleton BIG_OCTAL num)
         | _ -> failwith "unreachable type_token octbigint"
     )
   | (Opt neg, octbigint) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_bignum_singleton BIG_OCTAL num)
   | (Opt neg, octnumber, (letter | '8' .. '9'), Star alphanumeric) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, octnumber) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_num_singleton OCTAL num)
         | _ -> failwith "unreachable type_token octnumber"
     )
   | (Opt neg, octnumber) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_num_singleton OCTAL num)
   | (Opt neg, legacyoctnumber, (letter | '8' .. '9'), Star alphanumeric) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, legacyoctnumber) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_num_singleton LEGACY_OCTAL num)
         | _ -> failwith "unreachable type_token legacyoctnumber"
     )
   | (Opt neg, legacyoctnumber) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_num_singleton LEGACY_OCTAL num)
   | (Opt neg, hexbigint, word) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, hexbigint) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_bignum_singleton BIG_NORMAL num)
         | _ -> failwith "unreachable type_token hexbigint"
     )
   | (Opt neg, hexbigint) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_bignum_singleton BIG_NORMAL num)
   | (Opt neg, hexnumber, non_hex_letter, Star alphanumeric) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, hexnumber) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_num_singleton NORMAL num)
         | _ -> failwith "unreachable type_token hexnumber"
     )
   | (Opt neg, hexnumber) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_num_singleton NORMAL num)
   | (Opt neg, scibigint, word) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, scibigint) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           let loc = loc_of_lexbuf env lexbuf in
           let env = lex_error env loc Parse_error.InvalidSciBigInt in
           Token (env, mk_bignum_singleton BIG_NORMAL num)
         | _ -> failwith "unreachable type_token scibigint"
     )
   | (Opt neg, scibigint) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     let loc = loc_of_lexbuf env lexbuf in
     let env = lex_error env loc Parse_error.InvalidSciBigInt in
     Token (env, mk_bignum_singleton BIG_NORMAL num)
@@ -1667,19 +1740,19 @@ let type_token env lexbuf =
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, scinumber) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_num_singleton NORMAL num)
         | _ -> failwith "unreachable type_token scinumber"
     )
   | (Opt neg, scinumber) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_num_singleton NORMAL num)
   | (Opt neg, floatbigint, word) ->
     (* Numbers cannot be immediately followed by words *)
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, floatbigint) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           let loc = loc_of_lexbuf env lexbuf in
           let env = lex_error env loc Parse_error.InvalidFloatBigInt in
           Token (env, mk_bignum_singleton BIG_NORMAL num)
@@ -1690,17 +1763,17 @@ let type_token env lexbuf =
     recover env lexbuf ~f:(fun env lexbuf ->
         match%sedlex lexbuf with
         | (Opt neg, wholebigint) ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_bignum_singleton BIG_NORMAL num)
         | _ -> failwith "unreachable type_token wholebigint"
     )
   | (Opt neg, floatbigint) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     let loc = loc_of_lexbuf env lexbuf in
     let env = lex_error env loc Parse_error.InvalidFloatBigInt in
     Token (env, mk_bignum_singleton BIG_NORMAL num)
   | (Opt neg, wholebigint) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_bignum_singleton BIG_NORMAL num)
   | (Opt neg, (wholenumber | floatnumber), word) ->
     (* Numbers cannot be immediately followed by words *)
@@ -1708,42 +1781,15 @@ let type_token env lexbuf =
         match%sedlex lexbuf with
         | (Opt neg, wholenumber)
         | floatnumber ->
-          let num = lexeme lexbuf in
+          let num = Sedlexing.lexeme lexbuf in
           Token (env, mk_num_singleton NORMAL num)
         | _ -> failwith "unreachable type_token wholenumber"
     )
   | (Opt neg, (wholenumber | floatnumber)) ->
-    let num = lexeme lexbuf in
+    let num = Sedlexing.lexeme lexbuf in
     Token (env, mk_num_singleton NORMAL num)
   (* Keywords *)
-  | "any" -> Token (env, T_ANY_TYPE)
-  | "bool" -> Token (env, T_BOOLEAN_TYPE BOOL)
-  | "boolean" -> Token (env, T_BOOLEAN_TYPE BOOLEAN)
-  | "empty" -> Token (env, T_EMPTY_TYPE)
-  | "extends" -> Token (env, T_EXTENDS)
-  | "false" -> Token (env, T_FALSE)
-  | "interface" -> Token (env, T_INTERFACE)
-  | "mixed" -> Token (env, T_MIXED_TYPE)
-  | "null" -> Token (env, T_NULL)
-  | "number" -> Token (env, T_NUMBER_TYPE)
-  | "bigint" -> Token (env, T_BIGINT_TYPE)
-  | "static" -> Token (env, T_STATIC)
-  | "string" -> Token (env, T_STRING_TYPE)
-  | "true" -> Token (env, T_TRUE)
-  | "typeof" -> Token (env, T_TYPEOF)
-  | "void" -> Token (env, T_VOID_TYPE)
-  | "symbol" -> Token (env, T_SYMBOL_TYPE)
-  (* Identifiers *)
-  | (ascii_id_start, Star ascii_id_continue) ->
-    (* fast path *)
-    let loc = loc_of_lexbuf env lexbuf in
-    let raw = lexeme lexbuf in
-    Token (env, T_IDENTIFIER { loc; value = raw; raw })
-  | (js_id_start, Star js_id_continue) ->
-    let loc = loc_of_lexbuf env lexbuf in
-    let raw = lexeme lexbuf in
-    let (env, value) = decode_identifier env (Sedlexing.lexeme lexbuf) in
-    Token (env, T_IDENTIFIER { loc; value; raw })
+  (* `%` is not a valid unicode name *)
   | "%checks" -> Token (env, T_CHECKS)
   (* Syntax *)
   | "[" -> Token (env, T_LBRACKET)
@@ -1774,12 +1820,13 @@ let type_token env lexbuf =
   | "*" -> Token (env, T_MULT)
   (* Annotation or bound *)
   | ":" -> Token (env, T_COLON)
+  (* Invalid - but to avoid being interpreted as invalid `|` and `&` *)
+  | "&&" -> Token (env, T_AND)
+  | "||" -> Token (env, T_OR)
   (* Union *)
   | '|' -> Token (env, T_BIT_OR)
   (* Intersection *)
   | '&' -> Token (env, T_BIT_AND)
-  (* typeof *)
-  | "typeof" -> Token (env, T_TYPEOF)
   (* Function type *)
   | "=>" -> Token (env, T_ARROW)
   (* Type alias *)
@@ -1787,6 +1834,41 @@ let type_token env lexbuf =
   (* Variance annotations *)
   | '+' -> Token (env, T_PLUS)
   | '-' -> Token (env, T_MINUS)
+  (* Identifiers *)
+  | js_id_start ->
+    let start_offset = Sedlexing.lexeme_start lexbuf in
+    loop_id_continues lexbuf |> ignore;
+    let end_offset = Sedlexing.lexeme_end lexbuf in
+    let loc = loc_of_offsets env start_offset end_offset in
+    Sedlexing.set_lexeme_start lexbuf start_offset;
+    let raw = Sedlexing.lexeme lexbuf in
+    let (env, value) = decode_identifier env raw in
+    (* keep this list in sync with Parser_env.is_reserved_type
+       and token_is_reserved_type *)
+    (match value with
+    | "any" -> Token (env, T_ANY_TYPE)
+    | "bigint" -> Token (env, T_BIGINT_TYPE)
+    | "bool" -> Token (env, T_BOOLEAN_TYPE BOOL)
+    | "boolean" -> Token (env, T_BOOLEAN_TYPE BOOLEAN)
+    | "empty" -> Token (env, T_EMPTY_TYPE)
+    | "extends" -> Token (env, T_EXTENDS)
+    | "false" -> Token (env, T_FALSE)
+    | "interface" -> Token (env, T_INTERFACE)
+    | "keyof" -> Token (env, T_KEYOF)
+    | "mixed" -> Token (env, T_MIXED_TYPE)
+    | "never" -> Token (env, T_NEVER_TYPE)
+    | "null" -> Token (env, T_NULL)
+    | "number" -> Token (env, T_NUMBER_TYPE)
+    | "readonly" -> Token (env, T_READONLY)
+    | "static" -> Token (env, T_STATIC)
+    | "string" -> Token (env, T_STRING_TYPE)
+    | "symbol" -> Token (env, T_SYMBOL_TYPE)
+    | "true" -> Token (env, T_TRUE)
+    | "typeof" -> Token (env, T_TYPEOF)
+    | "undefined" -> Token (env, T_UNDEFINED_TYPE)
+    | "unknown" -> Token (env, T_UNKNOWN_TYPE)
+    | "void" -> Token (env, T_VOID_TYPE)
+    | _ -> Token (env, T_IDENTIFIER { loc; value; raw = Sedlexing.string_of_utf8 raw }))
   (* Others *)
   | eof ->
     let env =
@@ -1867,5 +1949,7 @@ let token = wrap token
 
 let is_valid_identifier_name lexbuf =
   match%sedlex lexbuf with
-  | (js_id_start, Star js_id_continue, eof) -> true
+  | js_id_start ->
+    (* we need handle cases like \u1fa38 so that single code is not enough*)
+    loop_id_continues lexbuf
   | _ -> false

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -118,6 +118,9 @@ class virtual ['M, 'T, 'N, 'U] mapper :
     method declare_class :
       ('M, 'T) Ast.Statement.DeclareClass.t -> ('N, 'U) Ast.Statement.DeclareClass.t
 
+    method declare_enum :
+      ('M, 'T) Ast.Statement.EnumDeclaration.t -> ('N, 'U) Ast.Statement.EnumDeclaration.t
+
     method declare_export_declaration :
       'M ->
       ('M, 'T) Ast.Statement.DeclareExportDeclaration.t ->
@@ -169,6 +172,9 @@ class virtual ['M, 'T, 'N, 'U] mapper :
     method enum_symbol_body :
       'M Ast.Statement.EnumDeclaration.SymbolBody.t -> 'N Ast.Statement.EnumDeclaration.SymbolBody.t
 
+    method enum_bigint_body :
+      'M Ast.Statement.EnumDeclaration.BigIntBody.t -> 'N Ast.Statement.EnumDeclaration.BigIntBody.t
+
     method enum_defaulted_member :
       'M Ast.Statement.EnumDeclaration.DefaultedMember.t ->
       'N Ast.Statement.EnumDeclaration.DefaultedMember.t
@@ -184,6 +190,10 @@ class virtual ['M, 'T, 'N, 'U] mapper :
     method enum_string_member :
       ('M Ast.StringLiteral.t, 'M) Ast.Statement.EnumDeclaration.InitializedMember.t ->
       ('N Ast.StringLiteral.t, 'N) Ast.Statement.EnumDeclaration.InitializedMember.t
+
+    method enum_bigint_member :
+      ('M Ast.BigIntLiteral.t, 'M) Ast.Statement.EnumDeclaration.InitializedMember.t ->
+      ('N Ast.BigIntLiteral.t, 'N) Ast.Statement.EnumDeclaration.InitializedMember.t
 
     method enum_identifier : ('M, 'M) Ast.Identifier.t -> ('N, 'N) Ast.Identifier.t
 
@@ -204,6 +214,8 @@ class virtual ['M, 'T, 'N, 'U] mapper :
     method export_named_specifier :
       'M Ast.Statement.ExportNamedDeclaration.specifier ->
       'N Ast.Statement.ExportNamedDeclaration.specifier
+
+    method export_source : 'M -> 'M Ast.StringLiteral.t -> 'N Ast.StringLiteral.t
 
     method export_specifier :
       'M Ast.Statement.ExportNamedDeclaration.ExportSpecifier.t ->
@@ -298,14 +310,23 @@ class virtual ['M, 'T, 'N, 'U] mapper :
     method import_declaration :
       'M -> ('M, 'T) Ast.Statement.ImportDeclaration.t -> ('N, 'U) Ast.Statement.ImportDeclaration.t
 
-    method import_default_specifier : ('M, 'T) Ast.Identifier.t -> ('N, 'U) Ast.Identifier.t
+    method import_default_specifier :
+      import_kind:Ast.Statement.ImportDeclaration.import_kind ->
+      ('M, 'T) Ast.Identifier.t ->
+      ('N, 'U) Ast.Identifier.t
 
     method import_named_specifier :
       import_kind:Ast.Statement.ImportDeclaration.import_kind ->
       ('M, 'T) Ast.Statement.ImportDeclaration.named_specifier ->
       ('N, 'U) Ast.Statement.ImportDeclaration.named_specifier
 
-    method import_namespace_specifier : ('M, 'T) Ast.Identifier.t -> ('N, 'U) Ast.Identifier.t
+    method import_namespace_specifier :
+      import_kind:Ast.Statement.ImportDeclaration.import_kind ->
+      'M ->
+      ('M, 'T) Ast.Identifier.t ->
+      ('N, 'U) Ast.Identifier.t
+
+    method import_source : 'T -> 'M Ast.StringLiteral.t -> 'N Ast.StringLiteral.t
 
     method import_specifier :
       import_kind:Ast.Statement.ImportDeclaration.import_kind ->
@@ -381,6 +402,10 @@ class virtual ['M, 'T, 'N, 'U] mapper :
 
     method jsx_spread_attribute :
       ('M, 'T) Ast.JSX.SpreadAttribute.t' -> ('N, 'U) Ast.JSX.SpreadAttribute.t'
+
+    method keyof_type : ('M, 'T) Ast.Type.Keyof.t -> ('N, 'U) Ast.Type.Keyof.t
+
+    method readonly_type : ('M, 'T) Ast.Type.ReadOnly.t -> ('N, 'U) Ast.Type.ReadOnly.t
 
     method label_identifier : ('M, 'M) Ast.Identifier.t -> ('N, 'N) Ast.Identifier.t
 
@@ -594,6 +619,14 @@ class virtual ['M, 'T, 'N, 'U] mapper :
 
     method try_catch : ('M, 'T) Ast.Statement.Try.t -> ('N, 'U) Ast.Statement.Try.t
 
+    method tuple_element : ('M, 'T) Ast.Type.Tuple.element -> ('N, 'U) Ast.Type.Tuple.element
+
+    method tuple_labeled_element :
+      ('M, 'T) Ast.Type.Tuple.LabeledElement.t -> ('N, 'U) Ast.Type.Tuple.LabeledElement.t
+
+    method tuple_spread_element :
+      ('M, 'T) Ast.Type.Tuple.SpreadElement.t -> ('N, 'U) Ast.Type.Tuple.SpreadElement.t
+
     method tuple_type : ('M, 'T) Ast.Type.Tuple.t -> ('N, 'U) Ast.Type.Tuple.t
 
     method type_ : ('M, 'T) Flow_ast.Type.t -> ('N, 'U) Ast.Type.t
@@ -606,6 +639,9 @@ class virtual ['M, 'T, 'N, 'U] mapper :
       ('M, 'T) Ast.Type.annotation_or_hint -> ('N, 'U) Ast.Type.annotation_or_hint
 
     method type_cast : ('M, 'T) Ast.Expression.TypeCast.t -> ('N, 'U) Ast.Expression.TypeCast.t
+
+    method ts_type_cast :
+      ('M, 'T) Ast.Expression.TSTypeCast.t -> ('N, 'U) Ast.Expression.TSTypeCast.t
 
     method type_params_opt :
       ('M, 'T) Ast.Type.TypeParams.t option -> (('N, 'U) Ast.Type.TypeParams.t option -> 'a) -> 'a

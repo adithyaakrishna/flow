@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,14 +10,19 @@ module Ast = Flow_ast
 type kind =
   | Var
   | Let
+  | ThisAnnot
   | Const
-  | Type
+  | Type of { imported: bool }
   | Enum
   | Function
   | Class
+  | DeclaredClass
   | Parameter
   | CatchParameter
   | Import
+  | DeclaredFunction of { predicate: bool }
+  | Internal
+  | GeneratorNext
 [@@deriving show]
 
 type 'loc entry = ('loc, 'loc) Ast.Identifier.t * kind
@@ -60,12 +65,14 @@ let to_map t =
   SMap.map (fun (kind, locs) -> (kind, Nel.rev locs)) map
 
 let allow_forward_ref = function
+  | DeclaredFunction _
   | Var
   | Function ->
     true
   | _ -> false
 
 let allow_redeclaration = function
+  | DeclaredFunction _
   | Var
   | Parameter
   | Function ->

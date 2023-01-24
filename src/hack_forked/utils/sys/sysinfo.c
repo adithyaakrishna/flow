@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,31 +8,64 @@
 #define CAML_NAME_SPACE
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
+#include <caml/unixsupport.h>
 
 #include <assert.h>
+#include <errno.h>
 #ifdef __linux__
 #include <sys/sysinfo.h>
 #endif
-
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
-value hh_sysinfo_totalram(void) {
-  CAMLparam0();
-#ifdef __linux__
+CAMLprim value hh_sysinfo_totalram(value unit) {
+  CAMLparam1(unit);
+#if defined(__linux__)
   struct sysinfo info;
-  int success = sysinfo(&info);
-  assert(success == 0 && "sysinfo() failed");
+  if (-1 == sysinfo(&info)) {
+    uerror("sysinfo", Nothing);
+  }
   CAMLreturn(Val_long(info.totalram));
+#elif defined(__APPLE__)
+  int mib[] = {CTL_HW, HW_MEMSIZE};
+  int64_t memsize = 0;
+  size_t len = sizeof(memsize);
+  if (-1 == sysctl(mib, 2, &memsize, &len, NULL, 0)) {
+    uerror("sysctl", Nothing);
+  }
+  CAMLreturn(Val_long(memsize));
 #else
   /* Not implemented */
   CAMLreturn(Val_long(0));
 #endif
 }
 
-value hh_sysinfo_uptime(void) {
-  CAMLparam0();
+/**
+ * Whether we're running under Rosetta on Apple Silicon
+ */
+CAMLprim value hh_is_rosetta(value unit) {
+  CAMLparam1(unit);
+  int ret = 0;
+#ifdef __APPLE__
+  size_t size = sizeof(ret);
+  if (-1 == sysctlbyname("sysctl.proc_translated", &ret, &size, NULL, 0)) {
+    if (errno == ENOENT) {
+      // e.g. Intel
+      ret = 0;
+    } else {
+      uerror("sysctl", Nothing);
+    }
+  }
+#endif
+  CAMLreturn(Val_bool(ret));
+}
+
+CAMLprim value hh_sysinfo_uptime(value unit) {
+  CAMLparam1(unit);
 #ifdef __linux__
   struct sysinfo info;
   int success = sysinfo(&info);

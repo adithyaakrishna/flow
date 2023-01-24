@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -64,8 +64,7 @@ module SignatureVerification = struct
     in
     let sig_opts =
       {
-        Type_sig_parse.type_asserts = Options.type_asserts options;
-        suppress_types = Options.suppress_types options;
+        Type_sig_parse.suppress_types = Options.suppress_types options;
         munge = not prevent_munge;
         ignore_static_propTypes = true;
         facebook_keyMirror = true;
@@ -148,34 +147,20 @@ module Codemod_exports_annotator = Codemod_annotator.Make (SignatureVerification
 module Acc = Acc (SignatureVerificationErrorStats)
 
 let mapper ~preserve_literals ~max_type_size ~default_any (cctx : Codemod_context.Typed.t) =
-  let { Codemod_context.Typed.file_sig; docblock; metadata; options; _ } = cctx in
-  let imports_react = Insert_type_imports.ImportsHelper.imports_react file_sig in
-  let metadata = Context.docblock_overrides docblock metadata in
-  let { Context.strict; strict_local; _ } = metadata in
-  let lint_severities =
-    if strict || strict_local then
-      StrictModeSettings.fold
-        (fun lint_kind lint_severities ->
-          LintSettings.set_value lint_kind (Severity.Err, None) lint_severities)
-        (Options.strict_mode options)
-        (Options.lint_severities options)
-    else
-      Options.lint_severities options
-  in
-  let suppress_types = Options.suppress_types options in
-  let exact_by_default = Options.exact_by_default options in
-  let flowfixme_ast = Builtins.flowfixme_ast ~lint_severities ~suppress_types ~exact_by_default in
+  let lint_severities = Codemod_context.Typed.lint_severities cctx in
+  let flowfixme_ast = Codemod_context.Typed.flowfixme_ast ~lint_severities cctx in
   object (this)
     inherit
       Codemod_exports_annotator.mapper
-        ~max_type_size
-        ~exact_by_default
-        ~lint_severities
-        ~suppress_types
-        ~imports_react
-        ~preserve_literals
+        cctx
         ~default_any
-        cctx as super
+        ~generalize_maybe:false
+        ~generalize_react_mixed_element:false
+        ~lint_severities
+        ~max_type_size
+        ~preserve_literals
+        ~merge_arrays:false
+        () as super
 
     (* initialized in this#program *)
     val mutable sig_verification_loc_tys = LMap.empty
@@ -236,9 +221,11 @@ let mapper ~preserve_literals ~max_type_size ~default_any (cctx : Codemod_contex
           let (loc, _) = e in
           ( loc,
             Ast.Expression.TypeCast
-              Ast.Expression.TypeCast.
-                { expression = e; annot = (Loc.none, flowfixme_ast); comments = None }
-              
+              {
+                Ast.Expression.TypeCast.expression = e;
+                annot = (Loc.none, flowfixme_ast);
+                comments = None;
+              }
           )
         in
         this#opt_annotate ~f ~error ~expr:(Some expr) loc type_entry expr

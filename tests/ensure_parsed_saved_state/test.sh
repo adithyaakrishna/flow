@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -42,11 +42,11 @@ printf "\\n\\n==== ensure_parsed notices that C has changed ====\\n"
 # parse it. But it notices it has changed and triggers a recheck, which finds
 # the error
 assert_errors "$FLOW" status --no-auto-start
-show_skipping_stats_types_first "$FLOW_LOG_FILE"
+show_skipping_stats "$FLOW_LOG_FILE"
 
 # simulate the file watcher event for C
 assert_ok "$FLOW" force-recheck C.js
 
 printf "\\n\\n==== after file watcher update ====\\n"
 assert_errors "$FLOW" status --no-auto-start
-show_skipping_stats_types_first "$FLOW_LOG_FILE"
+show_skipping_stats "$FLOW_LOG_FILE"

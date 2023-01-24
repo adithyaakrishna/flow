@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -12,9 +12,10 @@
  * seven time world champion of testing shell commands */
 
 const {watch} = require('fs');
+const {readFile, writeFile} = require('fs').promises;
 const {join} = require('path');
 
-const {mkdirp, writeFile, readFile} = require('../utils/async');
+const {mkdirp} = require('../utils/async');
 
 type ProcessEnv = {[key: string]: string | void};
 
@@ -77,14 +78,14 @@ class ShellMocker {
   }
 
   async get(name: string): Promise<Invocations> {
-    const contents = await readFile(this.outFile(name));
+    const contents = await readFile(this.outFile(name), 'utf8');
     const lines = contents.split('\n');
     lines.pop(); // remove trailing empty string
     return lines.map(line => line.split(' '));
   }
 
   async getAll(): Promise<AllInvocations> {
-    const ret = {};
+    const ret: {[string]: Invocations} = {};
     for (const [name] of this.names.entries()) {
       ret[name] = await this.get(name);
     }

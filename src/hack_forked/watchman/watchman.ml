@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -30,14 +30,18 @@ type error_kind =
   | Fresh_instance
   | Subscription_canceled
   | Unsupported_watch_roots of {
-      roots: string list;  (** roots returned by watch-project. either 0 or >1 items. *)
-      failed_paths: string list;  (** paths we tried to watch but couldn't figure out the root for *)
+      roots: string list;  (** roots successfully returned by watch-project *)
+      failed_paths: error_kind SMap.t;
+          (** map from paths we tried to watch but couldn't figure out the root for, to the error Watchman gave (a Response_error) *)
     }
-
-type error_severity =
-  | Retryable_error
-  | Fatal_error
-  | Restarted_error
+      (** Say we need to watch paths /foo/bar and /foo/baz. A few things could happen.
+        Not errors:
+        - /foo is the watchman root, so we successfully watch /foo with relative paths bar and baz
+        - /foo is the watchman root, but bar doesn't exist. we'd guess that bar is relative to the root
+        Errors:
+        - /foo/bar and /foo/baz are both watchman roots. we error because we can't watch multiple roots
+        - /foo/bar is the watchman root, but /foo/baz is not. we error with roots = [/foo/bar],
+          failed_paths = [/foo/baz]. *)
 
 type failure =
   | Dead
@@ -49,33 +53,42 @@ let log ?request ?response msg =
   let () = Hh_logger.error "%s" msg in
   ()
 
-let log_error = function
+let rec log_error = function
   | Not_installed { path } ->
     let msg = spf "watchman not found on PATH: %s" path in
     log msg
   | Socket_unavailable { msg } -> log msg
   | Response_error { request; response; msg } -> log ?request ~response msg
-  | Fresh_instance -> log "Watchman server restarted so we may have missed some updates"
+  | Fresh_instance -> log "Watchman missed some changes"
   | Subscription_canceled -> log "Subscription canceled by watchman"
   | Unsupported_watch_roots { roots; failed_paths } ->
-    let msg =
-      match roots with
-      | [] -> spf "Cannot deduce watch root for paths:\n%s" (String.concat ~sep:"\n" failed_paths)
-      | _ ->
+    (match roots with
+    | _ :: _ :: _ ->
+      let msg =
         spf
           "Can't watch paths across multiple Watchman watch_roots. Found %d watch roots:\n%s"
           (List.length roots)
           (String.concat ~sep:"\n" roots)
-    in
-    log msg
-
-let severity_of_error = function
-  | Not_installed _ -> Fatal_error
-  | Socket_unavailable _ -> Retryable_error
-  | Response_error _ -> Retryable_error
-  | Fresh_instance -> Restarted_error
-  | Subscription_canceled -> Retryable_error
-  | Unsupported_watch_roots _ -> Fatal_error
+      in
+      log msg
+    | _ ->
+      let rev_paths =
+        SMap.fold
+          (fun path err acc ->
+            (* we stored the Watchman response error, and log it here only when it's
+               a real problem (vs when we can guess the relative path) *)
+            log_error err;
+            path :: acc)
+          failed_paths
+          []
+      in
+      let path_list = String.concat ~sep:"\n" (List.rev rev_paths) in
+      let msg =
+        match roots with
+        | [root] -> spf "Found watch root %s, but could not watch paths:\n%s" root path_list
+        | _ -> spf "Cannot deduce watch root for paths:\n%s" path_list
+      in
+      log msg)
 
 type subscribe_mode =
   | All_changes
@@ -95,13 +108,11 @@ type init_settings = {
   expression_terms: Hh_json.json list;  (** See watchman expression terms. *)
   mergebase_with: string;  (** symbolic commit to find changes against *)
   roots: Path.t list;
+  should_track_mergebase: bool;
   subscribe_mode: subscribe_mode;
   subscription_prefix: string;
   sync_timeout: int option;
 }
-
-(** The message's clock. *)
-type clock = string
 
 type pushed_changes =
   (*
@@ -121,18 +132,27 @@ type pushed_changes =
    *)
   | State_enter of string * Hh_json.json option
   | State_leave of string * Hh_json.json option
-  | Changed_merge_base of string * SSet.t * clock
-  | Files_changed of SSet.t
-
-type changes =
-  | Watchman_unavailable
-  | Watchman_pushed of pushed_changes
-
-type mergebase_and_changes = {
-  clock: clock;
-  mergebase: string;
-  changes: SSet.t;
-}
+  | Files_changed of {
+      changes: SSet.t;  (** Files that changed *)
+      changed_mergebase: bool option;
+          (** Whether the mergebase changed ([None] if we weren't tracking the mergebase). *)
+    }
+      (** Notification that files changed. This differs from [Missed_changes]
+          because [changes] includes all of the files that have changed on disk,
+          even the upstream changes between the mergebases. This can be used to
+          decide whether to process all of the changes, or re-init on the new
+          mergebase. *)
+  | Missed_changes of {
+      prev_mergebase: string;  (** Previous mergebase *)
+      mergebase: string;  (** New mergebase *)
+      changes_since_mergebase: SSet.t;  (** Files that are changed locally since the new mergebase *)
+    }
+      (** Notification that Watchman missed some changes (it restarted or
+          overflowed). Includes the mergebase and the files that have changed
+          since the new mergebase. This differs from [Files_changed] in that
+          it's not a complete list of the files that changed on disk. It isn't
+          enough for us to update incrementally, but it could be used to re-init
+          on top of the new mergebase. *)
 
 module Capability = struct
   type t =
@@ -222,10 +242,18 @@ type env = {
       (** See https://facebook.github.io/watchman/docs/clockspec.html
           This is also used to reliably detect a crashed watchman. Watchman has a
           facility to detect watchman process crashes between two "since" queries. *)
+  mutable finished_an_hg_update: bool;
+      (** This is set to true when leaving an hg.update state on our subscription.
+          It is used when we get the next Files_changed event to check if the
+          changes are due to an hg update, and then reset to false. *)
+  mutable mergebase: string option;
+      (** Keeps track of the current mergebase, which we use to know when the
+          mergebase changes. *)
   conn: conn;
   settings: init_settings;
   should_track_mergebase: bool;
   subscription: string;
+  vcs: Vcs.t option;
   watch: watch;
 }
 
@@ -246,8 +274,8 @@ let dead_env_from_alive env =
 (* JSON methods. *)
 (****************************************************************************)
 
-(* Projects down from the boolean error monad into booleans.
-  * Error states go to false, values are projected directly. *)
+(** Projects down from the boolean error monad into booleans.
+    Error states go to false, values are projected directly. *)
 let project_bool m =
   match m with
   | Ok (v, _) -> v
@@ -327,24 +355,23 @@ let get_changes_since_mergebase_query env =
   in
   request_json ~extra_kv Query env
 
-let subscribe env =
-  let states = "hg.update" :: env.settings.defer_states in
-  let (since, mode) =
+let subscribe_query env =
+  let since = ("since", Hh_json.JSON_String env.clockspec) in
+  let empty_on_fresh_instance = ("empty_on_fresh_instance", Hh_json.JSON_Bool true) in
+  let mode =
+    let states = "hg.update" :: env.settings.defer_states in
     match env.settings.subscribe_mode with
-    | All_changes -> (Hh_json.JSON_String env.clockspec, [])
-    | Defer_changes -> (Hh_json.JSON_String env.clockspec, [("defer", J.strlist states)])
-    | Drop_changes -> (Hh_json.JSON_String env.clockspec, [("drop", J.strlist states)])
+    | All_changes -> []
+    | Defer_changes -> [("defer", J.strlist states)]
+    | Drop_changes -> [("drop", J.strlist states)]
   in
-  request_json
-    ~extra_kv:(([("since", since)] @ mode) @ [("empty_on_fresh_instance", Hh_json.JSON_Bool true)])
-    Subscribe
-    env
+  request_json ~extra_kv:(since :: empty_on_fresh_instance :: mode) Subscribe env
 
 (** We filter all responses from get_changes through this. This is to detect
    * Watchman server crashes.
    *
    * See also Watchman docs on "since" query parameter. *)
-let is_fresh_instance obj =
+let is_fresh_instance_response obj =
   Hh_json.Access.(return obj >>= get_bool "is_fresh_instance" |> project_bool)
 
 let supports_scm_queries caps vcs =
@@ -355,6 +382,10 @@ let supports_scm_queries caps vcs =
   | Some Vcs.Hg -> Set.mem Scm_hg caps
   | Some Vcs.Git -> Set.mem Scm_git caps
   | None -> false
+
+let subscription_name settings =
+  let pretty_pid = Sys_utils.get_pretty_pid () in
+  Printf.sprintf "%s.%d" settings.subscription_prefix pretty_pid
 
 (****************************************************************************)
 (* I/O stuff *)
@@ -529,7 +560,7 @@ let blocking_read ~debug_logging ~conn:(reader, _) =
   match%lwt wait_read reader with
   | Error _ as err -> Lwt.return err
   | Ok () ->
-    (match%lwt read_line_with_timeout 40.0 reader with
+    (match%lwt read_line_with_timeout ~timeout:40.0 reader with
     | Error _ as err -> Lwt.return err
     | Ok response ->
       (match parse_response ~debug_logging response with
@@ -564,15 +595,18 @@ let get_capabilities ~debug_logging ?conn () =
     Lwt.return (Ok set)
   | Error _ as err -> Lwt.return err
 
-(* When we re-init our connection to Watchman, we use the old clockspec to get all the changes
- * since our last response. However, if Watchman has restarted and the old clockspec pre-dates
- * the new Watchman, then we may miss updates.
- *
- * Unfortunately, the response to "subscribe" doesn't have the "is_fresh_instance" field. So
- * we'll instead send a small "query" request. It should always return 0 files, but it should
- * tell us whether the Watchman service has restarted since clockspec.
- *)
-let has_watchman_restarted_since ~debug_logging ~conn ~watch_root ~clockspec =
+(** When we re-init our connection to Watchman, we use the old clockspec to get
+  all the changes since our last response. If Watchman missed changes since the
+  old clockspec, it is considered to be a "fresh instance".
+
+  This can happen if Watchman restarted, or if there were so many changes that
+  Watchman's underlying file watchers (FSEvents, Eden, etc) overflow.
+
+  Unfortunately, the response to "subscribe" doesn't have the "is_fresh_instance"
+  field. So we'll instead send a small "query" request. It should always return
+  0 files, but it should tell us whether Watchman has missed changes since
+  [clockspec]. *)
+let is_fresh_instance_since ?conn ~debug_logging ~watch_root clockspec =
   let hard_to_match_name = "irrelevant.potato" in
   let query =
     Hh_json.(
@@ -593,7 +627,7 @@ let has_watchman_restarted_since ~debug_logging ~conn ~watch_root ~clockspec =
         ]
     )
   in
-  match%lwt request ~debug_logging ~conn query with
+  match%lwt request ~debug_logging ?conn query with
   | Ok response ->
     (match Hh_json_helpers.Jget.bool_opt (Some response) "is_fresh_instance" with
     | Some has_restarted -> Lwt.return (Ok has_restarted)
@@ -608,14 +642,6 @@ let has_watchman_restarted_since ~debug_logging ~conn ~watch_root ~clockspec =
        missed updates. *)
     Lwt.return (Ok true)
   | Error _ as err -> Lwt.return err
-
-let has_watchman_restarted dead_env =
-  with_watchman_conn (fun conn ->
-      let debug_logging = dead_env.prior_settings.debug_logging in
-      let clockspec = dead_env.prior_clockspec in
-      let watch_root = dead_env.prior_watch_root in
-      has_watchman_restarted_since ~debug_logging ~conn ~watch_root ~clockspec
-  )
 
 let prepend_relative_path_term ~relative_path ~terms =
   match terms with
@@ -639,23 +665,16 @@ let get_clockspec ~debug_logging ~conn ~watch prior_clockspec =
     let%lwt response = request ~debug_logging ~conn query in
     Lwt.return (Result.bind ~f:(get_string_prop ~query "clock") response)
 
-(** Watch this root
-
-    If the path doesn't exist or the request errors for any other reason, this will
-    return [None]. Otherwise, returns the watch root and relative path to that root. *)
+(** Watches a path. Returns the watch root and relative path to that path. *)
 let watch_project ~debug_logging ~conn root =
   let query = J.strlist ["watch-project"; Path.to_string root] in
   let%lwt response = request ~debug_logging ~conn query in
-  let result =
-    match response with
-    | Error (Response_error _) -> Ok None
-    | Error _ as err -> err
-    | Ok response ->
-      let watch_root = J.get_string_val "watch" response in
-      let relative_path = J.get_string_val "relative_path" ~default:"" response in
-      Ok (Some (watch_root, relative_path))
-  in
-  Lwt.return result
+  match response with
+  | Error _ as err -> Lwt.return err
+  | Ok response ->
+    let watch_root = J.get_string_val "watch" response in
+    let relative_path = J.get_string_val "relative_path" ~default:"" response in
+    Lwt.return (Ok (watch_root, relative_path))
 
 (** Calls [watchman watch-project] on a list of paths to watch (e.g. all of the
     include directories). The paths may be children of the actual watchman root,
@@ -666,13 +685,15 @@ let watch_paths ~debug_logging ~conn paths =
   LwtUtils.fold_result_s
     ~f:(fun (terms, watch_roots, failed_paths) path ->
       match%lwt watch_project ~debug_logging ~conn path with
-      | Error _ as err -> Lwt.return err
-      | Ok None -> Lwt.return (Ok (terms, watch_roots, SSet.add (Path.to_string path) failed_paths))
-      | Ok (Some (watch_root, relative_path)) ->
+      | Ok (watch_root, relative_path) ->
         let terms = prepend_relative_path_term ~relative_path ~terms in
         let watch_roots = SSet.add watch_root watch_roots in
-        Lwt.return (Ok (terms, watch_roots, failed_paths)))
-    ~init:(Some [], SSet.empty, SSet.empty)
+        Lwt.return (Ok (terms, watch_roots, failed_paths))
+      | Error (Response_error _ as err) ->
+        let failed_paths = SMap.add (Path.to_string path) err failed_paths in
+        Lwt.return (Ok (terms, watch_roots, failed_paths))
+      | Error _ as err -> Lwt.return err)
+    ~init:(Some [], SSet.empty, SMap.empty)
     paths
 
 let watch =
@@ -680,30 +701,35 @@ let watch =
      returned an error. Let's do a best effort attempt to infer the relative path for each bad
      include. *)
   let guess_missing_relative_paths terms watch_root failed_paths =
-    let failed_paths = SSet.elements failed_paths in
+    let watch_root =
+      let normalized = Sys_utils.normalize_filename_dir_sep watch_root in
+      if String.is_suffix ~suffix:"/" normalized then
+        normalized
+      else
+        normalized ^ "/"
+    in
     let (terms, failed_paths) =
-      List.fold
-        ~f:(fun (terms, failed_paths) path ->
-          let open String_utils in
-          if string_starts_with path watch_root then
-            let relative_path = lstrip (lstrip path watch_root) Caml.Filename.dir_sep in
+      SMap.fold
+        (fun path err (terms, failed_paths) ->
+          let path = Sys_utils.normalize_filename_dir_sep path in
+          if String.is_prefix ~prefix:watch_root path then
+            let relative_path = String_utils.lstrip path watch_root in
             (prepend_relative_path_term ~relative_path ~terms, failed_paths)
           else
-            (terms, path :: failed_paths))
-        ~init:(terms, [])
+            (terms, SMap.add path err failed_paths))
         failed_paths
+        (terms, SMap.empty)
     in
-    match failed_paths with
-    | [] -> Ok terms
-    | _ -> Error (Unsupported_watch_roots { roots = []; failed_paths })
+    if SMap.is_empty failed_paths then
+      Ok terms
+    else
+      Error (Unsupported_watch_roots { roots = [watch_root]; failed_paths })
   in
   (* All of our watched paths should have the same watch root. Let's assert that *)
   let consolidate_watch_roots watch_roots failed_paths =
     match SSet.elements watch_roots with
     | [watch_root] -> Ok watch_root
-    | roots ->
-      let failed_paths = SSet.elements failed_paths in
-      Error (Unsupported_watch_roots { roots; failed_paths })
+    | roots -> Error (Unsupported_watch_roots { roots; failed_paths })
   in
   fun ~debug_logging ~conn roots ->
     match%lwt watch_paths ~debug_logging ~conn roots with
@@ -723,10 +749,14 @@ let rec with_retry ~max_attempts ?(attempt = 0) ?(on_retry = (fun _ -> Lwt_resul
   | Ok _ as ok -> Lwt.return ok
   | Error err ->
     log_error err;
-    (match severity_of_error err with
-    | Fatal_error -> Lwt.return (Error Dead)
-    | Restarted_error -> Lwt.return (Error Restarted)
-    | Retryable_error ->
+    (match err with
+    | Not_installed _
+    | Unsupported_watch_roots _ ->
+      Lwt.return (Error Dead)
+    | Fresh_instance -> Lwt.return (Error Restarted)
+    | Response_error _
+    | Socket_unavailable _
+    | Subscription_canceled ->
       if attempt >= max_attempts then (
         Hh_logger.error "Watchman has failed %d times in a row. Giving up." attempt;
         Lwt.return (Error Dead)
@@ -743,26 +773,31 @@ let re_init ?prior_clockspec settings =
   get_capabilities ~debug_logging ~conn () >>= fun capabilities ->
   watch ~debug_logging ~conn settings.roots >>= fun watch ->
   get_clockspec ~debug_logging ~conn ~watch prior_clockspec >>= fun clockspec ->
-  let subscription = Printf.sprintf "%s.%d" settings.subscription_prefix (Unix.getpid ()) in
+  let subscription = subscription_name settings in
   let vcs = Vcs.find (Path.make watch.watch_root) in
-  let should_track_mergebase = supports_scm_queries capabilities vcs in
-  let env = { settings; conn; watch; clockspec; subscription; should_track_mergebase } in
-  request ~debug_logging ~conn (subscribe env) >>= fun response ->
+  let should_track_mergebase =
+    settings.should_track_mergebase && supports_scm_queries capabilities vcs
+  in
+  let env =
+    {
+      settings;
+      conn;
+      watch;
+      clockspec;
+      subscription;
+      vcs;
+      should_track_mergebase;
+      mergebase = None;
+      finished_an_hg_update = false;
+    }
+  in
+  request ~debug_logging ~conn (subscribe_query env) >>= fun response ->
   ignore response;
   Lwt.return (Ok env)
 
 let backoff_delay attempts =
   let attempts = min attempts 3 in
   Float.of_int (4 * (2 ** attempts))
-
-let init settings =
-  let on_retry attempt settings =
-    let%lwt () = Lwt_unix.sleep (backoff_delay attempt) in
-    Lwt.return (Ok settings)
-  in
-  match%lwt with_retry ~max_attempts:max_reinit_attempts ~on_retry re_init settings with
-  | Ok env -> Lwt.return (Some env)
-  | Error _ -> Lwt.return None
 
 let extract_file_names env json =
   let open Hh_json.Access in
@@ -775,11 +810,27 @@ let extract_file_names env json =
      )
   |> List.map ~f:(fun json ->
          let s = Hh_json.get_string_exn json in
-         let abs = Caml.Filename.concat env.watch.watch_root s in
-         abs
+         (* watchman returns paths relative to the watch root, with slashes
+            normalized to use forward slashes. we concat manually using Bytes
+            so we can replace the slashes in place. *)
+         let root = env.watch.watch_root in
+         let root_len = String.length root in
+         let s_len = String.length s in
+         let abs = Bytes.create (root_len + 1 + s_len) in
+         Bytes.From_string.unsafe_blit ~src:root ~src_pos:0 ~dst:abs ~dst_pos:0 ~len:root_len;
+         Bytes.unsafe_set abs root_len '/';
+         Bytes.From_string.unsafe_blit ~src:s ~src_pos:0 ~dst:abs ~dst_pos:(root_len + 1) ~len:s_len;
+         if Sys.win32 then
+           for i = 0 to root_len + 1 + s_len do
+             if Char.equal (Bytes.unsafe_get abs i) '/' then Bytes.unsafe_set abs i '\\'
+           done;
+         Bytes.unsafe_to_string ~no_mutation_while_string_reachable:abs
      )
   |> SSet.of_list
 
+(** Reconnects to Watchman after a disconnect. Normally, [allow_fresh_instance]
+  should be [false], meaning that we error if the Watchman process we reconnect
+  to is a "fresh instance" (see [is_fresh_instance_since]). *)
 let re_init_dead_env =
   let on_retry attempt dead_env =
     let backoff = backoff_delay attempt in
@@ -787,24 +838,56 @@ let re_init_dead_env =
     let%lwt () = Lwt_unix.sleep backoff in
     Lwt.return (Ok dead_env)
   in
-  let re_init_dead_env_once dead_env =
-    let () = Hh_logger.log "Attemping to reestablish watchman subscription" in
+  (* if [allow_fresh_instance] is [false], then we only want to reconnect
+     if Watchman did not miss any changes (is NOT a "fresh instance"). but
+     sometimes we can handle missed changes, and so we can opt into
+     reconnecting even when it might be a fresh instance. *)
+  let can_re_init ~allow_fresh_instance dead_env =
+    if allow_fresh_instance then
+      Lwt.return (Ok true)
+    else
+      let debug_logging = dead_env.prior_settings.debug_logging in
+      let clockspec = dead_env.prior_clockspec in
+      let watch_root = dead_env.prior_watch_root in
+      match%lwt is_fresh_instance_since ~debug_logging ~watch_root clockspec with
+      | Ok missed_changes -> Lwt.return (Ok (not missed_changes))
+      | Error _ as err -> Lwt.return err
+  in
+  let re_init_dead_env_once ~allow_fresh_instance dead_env =
     (* Give watchman 2 minutes to start up, plus sync_timeout (in milliseconds!) to sync.
        TODO: use `file_watcher.timeout` config instead (careful, it's in seconds) *)
     let timeout = Option.value ~default:0 dead_env.prior_settings.sync_timeout + 120000 in
     try%lwt
       Lwt_unix.with_timeout (Float.of_int timeout /. 1000.) @@ fun () ->
-      match%lwt has_watchman_restarted dead_env with
-      | Ok false -> re_init ~prior_clockspec:dead_env.prior_clockspec dead_env.prior_settings
-      | Ok true -> Lwt.return (Error Fresh_instance)
+      match%lwt can_re_init ~allow_fresh_instance dead_env with
+      | Ok true ->
+        let () = Hh_logger.info "Attempting to reestablish watchman subscription" in
+        let prior_clockspec =
+          (* passing a clockspec from a previous instance causes the subscription to
+             return is_fresh_instance and empty results, which defeats the point when
+             allow_fresh_instance = true. but if we're passing allow_fresh_instance,
+             then we should already be reconstructing missed changes. *)
+          if allow_fresh_instance then
+            None
+          else
+            Some dead_env.prior_clockspec
+        in
+        re_init ?prior_clockspec dead_env.prior_settings
+      | Ok false ->
+        let () = Hh_logger.log "Unable to resubscribe to a fresh watchman instance" in
+        Lwt.return (Error Fresh_instance)
       | Error _ as err -> Lwt.return err
     with
     | Lwt_unix.Timeout ->
       Lwt.return (Error (Socket_unavailable { msg = spf "Timed out after %ds" timeout }))
   in
-  fun dead_env ->
+  fun ~allow_fresh_instance dead_env ->
     match%lwt
-      with_retry ~max_attempts:max_reinit_attempts ~on_retry re_init_dead_env_once dead_env
+      with_retry
+        ~max_attempts:max_reinit_attempts
+        ~on_retry
+        (re_init_dead_env_once ~allow_fresh_instance)
+        dead_env
     with
     | Ok env ->
       Hh_logger.log "Watchman connection reestablished.";
@@ -826,24 +909,14 @@ let make_state_change_response state name data =
   | `Leave -> State_leave (name, metadata)
 
 let extract_mergebase data =
-  Hh_json.Access.(
-    let accessor = return data in
-    let ret =
-      accessor >>= get_obj "clock" >>= get_string "clock" >>= fun (clock, _) ->
-      accessor >>= get_obj "clock" >>= get_obj "scm" >>= get_string "mergebase"
-      >>= fun (mergebase, _) -> return (clock, mergebase)
-    in
-    to_option ret
-  )
-
-let make_mergebase_changed_response env data =
-  match extract_mergebase data with
-  | None -> None
-  | Some (clock, mergebase) ->
-    let files = extract_file_names env data in
-    env.clockspec <- clock;
-    let response = Changed_merge_base (mergebase, files, clock) in
-    Some (env, response)
+  let open Hh_json.Access in
+  let ret =
+    let fat_clock = return data >>= get_obj "clock" in
+    fat_clock >>= get_string "clock" >>= fun (clock, _) ->
+    fat_clock >>= get_obj "scm" >>= get_string "mergebase" >>= fun (mergebase, _) ->
+    return (clock, mergebase)
+  in
+  to_option ret
 
 let subscription_is_cancelled data =
   match Jget.bool_opt (Some data) "canceled" with
@@ -852,39 +925,31 @@ let subscription_is_cancelled data =
     false
   | Some true -> true
 
-let transform_asynchronous_get_changes_response env data =
-  match make_mergebase_changed_response env data with
-  | Some (env, response) -> Ok (env, response)
-  | None ->
-    if is_fresh_instance data then
-      Error Fresh_instance
-    else if subscription_is_cancelled data then
-      Error Subscription_canceled
-    else (
-      env.clockspec <- Jget.string_exn (Some data) "clock";
-      match Jget.string_opt (Some data) "state-enter" with
-      | Some state -> Ok (env, make_state_change_response `Enter state data)
-      | None ->
-        (match Jget.string_opt (Some data) "state-leave" with
-        | Some state -> Ok (env, make_state_change_response `Leave state data)
-        | None -> Ok (env, Files_changed (extract_file_names env data)))
-    )
-
-let get_changes =
-  let on_retry _attempt env =
-    let%lwt dead_env = close_channel_on_instance env in
-    re_init_dead_env dead_env
+let get_mergebase =
+  (* watchman's mergebase-with queries also get the changes since mergebase.
+     we don't want those here, we just want to quickly know the mergebase and
+     will use that to decide whether we care about the changes. so we ask
+     source control directly. *)
+  let get_mergebase_from_vcs vcs root mergebase_with =
+    match vcs with
+    | Some Vcs.Hg ->
+      (match%lwt Hg.merge_base ~cwd:root "." mergebase_with with
+      | Ok hash -> Lwt.return (Ok (Some hash))
+      | Error _ as err -> Lwt.return err)
+    | Some Vcs.Git ->
+      (match%lwt Git.merge_base ~cwd:root mergebase_with "HEAD" with
+      | Ok hash -> Lwt.return (Ok (Some hash))
+      | Error _ as err -> Lwt.return err)
+    | None -> Lwt.return (Ok None)
   in
-  let wait_for_changes env =
-    let debug_logging = env.settings.debug_logging in
-    match%lwt blocking_read ~debug_logging ~conn:env.conn with
-    | Error _ as err -> Lwt.return err
-    | Ok response ->
-      (match transform_asynchronous_get_changes_response env response with
-      | Error _ as err -> Lwt.return err
-      | Ok (env, result) -> Lwt.return (Ok (env, result)))
-  in
-  (fun env -> with_retry ~max_attempts:max_retry_attempts ~on_retry wait_for_changes env)
+  fun (env : env) ->
+    if env.should_track_mergebase then
+      let vcs = env.vcs in
+      let root = env.watch.watch_root in
+      let mergebase_with = env.settings.mergebase_with in
+      get_mergebase_from_vcs vcs root mergebase_with
+    else
+      Lwt.return (Ok None)
 
 let get_mergebase_and_changes =
   let on_retry attempt env =
@@ -898,30 +963,190 @@ let get_mergebase_and_changes =
     | Error _ as err -> Lwt.return err
     | Ok response ->
       (match extract_mergebase response with
-      | Some (clock, mergebase) ->
+      | Some (_clock, mergebase) ->
+        (* ignore clock and don't update env.clockspec. this is likely just a
+           legacy thing, and it's probably ok if we did update env.clockspec.
+           it's used when we resubscribe to a broken subscription, and since
+           we already processed changes up to _clock, we can resubscribe
+           from there instead of from env.clockspec again.
+
+           it is assumed that there's already a subscription running that will
+           catch any contemporaneous changes. suppose a subscription is started
+           at clock C. we query for changes since mergebase here, and get back
+           clock C+1. `changes` includes files that changed before our
+           subscription, plus maybe some between C and C+1. we'll also get a
+           subscription event for those changes between C and C+1, so we don't
+           _need_ to update env.clockspec here. *)
         let changes = extract_file_names env response in
-        Lwt.return (Ok (Some { clock; mergebase; changes }))
+        Lwt.return (Ok (Some (mergebase, changes)))
       | None ->
         Lwt.return (Error (response_error_of_json ~query ~response "Failed to extract mergebase")))
   in
-  fun env ->
+  fun (env : env) ->
     if env.should_track_mergebase then
       with_retry ~max_attempts:max_retry_attempts ~on_retry run_query env
     else
       Lwt.return (Ok None)
 
-let force_update_clockspec clock env = env.clockspec <- clock
+(** We want to know when an N-files-changed notification is due to the user changing
+  their mergebase. This could be due to pulling & rebasing their work onto the new
+  commit, or just moving from one commit to another.
+
+  Using an SCM-aware subscription (https://facebook.github.io/watchman/docs/scm-query.html)
+  would tell us when the mergebase changes, but then it would only tell us what
+  files changed since that new mergebase. The idea there is that we'd download
+  a new saved state based on that new mergebase, and so only need to process the
+  files changed since mergebase. But there's a lot of overhead for us to use a
+  new saved state, so it might be faster to just process all the upstream changes.
+
+  We get all the upstream changes by not using an SCM-aware subscription, but
+  then have to see if the mergebase changed on our own. Our approach is based
+  around the assumption that once Watchman tells us that N files have changed,
+  things have settled down enough that it's safe to query for the mergebase.
+  And since querying for the mergebase is expensive, we only do so when we see
+  an hg.update. After an hg.update it's more acceptable to delay a file-changed
+  notification than after a user saves a file in the IDE.
+
+  Returns [None] if we don't know whether the mergebase changed (mostly if
+  [should_track_mergebase = false]), otherwise [Some did_change]. Also mutates
+  [env.mergebase]. *)
+let check_for_changed_mergebase (env : env) =
+  match env.mergebase with
+  | None ->
+    Hh_logger.debug "Unable to check for changed mergebase: unknown previous mergebase";
+    Lwt.return None
+  | Some old_mergebase ->
+    let%lwt new_mergebase =
+      match%lwt get_mergebase env with
+      | Ok mergebase -> Lwt.return mergebase
+      | Error (Vcs_utils.Not_installed _) ->
+        (* TODO: handle this more gracefully than `failwith`, but should be impossible.
+           we already used the VCS to decide [should_track_mergebase]. *)
+        failwith "Failed to query mergebase: unable to find vcs"
+      | Error (Vcs_utils.Errored msg) ->
+        (* TODO: handle this more gracefully than `failwith` *)
+        failwith (Printf.sprintf "Failed to query mergebase: %s" msg)
+    in
+    (match new_mergebase with
+    | Some mergebase ->
+      let changed_mergebase = not (String.equal mergebase old_mergebase) in
+      if changed_mergebase then (
+        Hh_logger.info "Watchman reports mergebase changed from %S to %S" old_mergebase mergebase;
+        env.mergebase <- Some mergebase
+      ) else
+        Hh_logger.debug "Watchman reports mergebase is unchanged at %S" mergebase;
+      Lwt.return (Some changed_mergebase)
+    | None ->
+      Hh_logger.warn "Unable to fetch current mergebase";
+      Lwt.return None)
+
+let recover_from_restart (env : env) =
+  match env.mergebase with
+  | None ->
+    (* we weren't tracking the mergebase so we can't figure out what changed
+       while watchman wasn't listening *)
+    Lwt.return (Error Restarted)
+  | Some prev_mergebase ->
+    (* on restart, reconnect to a fresh env. *)
+    let%lwt dead_env = close_channel_on_instance env in
+    (match%lwt re_init_dead_env ~allow_fresh_instance:true dead_env with
+    | Ok env ->
+      (match%lwt get_mergebase_and_changes env with
+      | Error _ as err -> Lwt.return err
+      | Ok None ->
+        (* asking source control what changed while watchman was restarting was
+           not supported, so we can't recover. note: this should virtually never
+           happen: it means that Watchman previously supported SCM queries, but
+           no longer does when we reconnect. *)
+        Lwt.return (Error Restarted)
+      | Ok (Some (mergebase, changes_since_mergebase)) ->
+        (* this is a new `env`, make sure to store the mergebase! *)
+        env.mergebase <- Some mergebase;
+        (* it's possible that prev_mergebase and mergebase are equal *)
+        let pushed_changes =
+          Missed_changes { prev_mergebase; mergebase; changes_since_mergebase }
+        in
+        Lwt.return (Ok (env, pushed_changes)))
+    | Error _ as err -> Lwt.return err)
+
+let transform_asynchronous_get_changes_response env data =
+  if is_fresh_instance_response data then
+    Lwt.return (Error Fresh_instance)
+  else if subscription_is_cancelled data then
+    Lwt.return (Error Subscription_canceled)
+  else (
+    env.clockspec <- Jget.string_exn (Some data) "clock";
+    match Jget.string_opt (Some data) "state-enter" with
+    | Some state -> Lwt.return (Ok (env, make_state_change_response `Enter state data))
+    | None ->
+      (match Jget.string_opt (Some data) "state-leave" with
+      | Some state ->
+        if String.equal state "hg.update" then env.finished_an_hg_update <- true;
+        Lwt.return (Ok (env, make_state_change_response `Leave state data))
+      | None ->
+        let changes = extract_file_names env data in
+        let%lwt changed_mergebase =
+          if env.finished_an_hg_update then (
+            env.finished_an_hg_update <- false;
+            check_for_changed_mergebase env
+          ) else
+            Lwt.return None
+        in
+        Lwt.return (Ok (env, Files_changed { changes; changed_mergebase })))
+  )
+
+let get_changes =
+  let on_retry _attempt env =
+    let%lwt dead_env = close_channel_on_instance env in
+    re_init_dead_env ~allow_fresh_instance:false dead_env
+  in
+  let wait_for_changes env =
+    let debug_logging = env.settings.debug_logging in
+    match%lwt blocking_read ~debug_logging ~conn:env.conn with
+    | Error _ as err -> Lwt.return err
+    | Ok response -> transform_asynchronous_get_changes_response env response
+  in
+  (fun env -> with_retry ~max_attempts:max_retry_attempts ~on_retry wait_for_changes env)
+
+let init settings =
+  let on_retry attempt settings =
+    let%lwt () = Lwt_unix.sleep (backoff_delay attempt) in
+    Lwt.return (Ok settings)
+  in
+  match%lwt with_retry ~max_attempts:max_reinit_attempts ~on_retry re_init settings with
+  | Ok env ->
+    (match%lwt get_mergebase_and_changes env with
+    | Ok mergebase_and_changes ->
+      let (mergebase, files) =
+        match mergebase_and_changes with
+        | Some (mergebase, changes) ->
+          Hh_logger.info
+            "Watchman reports the initial mergebase as %S, and %d changes"
+            mergebase
+            (SSet.cardinal changes);
+          (Some mergebase, changes)
+        | None ->
+          if env.should_track_mergebase then
+            Hh_logger.warn
+              "Not checking changes since mergebase! SCM-aware queries are not supported for your VCS by your version of Watchman.";
+          (None, SSet.empty)
+      in
+      env.mergebase <- mergebase;
+      Lwt.return (Ok (env, files))
+    | Error _ -> Lwt.return (Error "Failed to query initial mergebase from Watchman"))
+  | Error _ -> Lwt.return (Error "Failed to initialize watchman")
 
 module Testing = struct
   type nonrec error_kind = error_kind
 
-  let test_settings =
+  let test_settings : init_settings =
     {
       debug_logging = false;
       defer_states = [];
       expression_terms = [];
       mergebase_with = "hash";
       roots = [Path.dummy_path];
+      should_track_mergebase = false;
       subscribe_mode = Defer_changes;
       subscription_prefix = "dummy_prefix";
       sync_timeout = None;
@@ -945,7 +1170,10 @@ module Testing = struct
             watched_path_expression_terms =
               Some (J.pred "anyof" [J.strlist ["dirname"; "foo"]; J.strlist ["name"; "foo"]]);
           };
+        vcs = None;
         should_track_mergebase = false;
+        mergebase = None;
+        finished_an_hg_update = false;
         subscription = "dummy_prefix.123456789";
       }
 

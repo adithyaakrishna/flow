@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -14,7 +14,7 @@ type estimates = {
   estimated_files_to_init: int;
 }
 
-val init : options:Options.t -> init_time:float -> parsed_count:int -> estimates option Lwt.t
+val init : options:Options.t -> init_time:float -> parsed_count:int -> unit Lwt.t
 
 val record_recheck_time : options:Options.t -> total_time:float -> rechecked_files:int -> unit Lwt.t
 

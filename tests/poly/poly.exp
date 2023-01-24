@@ -113,9 +113,9 @@ Cannot cast `newVal4` to string because number [1] is incompatible with string [
         ^^^^^^^
 
 References:
-   error.js:19:8
-   19| newFn4(42);
-              ^^ [1]
+   error.js:18:31
+   18| const [newVal4, newFn4] = fn4<number>();
+                                     ^^^^^^ [1]
    error.js:20:11
    20| (newVal4: string); // The error should point here.
                  ^^^^^^ [2]
@@ -149,7 +149,7 @@ Cannot call `a.meth` with `42` bound to `a` because number [1] is incompatible w
 
 References:
    implicit_bounded_instantiation.js:7:12
-    7| class C<T: Middle> {
+    7| class C<T: Middle = Middle> {
                   ^^^^^^ [2]
 
 
@@ -164,7 +164,7 @@ Cannot call `a.meth` with `new Base()` bound to `a` because `Base` [1] is incomp
 
 References:
    implicit_bounded_instantiation.js:7:12
-    7| class C<T: Middle> {
+    7| class C<T: Middle = Middle> {
                   ^^^^^^ [2]
 
 

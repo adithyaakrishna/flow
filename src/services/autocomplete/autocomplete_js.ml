@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -9,6 +9,7 @@ type ac_id = {
   include_super: bool;
   include_this: bool;
   type_: Type.t;
+  enclosing_class_t: Type.t option;
 }
 
 type autocomplete_type =
@@ -16,9 +17,18 @@ type autocomplete_type =
   | Ac_binding  (** binding identifiers introduce new names *)
   | Ac_comment  (** inside a comment *)
   | Ac_id of ac_id  (** identifier references *)
-  | Ac_class_key  (** class method name or property name *)
+  | Ac_class_key of { enclosing_class_t: Type.t option }  (** class method name or property name *)
   | Ac_enum  (** identifier in enum declaration *)
-  | Ac_key of { obj_type: Type.t }  (** object key *)
+  | Ac_import_specifier of {
+      module_type: Type.t;
+      used_keys: SSet.t;
+      is_type: bool;
+    }  (** Import named specifiers *)
+  | Ac_key of {
+      obj_type: Type.t;
+      used_keys: SSet.t;
+      spreads: (Loc.t * Type.t) list;
+    }  (** object key *)
   | Ac_literal of { lit_type: Type.t }  (** inside a literal like a string or regex *)
   | Ac_module  (** a module name *)
   | Ac_type  (** type identifiers *)
@@ -46,8 +56,6 @@ type process_location_result = {
   token: string;
   autocomplete_type: autocomplete_type;
 }
-
-let default_ac_id type_ = { include_super = false; include_this = false; type_ }
 
 let type_of_jsx_name =
   let open Flow_ast.JSX in
@@ -84,7 +92,19 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
   object (this)
     inherit Typed_ast_utils.type_parameter_mapper as super
 
+    val mutable enclosing_classes : Type.t list = []
+
     method covers_target loc = covers_target cursor loc
+
+    method private get_enclosing_class = Base.List.hd enclosing_classes
+
+    method default_ac_id type_ =
+      {
+        include_super = false;
+        include_this = false;
+        type_;
+        enclosing_class_t = this#get_enclosing_class;
+      }
 
     method find : 'a. ALoc.t -> string -> autocomplete_type -> 'a =
       fun ac_loc token autocomplete_type ->
@@ -100,6 +120,14 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
             raise (Found { tparams_rev; ac_loc; token; autocomplete_type })
         )
 
+    method with_enclosing_class_t : 'a. Type.t -> 'a Lazy.t -> 'a =
+      fun class_t f ->
+        let previously_enclosing = enclosing_classes in
+        enclosing_classes <- class_t :: enclosing_classes;
+        let result = Lazy.force f in
+        enclosing_classes <- previously_enclosing;
+        result
+
     method! comment ((loc, Flow_ast.Comment.{ text; _ }) as c) =
       if this#covers_target loc then
         (* don't autocomplete in comments *)
@@ -109,13 +137,13 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
 
     method! t_identifier (((loc, type_), { Flow_ast.Identifier.name; _ }) as ident) =
       if this#covers_target loc then
-        this#find loc name (Ac_id (default_ac_id type_))
+        this#find loc name (Ac_id (this#default_ac_id type_))
       else
         super#t_identifier ident
 
     method! jsx_element_name_identifier
         (((ac_loc, type_), { Flow_ast.JSX.Identifier.name; _ }) as ident) =
-      if this#covers_target ac_loc then this#find ac_loc name (Ac_id (default_ac_id type_));
+      if this#covers_target ac_loc then this#find ac_loc name (Ac_id (this#default_ac_id type_));
       ident
 
     method member_with_loc expr_loc expr =
@@ -152,7 +180,7 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
                {
                  obj_type;
                  in_optional_chain = false;
-                 bracket_syntax = Some (default_ac_id type_);
+                 bracket_syntax = Some (this#default_ac_id type_);
                  member_loc;
                  is_type_annotation = false;
                }
@@ -164,7 +192,11 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
     method optional_member_with_loc expr_loc expr =
       let open Flow_ast.Expression.OptionalMember in
       let open Flow_ast.Expression.Member in
-      let { member = { _object = ((obj_loc, obj_type), _) as obj; property; comments }; optional } =
+      let {
+        member = { _object = ((obj_loc, obj_type), _) as obj; property; comments };
+        optional;
+        filtered_out;
+      } =
         expr
       in
       let member_loc = Some (compute_member_loc ~expr_loc ~obj_loc) in
@@ -198,7 +230,7 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
                {
                  obj_type;
                  in_optional_chain = true;
-                 bracket_syntax = Some (default_ac_id type_);
+                 bracket_syntax = Some (this#default_ac_id type_);
                  member_loc;
                  is_type_annotation = false;
                }
@@ -207,7 +239,7 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
       end;
       (* the reason we don't simply call `super#optional_member` is because that would
        * call `this#member`, which would be redundant *)
-      { member = { _object = this#expression obj; property; comments }; optional }
+      { member = { _object = this#expression obj; property; comments }; optional; filtered_out }
 
     method! pattern ?kind pat =
       let open Flow_ast.Pattern in
@@ -342,9 +374,9 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
       | Identifier ((loc, _), { Flow_ast.Identifier.name; _ })
       | Literal ((loc, _), Flow_ast.Literal.{ raw = name; _ })
         when this#covers_target loc ->
-        this#find loc name Ac_class_key
+        this#find loc name (Ac_class_key { enclosing_class_t = this#get_enclosing_class })
       | PrivateName (loc, { Flow_ast.PrivateName.name; _ }) when this#covers_target loc ->
-        this#find loc ("#" ^ name) Ac_class_key
+        this#find loc ("#" ^ name) (Ac_class_key { enclosing_class_t = this#get_enclosing_class })
       | _ -> super#class_key key
 
     method! object_key key =
@@ -420,7 +452,7 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
       begin
         match id with
         | Unqualified ((loc, t), { Flow_ast.Identifier.name; _ }) when this#covers_target loc ->
-          this#find loc name (Ac_id (default_ac_id t))
+          this#find loc name (Ac_id (this#default_ac_id t))
         | Qualified
             ((expr_loc, _), { qualification; id = ((loc, _), Flow_ast.Identifier.{ name; _ }) })
           when this#covers_target loc ->
@@ -455,6 +487,13 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
       end;
       id
 
+    method! statement (annot, stmt) =
+      let open Flow_ast.Statement in
+      match stmt with
+      | ClassDeclaration { Flow_ast.Class.id = Some ((_, t), _); _ } ->
+        this#with_enclosing_class_t t (lazy (super#statement (annot, stmt)))
+      | _ -> super#statement (annot, stmt)
+
     method! expression expr =
       let open Flow_ast.Expression in
       match expr with
@@ -466,24 +505,43 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
         (this#on_type_annot annot, OptionalMember (this#optional_member_with_loc loc opt_member))
       | (((_, obj_type) as annot), Object obj) ->
         (this#on_type_annot annot, Object (this#object_with_type obj_type obj))
+      | ((_, class_t), Class _) -> this#with_enclosing_class_t class_t (lazy (super#expression expr))
       | _ -> super#expression expr
 
     method object_with_type obj_type obj =
       let open Flow_ast.Expression.Object in
       let { properties; comments } = obj in
+      let (used_keys, spreads) =
+        Base.List.fold properties ~init:(SSet.empty, []) ~f:(fun acc prop ->
+            let (used_keys, spreads) = acc in
+            match prop with
+            | Property (_, (Property.Init { key; _ } | Property.Method { key; _ })) ->
+              (match key with
+              | Property.Identifier (_, { Flow_ast.Identifier.name; _ })
+              | Property.Literal (_, { Flow_ast.Literal.value = Flow_ast.Literal.String name; _ })
+                ->
+                (SSet.add name used_keys, spreads)
+              | _ -> acc)
+            | Property _ -> acc
+            | SpreadProperty (_, { SpreadProperty.argument = ((spread_loc, spread_type), _); _ }) ->
+              (used_keys, (ALoc.to_loc_exn spread_loc, spread_type) :: spreads)
+        )
+      in
       Base.Option.iter ~f:(fun syntax -> ignore (this#syntax_with_internal syntax)) comments;
       Base.List.iter
-        ~f:(fun prop -> ignore (this#object_property_or_spread_property_with_type obj_type prop))
+        ~f:(fun prop ->
+          ignore
+            (this#object_property_or_spread_property_with_type ~used_keys ~spreads obj_type prop))
         properties;
       obj
 
-    method object_property_or_spread_property_with_type obj_type prop =
+    method object_property_or_spread_property_with_type ~used_keys ~spreads obj_type prop =
       let open Flow_ast.Expression.Object in
       match prop with
-      | Property p -> Property (this#object_property_with_type obj_type p)
+      | Property p -> Property (this#object_property_with_type ~used_keys ~spreads obj_type p)
       | SpreadProperty s -> SpreadProperty (this#spread_property s)
 
-    method object_property_with_type obj_type prop =
+    method object_property_with_type ~used_keys ~spreads obj_type prop =
       let open Flow_ast.Expression.Object.Property in
       (match snd prop with
       | Init
@@ -494,7 +552,7 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
             _;
           }
         when this#covers_target loc ->
-        this#find loc token (Ac_key { obj_type })
+        this#find loc token (Ac_key { obj_type; used_keys; spreads })
       | _ -> ());
       this#object_property prop
 
@@ -508,11 +566,40 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
 
     method! import_declaration decl_loc decl =
       let open Flow_ast.Statement.ImportDeclaration in
-      let { import_kind = _; source; specifiers = _; default = _; comments = _ } = decl in
-      match source with
-      | (loc, Flow_ast.StringLiteral.{ raw; _ }) when this#covers_target loc ->
-        this#find loc raw Ac_module
-      | _ -> super#import_declaration decl_loc decl
+      let { import_kind; source; specifiers; default = _; comments = _ } = decl in
+      let ((source_loc, module_type), Flow_ast.StringLiteral.{ raw = from; _ }) = source in
+      if this#covers_target source_loc then
+        this#find source_loc from Ac_module
+      else if this#covers_target decl_loc then
+        match specifiers with
+        | Some (ImportNamedSpecifiers ns) ->
+          let (found, used_keys) =
+            Base.List.fold ns ~init:(None, SSet.empty) ~f:(fun (found, used_keys) specifier ->
+                let { remote = ((loc, _), Flow_ast.Identifier.{ name; _ }); kind; _ } = specifier in
+                let found =
+                  if this#covers_target loc then
+                    let is_type =
+                      match Base.Option.value kind ~default:import_kind with
+                      | ImportType -> true
+                      | ImportTypeof -> false
+                      | ImportValue -> false
+                    in
+                    Some (loc, name, is_type)
+                  else
+                    found
+                in
+                (found, SSet.add name used_keys)
+            )
+          in
+          (match found with
+          | None -> decl
+          | Some (loc, token, is_type) ->
+            this#find loc token (Ac_import_specifier { module_type; used_keys; is_type }))
+        | Some (ImportNamespaceSpecifier _)
+        | None ->
+          super#import_declaration decl_loc decl
+      else
+        decl
 
     method indexed_access_type_with_loc loc ia =
       let open Flow_ast in
@@ -536,7 +623,7 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
              {
                obj_type;
                in_optional_chain = false;
-               bracket_syntax = Some (default_ac_id index_type);
+               bracket_syntax = Some (this#default_ac_id index_type);
                member_loc = Some (compute_member_loc ~expr_loc:loc ~obj_loc);
                is_type_annotation = true;
              }
@@ -572,7 +659,7 @@ class process_request_searcher (from_trigger_character : bool) (cursor : Loc.t) 
              {
                obj_type;
                in_optional_chain = true;
-               bracket_syntax = Some (default_ac_id index_type);
+               bracket_syntax = Some (this#default_ac_id index_type);
                member_loc = Some (compute_member_loc ~expr_loc:loc ~obj_loc);
                is_type_annotation = true;
              }

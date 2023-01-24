@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -547,17 +547,16 @@ struct
               ( Identifier { Ast.Pattern.Identifier.annot; _ }
               | Object { Ast.Pattern.Object.annot; _ }
               | Array { Ast.Pattern.Array.annot; _ } )
-            ) ->
-            begin
-              match init with
-              | Some init ->
-                (* given `var x = e`, read e then write x *)
-                ignore @@ this#expression init;
-                ignore @@ this#variable_declarator_pattern ~kind id
-              | None ->
-                (* `var x;` is not a write of `x`, but there might be unbound names in the annotation *)
-                ignore @@ this#type_annotation_hint annot
-            end
+            ) -> begin
+            match init with
+            | Some init ->
+              (* given `var x = e`, read e then write x *)
+              ignore @@ this#expression init;
+              ignore @@ this#variable_declarator_pattern ~kind id
+            | None ->
+              (* `var x;` is not a write of `x`, but there might be unbound names in the annotation *)
+              ignore @@ this#type_annotation_hint annot
+          end
           | (_, Expression _) ->
             (* This is an invalid expression that will cause a runtime error, so we skip the left hand side *)
             ignore @@ Base.Option.map ~f:this#expression init
@@ -593,7 +592,7 @@ struct
 
       method! return _loc (stmt : (L.t, L.t) Ast.Statement.Return.t) =
         let open Ast.Statement.Return in
-        let { argument; comments = _ } = stmt in
+        let { argument; comments = _; return_out = _ } = stmt in
         ignore @@ Flow_ast_mapper.map_opt this#expression argument;
         this#raise_abrupt_completion AbruptCompletion.return
 
@@ -1051,6 +1050,7 @@ struct
         this#expecting_abrupt_completions (fun () ->
             let open Ast.Statement.Try in
             let { block = (loc, block); handler; finalizer; comments = _ } = stmt in
+            let pre_env = this#ssa_env in
             let try_completion_state =
               this#run_to_completion (fun () -> ignore @@ this#block loc block)
             in
@@ -1061,7 +1061,12 @@ struct
                 (* NOTE: Havoc-ing the state when entering the handler is probably
                    overkill. We can be more precise but still correct by collecting all
                    possible writes in the try-block and merging them with the state when
-                   entering the try-block. *)
+                   entering the try-block.
+                   We havoc on top of the pre-env because the try-block may have initialized
+                   some variables, and we want to make sure we model the fact that they may
+                   still be uninitialized in the catch block.
+                *)
+                this#reset_ssa_env pre_env;
                 this#havoc_current_ssa_env;
                 let catch_completion_state =
                   this#run_to_completion (fun () -> ignore @@ this#catch_clause loc clause)
@@ -1081,10 +1086,16 @@ struct
               match finalizer with
               | Some (_loc, block) ->
                 (* NOTE: Havoc-ing the state when entering the finalizer is probably
-                   overkill. We can be more precise but still correct by collecting
-                   all possible writes in the handler and merging them with the state
-                   when entering the handler (which in turn should already account for
-                   any contributions by the try-block). *)
+                    overkill. We can be more precise but still correct by collecting
+                    all possible writes in the handler and merging them with the state
+                    when entering the handler (which in turn should already account for
+                    any contributions by the try-block).
+
+                   We reset to the pre-env before havocing so that variables that are uninitialized
+                   before the try/catch blocks are not thought to be definitely initialized when
+                   entering the finally block.
+                *)
+                this#reset_ssa_env pre_env;
                 this#havoc_current_ssa_env;
                 ignore @@ this#block loc block
               | None -> ()
@@ -1116,14 +1127,16 @@ struct
         expr
 
       (* We also havoc state when entering functions and exiting calls. *)
-      method! lambda params predicate body =
+      method! lambda ~is_arrow ~fun_loc ~generator_return_loc params predicate body =
         this#expecting_abrupt_completions (fun () ->
             let env = this#ssa_env in
             this#run
               (fun () ->
                 this#havoc_uninitialized_ssa_env;
                 let completion_state =
-                  this#run_to_completion (fun () -> super#lambda params predicate body)
+                  this#run_to_completion (fun () ->
+                      super#lambda ~is_arrow ~fun_loc ~generator_return_loc params predicate body
+                  )
                 in
                 this#commit_abrupt_completion_matching
                   AbruptCompletion.(mem [return; throw])
@@ -1143,11 +1156,8 @@ struct
         this#havoc_current_ssa_env;
         expr
 
-      method! new_ _loc (expr : (L.t, L.t) Ast.Expression.New.t) =
-        let open Ast.Expression.New in
-        let { callee; targs = _; arguments; comments = _ } = expr in
-        ignore @@ this#expression callee;
-        ignore @@ Flow_ast_mapper.map_opt this#call_arguments arguments;
+      method! new_ loc (expr : (L.t, L.t) Ast.Expression.New.t) =
+        ignore @@ super#new_ loc expr;
         this#havoc_current_ssa_env;
         expr
 

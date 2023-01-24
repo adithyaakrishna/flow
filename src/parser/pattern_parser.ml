@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -211,8 +211,7 @@ module Pattern (Parse : Parser_common.PARSER) (Type : Type_parser.TYPE) = struct
             | (_, PrivateName _) -> failwith "Internal Error: Found object private prop"
             | (_, Computed key) -> Pattern.Object.Property.Computed key
           in
-          Some
-            Pattern.Object.(Property (loc, Property.{ key; pattern; default; shorthand = false }))
+          Some Pattern.Object.(Property (loc, Property.{ key; pattern; default; shorthand = false }))
         | _ ->
           (match raw_key with
           | ( _,
@@ -220,7 +219,7 @@ module Pattern (Parse : Parser_common.PARSER) (Type : Type_parser.TYPE) = struct
                 ((id_loc, { Identifier.name = string_val; comments = _ }) as name)
             ) ->
             (* #sec-identifiers-static-semantics-early-errors *)
-            if is_reserved string_val && string_val <> "yield" && string_val <> "await" then
+            if is_reserved string_val then
               (* it is a syntax error if `name` is a reserved word other than await or yield *)
               error_at env (id_loc, Parse_error.UnexpectedReserved)
             else if is_strict_reserved string_val then

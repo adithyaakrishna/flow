@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,15 +7,8 @@
 
 open Utils_js
 
-val implementation_file :
-  reader:Mutator_state_reader.t -> (Modulename.t -> File_key.t option) Expensive.t
-
-val calc_direct_dependents :
-  MultiWorkerLwt.worker list option ->
-  candidates:FilenameSet.t ->
-  root_files:FilenameSet.t ->
-  root_modules:Modulename.Set.t ->
-  FilenameSet.t Lwt.t
+val calc_unchanged_dependents :
+  MultiWorkerLwt.worker list option -> Modulename.Set.t -> FilenameSet.t Lwt.t
 
 val calc_dependency_info :
   reader:Mutator_state_reader.t ->

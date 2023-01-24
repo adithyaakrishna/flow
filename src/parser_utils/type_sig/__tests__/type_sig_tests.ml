@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -143,16 +143,26 @@ let pp_builtins
     fmt
     ( errs,
       locs,
-      { Packed_type_sig.Builtins.module_refs; local_defs; remote_refs; globals = _; modules }
+      {
+        Packed_type_sig.Builtins.module_refs;
+        local_defs;
+        remote_refs;
+        pattern_defs;
+        patterns;
+        globals = _;
+        modules;
+      }
     ) =
   let open Format in
   let pp_loc = mk_pp_loc locs in
   pp_module_refs fmt module_refs;
   pp_local_defs pp_loc fmt local_defs;
   pp_remote_refs pp_loc fmt remote_refs;
+  pp_pattern_defs pp_loc fmt pattern_defs;
+  pp_patterns pp_loc fmt patterns;
   SMap.iter
     (fun name m ->
-      Format.fprintf fmt "@.Builtin module %s:@." name;
+      fprintf fmt "@.Builtin module %s:@." name;
       pp_builtin_module pp_loc fmt m)
     modules;
   pp_errors pp_loc fmt errs
@@ -168,17 +178,9 @@ let make_test_formatter () =
 
 let parse_options =
   let open Parser_env in
-  Some
-    {
-      default_parse_options with
-      enums = true;
-      esproposal_class_instance_fields = true;
-      esproposal_class_static_fields = true;
-      esproposal_export_star_as = true;
-    }
+  Some { default_parse_options with enums = true }
 
 let sig_options
-    ?(type_asserts = true)
     ?(suppress_types = SSet.empty)
     ?(munge = false)
     ?(ignore_static_propTypes = false)
@@ -192,8 +194,7 @@ let sig_options
     ?relay_integration_module_prefix
     () =
   {
-    Parse.type_asserts;
-    suppress_types;
+    Parse.suppress_types;
     munge;
     ignore_static_propTypes;
     facebook_keyMirror;
@@ -266,6 +267,40 @@ let%expect_test "export_number_literal" =
     ESModule {type_exports = [||];
       exports =
       [|ExportDefault {default_loc = [1:7-14]; def = (Value (NumberLit ([1:15-16], 0., "0")))}|];
+      info =
+      ESModuleInfo {type_export_keys = [||];
+        type_stars = []; export_keys = [|"default"|];
+        stars = []; strict = true}}
+  |}]
+
+let%expect_test "export_bigint_literal" =
+  print_sig {|
+    export default 0n;
+  |};
+  [%expect {|
+    ESModule {type_exports = [||];
+      exports =
+      [|ExportDefault {default_loc = [1:7-14];
+          def = (Value (BigIntLit ([1:15-17], (Some 0L), "0n")))}
+        |];
+      info =
+      ESModuleInfo {type_export_keys = [||];
+        type_stars = []; export_keys = [|"default"|];
+        stars = []; strict = true}}
+  |}]
+
+let%expect_test "export_bigint_literal_neg" =
+  print_sig {|
+    export default -0n;
+  |};
+  [%expect {|
+    ESModule {type_exports = [||];
+      exports =
+      [|ExportDefault {default_loc = [1:7-14];
+          def =
+          (Eval ([1:15-18], (Value (BigIntLit ([1:16-18], (Some 0L), "0n"))),
+             (Unary Flow_ast.Expression.Unary.Minus)))}
+        |];
       info =
       ESModuleInfo {type_export_keys = [||];
         type_stars = []; export_keys = [|"default"|];
@@ -628,14 +663,14 @@ let%expect_test "empty_object_literal" =
   |};
   [%expect {|
     ESModule {type_exports = [||];
-      exports = [|ExportDefault {default_loc = [1:7-14]; def = (Err [1:15-18])}|];
+      exports =
+      [|ExportDefault {default_loc = [1:7-14];
+          def = (Value ObjLit {loc = [1:15-18]; frozen = false; proto = None; props = {}})}
+        |];
       info =
       ESModuleInfo {type_export_keys = [||];
         type_stars = []; export_keys = [|"default"|];
         stars = []; strict = true}}
-
-    Errors:
-    ([1:15-18], (SigError (Signature_error.EmptyObject [1:15-18])))
   |}]
 
 let%expect_test "export_class_reference" =
@@ -1550,6 +1585,29 @@ let%expect_test "qualified_references" =
     1. ImportType {id_loc = [2:12-14]; name = "M2"; index = 0; remote = "default"}
   |}]
 
+let%expect_test "invalid_qualified_references" =
+  print_sig {|
+    export type T<U> = U.V;
+  |};
+  [%expect {|
+    CJSModule {type_exports = [|(ExportTypeBinding 0)|];
+      exports = None;
+      info = CJSModuleInfo {type_export_keys = [|"T"|]; type_stars = []; strict = true}}
+
+    Local defs:
+    0. TypeAlias {id_loc = [1:12-13];
+         name = "T";
+         tparams =
+         (Poly ([1:13-16],
+            TParam {name_loc = [1:14-15];
+              name = "U"; polarity = Polarity.Neutral;
+              bound = None; default = None},
+            []));
+         body = (Err [1:19-20])}
+
+    Errors:
+    ([1:19-20], CheckError) |}]
+
 let%expect_test "hoisted_requires" =
   print_sig {|
     const M = require('./hoisted_requires_helper');
@@ -2106,7 +2164,11 @@ let%expect_test "arith_expression1" =
     module.exports = 6*7;
   |};
   [%expect {|
-    CJSModule {type_exports = [||]; exports = (Some (Value (NumberVal [1:17-20])));
+    CJSModule {type_exports = [||];
+      exports =
+      (Some (Eval ([1:17-20], (Value (NumberLit ([1:17-18], 6., "6"))),
+               (Arith (Flow_ast.Expression.Binary.Mult, (Value (NumberLit ([1:19-20], 7., "7")))))
+               )));
       info = CJSModuleInfo {type_export_keys = [||]; type_stars = []; strict = true}}
   |}]
 
@@ -2115,13 +2177,12 @@ let%expect_test "arith_expression2" =
     module.exports = 6+7;
   |};
   [%expect {|
-    CJSModule {type_exports = [||]; exports = (Some (Err [1:17-20]));
+    CJSModule {type_exports = [||];
+      exports =
+      (Some (Eval ([1:17-20], (Value (NumberLit ([1:17-18], 6., "6"))),
+               (Arith (Flow_ast.Expression.Binary.Plus, (Value (NumberLit ([1:19-20], 7., "7")))))
+               )));
       info = CJSModuleInfo {type_export_keys = [||]; type_stars = []; strict = true}}
-
-    Errors:
-    ([1:17-20],
-     (SigError
-        (Signature_error.UnexpectedExpression ([1:17-20], Flow_ast_utils.ExpressionSort.Binary))))
   |}]
 
 let%expect_test "update_expression" =
@@ -2140,11 +2201,25 @@ let%expect_test "update_expression" =
         type_stars = []; export_keys = [|"post_decr"; "post_incr"; "pre_decr"; "pre_incr"|];
         stars = []; strict = true}}
 
+    Module refs:
+    0. bar
+
     Local defs:
-    0. Variable {id_loc = [2:13-21]; name = "pre_incr"; def = (Value (NumberVal [2:24-29]))}
-    1. Variable {id_loc = [3:13-21]; name = "pre_decr"; def = (Value (NumberVal [3:24-29]))}
-    2. Variable {id_loc = [4:13-22]; name = "post_incr"; def = (Value (NumberVal [4:25-30]))}
-    3. Variable {id_loc = [5:13-22]; name = "post_decr"; def = (Value (NumberVal [5:25-30]))} |}]
+    0. Variable {id_loc = [2:13-21];
+         name = "pre_incr";
+         def = (Eval ([2:24-29], (Ref RemoteRef {ref_loc = [2:26-29]; index = 0}), Update))}
+    1. Variable {id_loc = [3:13-21];
+         name = "pre_decr";
+         def = (Eval ([3:24-29], (Ref RemoteRef {ref_loc = [3:26-29]; index = 0}), Update))}
+    2. Variable {id_loc = [4:13-22];
+         name = "post_incr";
+         def = (Eval ([4:25-30], (Ref RemoteRef {ref_loc = [4:25-28]; index = 0}), Update))}
+    3. Variable {id_loc = [5:13-22];
+         name = "post_decr";
+         def = (Eval ([5:25-30], (Ref RemoteRef {ref_loc = [5:25-28]; index = 0}), Update))}
+
+    Remote refs:
+    0. Import {id_loc = [1:8-11]; name = "foo"; index = 0; remote = "foo"} |}]
 
 let%expect_test "sequence_expression" =
   print_sig {|
@@ -2535,6 +2610,33 @@ let%expect_test "function_statics" =
            predicate = None};
          statics = { "x" -> ([3:4-5], (Ref LocalRef {ref_loc = [3:8-9]; index = 1})) }}
     1. Variable {id_loc = [2:6-7]; name = "x"; def = (Value (NumberLit ([2:10-12], 42., "42")))}
+  |}]
+
+let%expect_test "function_statics_conditional" =
+  print_sig {|
+    export function bar(): void { };
+    declare var b: boolean;
+    if (b) {
+      bar.x = 42;
+    }
+  |};
+  [%expect {|
+    ESModule {type_exports = [||]; exports = [|(ExportBinding 0)|];
+      info =
+      ESModuleInfo {type_export_keys = [||];
+        type_stars = []; export_keys = [|"bar"|];
+        stars = []; strict = true}}
+
+    Local defs:
+    0. FunBinding {id_loc = [1:16-19];
+         name = "bar"; async = false;
+         generator = false; fn_loc = [1:7-27];
+         def =
+         FunSig {tparams = Mono; params = [];
+           rest_param = None; this_param = None;
+           return = (Annot (Void [1:23-27]));
+           predicate = None};
+         statics = {}}
   |}]
 
 let%expect_test "function_predicates_1" =
@@ -3078,6 +3180,81 @@ let%expect_test "destruct_array_shared" =
     3. IndexP {loc = [1:20-26]; i = 2; def = 0}
     4. PropP {id_loc = [1:21-22]; name = "c"; def = 3}
     5. PropP {id_loc = [1:24-25]; name = "d"; def = 3}
+  |}]
+
+let%expect_test "tuple_annot" =
+  print_sig {|
+    export type A = [string, number];
+  |};
+  [%expect {|
+    CJSModule {type_exports = [|(ExportTypeBinding 0)|];
+      exports = None;
+      info = CJSModuleInfo {type_export_keys = [|"A"|]; type_stars = []; strict = true}}
+
+    Local defs:
+    0. TypeAlias {id_loc = [1:12-13];
+         name = "A"; tparams = Mono;
+         body =
+         (Annot
+            Tuple {loc = [1:16-32];
+              elems_rev =
+              [TupleElement {name = None;
+                 t = (Annot (Number [1:25-31]));
+                 polarity = Polarity.Neutral};
+                TupleElement {name = None;
+                  t = (Annot (String [1:17-23]));
+                  polarity = Polarity.Neutral}
+                ]})}
+  |}]
+
+let%expect_test "tuple_annot_labeled" =
+  print_sig {|
+    export type A = [foo: string, bar: number];
+  |};
+  [%expect {|
+    CJSModule {type_exports = [|(ExportTypeBinding 0)|];
+      exports = None;
+      info = CJSModuleInfo {type_export_keys = [|"A"|]; type_stars = []; strict = true}}
+
+    Local defs:
+    0. TypeAlias {id_loc = [1:12-13];
+         name = "A"; tparams = Mono;
+         body =
+         (Annot
+            Tuple {loc = [1:16-42];
+              elems_rev =
+              [TupleElement {name = (Some "bar");
+                 t = (Annot (Number [1:35-41]));
+                 polarity = Polarity.Neutral};
+                TupleElement {name = (Some "foo");
+                  t = (Annot (String [1:22-28]));
+                  polarity = Polarity.Neutral}
+                ]})}
+  |}]
+
+let%expect_test "tuple_annot_variance" =
+  print_sig {|
+    export type A = [+foo: string, -bar: number];
+  |};
+  [%expect {|
+    CJSModule {type_exports = [|(ExportTypeBinding 0)|];
+      exports = None;
+      info = CJSModuleInfo {type_export_keys = [|"A"|]; type_stars = []; strict = true}}
+
+    Local defs:
+    0. TypeAlias {id_loc = [1:12-13];
+         name = "A"; tparams = Mono;
+         body =
+         (Annot
+            Tuple {loc = [1:16-44];
+              elems_rev =
+              [TupleElement {name = (Some "bar");
+                 t = (Annot (Number [1:37-43]));
+                 polarity = Polarity.Negative};
+                TupleElement {name = (Some "foo");
+                  t = (Annot (String [1:23-29]));
+                  polarity = Polarity.Positive}
+                ]})}
   |}]
 
 let%expect_test "cycle" =
@@ -3819,7 +3996,7 @@ let%expect_test "predicate_exists" =
                    ];
                  rest_param = None; this_param = None;
                  return = (Annot (Mixed [1:37-42]));
-                 predicate = (Some ([2:2-11], (Some (ExistsP ("x", (Some [2:9-10]))))))};
+                 predicate = (Some ([2:2-11], (Some (ExistsP "x"))))};
                statics = {}})}
         |];
       info =
@@ -4663,6 +4840,23 @@ let%expect_test "enum_unknown_members" =
          members = { "A" -> [1:16-17]; "B" -> [1:19-20] };
          has_unknown_members = true} |}]
 
+let%expect_test "enum_declared" =
+  print_sig {|
+    declare export enum E { A, B };
+  |};
+  [%expect {|
+    ESModule {type_exports = [||]; exports = [|(ExportBinding 0)|];
+      info =
+      ESModuleInfo {type_export_keys = [||];
+        type_stars = []; export_keys = [|"E"|];
+        stars = []; strict = true}}
+
+    Local defs:
+    0. EnumBinding {id_loc = [1:20-21];
+         name = "E"; rep = StringRep {truthy = true};
+         members = { "A" -> [1:24-25]; "B" -> [1:27-28] };
+         has_unknown_members = false} |}]
+
 let%expect_test "enum_disabled" =
   print_sig ~enable_enums:false {|
     export enum E {}
@@ -4942,6 +5136,31 @@ let%expect_test "builtin_module_export_specifiers" =
                 ESModuleInfo {type_export_keys = [||];
                   type_stars = []; export_keys = [|"x"; "y"|];
                   stars = []; strict = true}} |}]
+
+let%expect_test "builtin_pattern" =
+  print_builtins [{|
+    const o = { p: 0 };
+    const {p} = o;
+  |}];
+  [%expect {|
+    Local defs:
+    0. Variable {id_loc = [1:6-7]; name = "o";
+         def =
+         (Value
+            ObjLit {loc = [1:10-18];
+              frozen = false; proto = None;
+              props =
+              { "p" ->
+                (ObjValueField ([1:12-13], (
+                   Value (NumberLit ([1:15-16], 0., "0"))), Polarity.Neutral)) }})}
+    1. Variable {id_loc = [2:7-8]; name = "p"; def = (Pattern 1)}
+
+    Pattern defs:
+    0. (Ref LocalRef {ref_loc = [2:12-13]; index = 0})
+
+    Patterns:
+    0. (PDef 0)
+    1. PropP {id_loc = [2:7-8]; name = "p"; def = 0} |}]
 
 let%expect_test "this_param_1" =
   print_sig {|

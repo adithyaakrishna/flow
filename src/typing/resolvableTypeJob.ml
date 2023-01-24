@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -42,7 +42,6 @@ open Constraint
    (e.g., when they are part of inferred types), they are logged; when they
    are unexpected (e.g., when they are part of annotations), they are
    converted to `any`. For more details see bindings_of_jobs.
-
 *)
 type t =
   | Binding of Type.tvar
@@ -56,7 +55,7 @@ let rec collect_of_types ?log_unresolved cx = List.fold_left (collect_of_type ?l
 
 and collect_of_type ?log_unresolved cx acc = function
   | OpenT (r, id) ->
-    let (id, (lazy constraints)) = Context.find_constraints cx id in
+    let (id, constraints) = Context.find_constraints cx id in
     if IMap.mem id acc then
       acc
     else (
@@ -128,15 +127,15 @@ and collect_of_type ?log_unresolved cx acc = function
       | Some id -> Context.find_call cx id :: ts
     in
     collect_of_types ?log_unresolved cx acc ts
-  | DefT (_, _, FunT (_, _, { params; return_t; _ })) ->
+  | DefT (_, _, FunT (_, { params; return_t; _ })) ->
     let ts = List.fold_left (fun acc (_, t) -> t :: acc) [return_t] params in
     collect_of_types ?log_unresolved cx acc ts
   | DefT (_, _, ArrT (ArrayAT (elemt, tuple_types))) ->
     let ts = Base.Option.value ~default:[] tuple_types in
     let ts = elemt :: ts in
     collect_of_types ?log_unresolved cx acc ts
-  | DefT (_, _, ArrT (TupleAT (elemt, tuple_types))) ->
-    collect_of_types ?log_unresolved cx acc (elemt :: tuple_types)
+  | DefT (_, _, ArrT (TupleAT { elem_t; elements })) ->
+    collect_of_types ?log_unresolved cx acc (elem_t :: TypeUtil.tuple_ts_of_elements elements)
   | DefT (_, _, ArrT (ROArrayAT elemt)) -> collect_of_type ?log_unresolved cx acc elemt
   | DefT
       ( _,
@@ -163,7 +162,6 @@ and collect_of_type ?log_unresolved cx acc = function
     in
     collect_of_types ?log_unresolved cx acc ts
   | DefT (_, _, PolyT { t_out = t; _ }) -> collect_of_type ?log_unresolved cx acc t
-  | BoundT _ -> acc
   (* TODO: The following kinds of types are not walked out of laziness. It's
      not immediately clear what we'd gain (or lose) by walking them. *)
   | EvalT _
@@ -195,7 +193,7 @@ and collect_of_type ?log_unresolved cx acc = function
   | ExactT (_, t)
   | DefT (_, _, TypeT (_, t))
   | DefT (_, _, ClassT t)
-  | ThisClassT (_, t, _) ->
+  | ThisClassT (_, t, _, _) ->
     collect_of_type ?log_unresolved cx acc t
   | KeysT (_, t) -> collect_of_type ?log_unresolved cx acc t
   | ShapeT (_, t) -> collect_of_type ?log_unresolved cx acc t
@@ -205,6 +203,7 @@ and collect_of_type ?log_unresolved cx acc = function
   | DefT (_, _, NumT _)
   | DefT (_, _, StrT _)
   | DefT (_, _, BoolT _)
+  | DefT (_, _, BigIntT _)
   | DefT (_, _, SymbolT)
   | DefT (_, _, VoidT)
   | DefT (_, _, NullT)
@@ -213,6 +212,7 @@ and collect_of_type ?log_unresolved cx acc = function
   | DefT (_, _, SingletonBoolT _)
   | DefT (_, _, SingletonNumT _)
   | DefT (_, _, SingletonStrT _)
+  | DefT (_, _, SingletonBigIntT _)
   | DefT (_, _, CharSetT _)
   | DefT (_, _, EnumT _)
   | DefT (_, _, EnumObjectT _)
@@ -236,7 +236,6 @@ and collect_of_destructor ?log_unresolved cx acc = function
   | OptionalIndexedAccessNonMaybeType { index = OptionalIndexedAccessTypeIndex index_type } ->
     collect_of_type ?log_unresolved cx acc index_type
   | OptionalIndexedAccessNonMaybeType { index = OptionalIndexedAccessStrLitIndex _ } -> acc
-  | Bind t -> collect_of_type ?log_unresolved cx acc t
   | ReadOnlyType -> acc
   | PartialType -> acc
   | SpreadType (_, ts, head_slice) ->
@@ -254,7 +253,8 @@ and collect_of_destructor ?log_unresolved cx acc = function
   | ReactConfigType default_props -> collect_of_type ?log_unresolved cx acc default_props
   | ReactElementPropsType
   | ReactElementConfigType
-  | ReactElementRefType ->
+  | ReactElementRefType
+  | IdxUnwrapType ->
     acc
 
 and collect_of_property ?log_unresolved cx name property acc =
@@ -295,7 +295,7 @@ and collect_of_type_map ?log_unresolved cx acc = function
 (* In some positions, like annots, we trust that tvars are 0->1. *)
 and collect_of_binding ?log_unresolved cx acc = function
   | OpenT ((_, id) as tvar) ->
-    let (id, (lazy constraints)) = Context.find_constraints cx id in
+    let (id, constraints) = Context.find_constraints cx id in
     if IMap.mem id acc then
       acc
     else (
@@ -317,7 +317,7 @@ and collect_of_binding ?log_unresolved cx acc = function
    function overloading. More uses will be added over time. *)
 and collect_of_use ?log_unresolved cx acc = function
   | UseT (_, t) -> collect_of_type ?log_unresolved cx acc t
-  | CallT (_, _, fct) ->
+  | CallT { call_action = Funcalltype fct; reason = _; use_op = _; return_hint = _ } ->
     let arg_types =
       Base.List.map
         ~f:(function
@@ -327,5 +327,5 @@ and collect_of_use ?log_unresolved cx acc = function
         fct.call_args_tlist
     in
     collect_of_types ?log_unresolved cx acc (arg_types @ [OpenT fct.call_tout])
-  | GetPropT (_, _, _, t_out) -> collect_of_type ?log_unresolved cx acc (OpenT t_out)
+  | GetPropT (_, _, _, _, t_out) -> collect_of_type ?log_unresolved cx acc (OpenT t_out)
   | _ -> acc

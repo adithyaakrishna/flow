@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -11,7 +11,6 @@
 type watchman_options = {
   debug: bool;  (** Turn on debugging messages for the file watcher *)
   defer_states: string list;  (** Defer watchman notifications while these states are asserted *)
-  survive_restarts: bool;  (** try to recover from watchman restarting *)
   sync_timeout: int option;
       (** How long to wait for the file watcher to synchronize, in milliseconds *)
 }

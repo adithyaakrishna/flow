@@ -234,4 +234,60 @@ var tests =
       (p : string); // ok
     }
   },
+
+  function() {
+    var x : {p:?string} = {p:null};
+    x.p = "xxx";
+    var {p} = x; // TODO: annot checked against type of x
+    (p : string); // ok
+  },
+
+  function() {
+    var o: { f: number, g: { h: number }} = { f: 1, g: { h: 1 } };
+    o.g.h = 2;
+    var { f, g: { h } } = o;
+    (h: 2); // ok
+  },
+
+  function() {
+    type Disjoint = {| type: "a", payload: number|} | {| type: "b", payload: string|};
+    const obj: {d: Disjoint} = (null: any);
+
+    if (obj.d.type === "a") {
+      let {d: {payload, type}} = obj;
+      (payload: number); // ok
+    }
+  },
+
+  function () {
+    type O = {a: number, b: string};
+    declare var obj: {prop: ?() => O};
+    if (obj.prop) {
+      // A naive implementation of synthesizing member expressions for recording refinements on a, b
+      // might visit obj.prop() and invalidate heap refinements multiple times.
+      // e.g.
+      // 1. obj.prop() when visiting init
+      // 2. obj.prop().a when visiting a
+      // 3. obj.prop().b when visiting b
+      // During the second and third visit, refinements on obj.prop will be invalidated,
+      // causing spurious errors on calling function that might be null or undefined.
+      const {a, b} = obj.prop(); // ok
+      (a: number); // ok
+      (b: string); // ok
+    }
+  },
+
+  function() {
+    const o: {p: string | null} = {p: null};
+    if (o.p != null || o.p != null) {
+      (o.p: string);
+    }
+  },
+
+  function() {
+    const o: {p: string | null} = {p: null};
+    if (o.p != null && o.p != null) {
+      (o.p: string);
+    }
+  }
 ];

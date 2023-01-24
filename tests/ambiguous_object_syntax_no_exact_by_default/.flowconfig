@@ -1,2 +1,4 @@
+[options]
+
 [lints]
 ambiguous-object-type=error

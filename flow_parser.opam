@@ -1,18 +1,16 @@
 opam-version: "2.0"
 name: "flow_parser"
-version: "0.168.0"
+version: "0.198.1"
 maintainer: "flow@fb.com"
 authors: ["Flow Team <flow@fb.com>"]
 homepage: "https://github.com/facebook/flow/tree/master/src/parser"
 bug-reports: "https://github.com/facebook/flow/issues"
 license: "MIT"
 
-build: [ make "-C" "src/parser" "build-parser" ]
-install: [ make "-C" "src/parser" "ocamlfind-install"]
+build: ["dune" "build" "-p" name "-j" jobs]
 depends: [
-  "ocaml" {>= "4.10.2"}
-  "ocamlfind" {build}
-  "ocamlbuild" {build}
+  "ocaml" {>= "4.14.0"}
+  "dune" {>= "3.0"}
   "ppx_deriving" {build}
   "ppx_gen_rec" {build}
   "sedlex" {>= "2.3"}

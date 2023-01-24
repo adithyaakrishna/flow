@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -102,7 +102,7 @@ let _ =
   let () = Sys_utils.set_signal Sys.sigpipe Sys.Signal_ignore in
   let () = Exception.record_backtrace true in
   let () = Random.self_init () in
-  let () = if Sys_utils.get_env "IN_FLOW_TEST" <> None then LoggingUtils.disable_logging () in
+  let () = if Utils_js.in_flow_test then LoggingUtils.disable_logging () in
   try
     Daemon.check_entry_point ();
 

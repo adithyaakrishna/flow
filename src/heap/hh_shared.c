@@ -1,5 +1,5 @@
 /*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -194,6 +194,9 @@ static int win32_getpagesize(void) {
 // represent offsets into the hash table itself.
 typedef uintnat addr_t;
 
+// A field is either an address or a tagged integer, distinguished by low bit.
+typedef uintnat field_t;
+
 typedef struct {
   /* Layout information, used by workers to create memory mappings. */
   size_t locals_bsize;
@@ -212,10 +215,25 @@ typedef struct {
 
   uintnat gc_phase;
 
+  /* When we start a GC, we record the heap pointer here. We use this to
+   * identify allocations performed during marking. These objects are not
+   * explicitly marked, but are treated as reachable during the current
+   * collection pass.
+   *
+   * This address should always fall between info->heap_init and info->heap.
+   * This invariant is set up in hh_shared_init and maintained in
+   * hh_start_cycle. */
+  addr_t gc_end;
+
   /* Bytes which are free (color=Blue). This quantity is initially 0 and
    * incremented during the GC sweep phase. The number will increase
    * monotonically until compaction, when all free space is reclaimed. */
   uintnat free_bsize;
+
+  /* Transaction counter. Entities being written by the current transaction will
+   * have an entity version >= this counter. Committed entities will have a
+   * version < this counter. */
+  intnat next_version;
 
   /* Logging level for shared memory statistics
    * 0 = nothing
@@ -242,6 +260,9 @@ typedef struct {
 
   /* The top of the heap, offset from hashtbl pointer */
   alignas(128) addr_t heap;
+
+  /* Head of the mark stack. */
+  alignas(128) uintnat mark_ptr;
 } shmem_info_t;
 
 /* Per-worker data which can be quickly updated non-atomically. Will be placed
@@ -263,9 +284,9 @@ typedef struct {
 // +-------------------------------+--------------------------------+------+--+
 // |                               |                                |      |
 // |                               |                                |      * 0-1
-// GC |                               |                                | | |
-// * 2-7 tag |                               | |                               *
-// 31-1 decompress capacity (in words)
+// |                               |                                |        GC
+// |                               |                                * 2-7 tag
+// |                               * 31-1 decompress capacity (in words)
 // * 63-32 compressed size (in words)
 //
 // For GC, to distinguish headers from (word-aligned) pointers, the least bits
@@ -283,17 +304,21 @@ typedef uintnat hh_header_t;
 typedef uintnat hh_tag_t;
 
 // Keep these in sync with "tag" type definition in sharedMem.ml
-#define Heap_string_tag 4
-#define Addr_tbl_tag 8
+#define Entity_tag 0
+#define Heap_string_tag 13
+#define Serialized_tag 20
 
 static _Bool should_scan(hh_tag_t tag) {
-  // By convention, tags below Addr_tbl_tag contain no pointers, whereas
-  // Addr_tbl_tag and above contain only pointers. We can exploit this fact to
-  // reduce pointer finding to a single branch.
+  // The zero tag represents "entities" which need to be handled specially.
+  // Callers to this function should first check for 0.
+  assert(tag != Entity_tag);
+
+  // By convention, only tags below Heap_string_tag contain pointers. We can
+  // exploit this fact to reduce pointer finding to a single branch.
   //
   // In the future, if we add different layouts with a mixture of pointers and
   // other data, scanning for pointers will probably require a jump table.
-  return tag >= Addr_tbl_tag;
+  return tag < Heap_string_tag;
 }
 
 #define NULL_ADDR 0
@@ -329,10 +354,11 @@ static _Bool should_scan(hh_tag_t tag) {
 // from other objects, so we need to look up the tag to read the size.
 
 #define Obj_tag(hd) (((hd) >> 2) & 0x3F)
-#define Obj_wosize_shift(tag) ((tag) < Heap_string_tag ? 36 : 8)
+#define Obj_wosize_shift(tag) ((tag) < Serialized_tag ? 8 : 36)
 #define Obj_wosize_tag(hd, tag) ((hd) >> Obj_wosize_shift(tag))
 #define Obj_wosize(hd) (Obj_wosize_tag(hd, Obj_tag(hd)))
 #define Obj_whsize(hd) (1 + Obj_wosize(hd))
+#define Obj_bosize(hd) (Bsize_wsize(Obj_wosize(hd)))
 #define Obj_bhsize(hd) (Bsize_wsize(Obj_whsize(hd)))
 
 // Addrs point to the object header, so field 0 is +1 word. We should consider
@@ -360,12 +386,9 @@ typedef struct {
 
 /* The hash table supports lock-free writes by performing a 16-byte CAS,
  * ensuring that the hash and address are written together atomically. */
-typedef union {
-  __int128_t value;
-  struct {
-    uint64_t hash;
-    addr_t addr;
-  };
+typedef struct {
+  uint64_t hash;
+  addr_t addr;
 } helt_t;
 
 /*****************************************************************************/
@@ -377,55 +400,20 @@ typedef union {
 #define Phase_mark 1
 #define Phase_sweep 2
 
-// The mark stack used during heap traversal for the GC's marking pass, which
-// visits every heap object once.
-//
-// When initializing the heap, we allocate stack space which is reused across
-// collections. During a marking pass, if we exceed the preallocated space, we
-// will grow the stack. If we grow the mark stack during a collection, we will
-// free that additional space at the end of the collection.
-//
 // The max size is explicit to avoid exhausting available memory in the event of
 // a programmer error. We should not hit this limit, or come close to it. It
 // might become necessary to handle a mark stack overflow without crashing, but
 // this is not implemented.
-#define MARK_STACK_INIT_SIZE 4096
-#define MARK_STACK_MAX_SIZE (1024 * 1024 * 200)
-
-// The current size of the mark stack buffer.
-static uintnat mark_stack_size = 0;
+#define MARK_STACK_INIT_SIZE 512 // 4096 KiB
+#define MARK_STACK_MAX_SIZE (MARK_STACK_INIT_SIZE << 16) // 256 MiB
 
 // Note: because collection only happens on the master process, the following
-// pointers are only initialized in the master process and will remain NULL in
-// workers.
-
-// The initial stack space, allocated at startup for the mark stack. This space
-// will persist between collections.
-static addr_t* mark_stack_init = NULL;
-
-// Base of the current mark stack. This is initially aliased to
-// mark_stack_init, but will change if the mark stack is realloced.
-static addr_t* mark_stack = NULL;
-
-// Head of the current mark stack, equal to `mark_stack` when the stack is
-// empty, adjusted during push/pop.
-static addr_t* mark_stack_ptr = NULL;
-
-// End of the current mark stack, equal to `mark_stack + mark_stack_size`, used
-// to trigger resize.
-static addr_t* mark_stack_end = NULL;
-
-// When we start a GC, we record the heap pointer here. We use this to identify
-// allocations performed during marking. These objects are not explicitly
-// marked, but are treated as reachable during the current collection pass.
-//
-// This address should always fall between info->heap_init and info->heap. This
-// invariant is set up in hh_shared_init and maintained in hh_collect_slice.
-static addr_t gc_end = NULL_ADDR;
+// values are only maintained in the master process and updates will not be
+// reflected in workers.
 
 // The marking phase treats the shared hash table as GC roots, but these are
 // marked incrementally. Because we might modify the hash table between mark
-// slices, we insert write barriers in hh_remove and hh_move.
+// slices, we insert a write barrier in hh_remove.
 static uintnat roots_ptr = 0;
 
 // Holds the current position of the sweep phase between slices.
@@ -443,6 +431,9 @@ static char* shared_mem = NULL;
 
 /* Worker-local storage is cache line aligned. */
 static local_t* locals = NULL;
+
+/* Base of the mark stack. */
+static addr_t* mark_stack = NULL;
 
 /* The hashtable containing the shared values. */
 static helt_t* hashtbl = NULL;
@@ -465,7 +456,7 @@ CAMLprim value hh_used_heap_size(value unit) {
 CAMLprim value hh_new_alloc_size(value unit) {
   CAMLparam1(unit);
   assert(info != NULL);
-  CAMLreturn(Val_long(info->heap - gc_end));
+  CAMLreturn(Val_long(info->heap - info->gc_end));
 }
 
 CAMLprim value hh_free_heap_size(value unit) {
@@ -484,6 +475,21 @@ CAMLprim value hh_log_level(value unit) {
   CAMLparam1(unit);
   assert(info != NULL);
   CAMLreturn(Val_long(info->log_level));
+}
+
+CAMLprim value hh_next_version(value unit) {
+  intnat v = 0;
+  if (info) {
+    v = info->next_version;
+  }
+  return Val_long(v);
+}
+
+CAMLprim value hh_commit_transaction(value unit) {
+  CAMLparam1(unit);
+  assert(info != NULL);
+  info->next_version += 2;
+  CAMLreturn(Val_unit);
 }
 
 CAMLprim value hh_hash_stats(value unit) {
@@ -644,18 +650,14 @@ static void raise_out_of_shared_memory(void) {
 
 #ifdef _WIN32
 
-/* Reserves memory. This is required on Windows */
-static void win_reserve(char* mem, size_t sz) {
+/* On Linux, memfd_reserve is only used to reserve memory that is mmap'd to the
+ * memfd file. On Windows, this is required. */
+static void memfd_reserve(char* base, char* mem, size_t sz) {
+  (void)base;
   if (!VirtualAlloc(mem, sz, MEM_COMMIT, PAGE_READWRITE)) {
     win32_maperr(GetLastError());
     raise_out_of_shared_memory();
   }
-}
-
-/* On Linux, memfd_reserve is only used to reserve memory that is mmap'd to the
- * memfd file. */
-static void memfd_reserve(char* mem, size_t sz) {
-  win_reserve(mem, sz);
 }
 
 #elif defined(__APPLE__)
@@ -665,15 +667,16 @@ static void memfd_reserve(char* mem, size_t sz) {
  * however it doesn't seem to work for a shm_open fd, so this function is
  * currently a no-op. This means that our OOM handling for OSX is a little
  * weaker than the other OS's */
-static void memfd_reserve(char* mem, size_t sz) {
+static void memfd_reserve(char* base, char* mem, size_t sz) {
+  (void)base;
   (void)mem;
   (void)sz;
 }
 
 #else
 
-static void memfd_reserve(char* mem, size_t sz) {
-  off_t offset = (off_t)(mem - shared_mem);
+static void memfd_reserve(char* base, char* mem, size_t sz) {
+  off_t offset = (off_t)(mem - base);
   int err;
   do {
     err = posix_fallocate(memfd, offset, sz);
@@ -692,41 +695,17 @@ static void map_info_page(int page_bsize) {
   // which is convenient to stick here, like the log level.
   assert(page_bsize >= sizeof(shmem_info_t));
   info = (shmem_info_t*)memfd_map(page_bsize);
-
-#ifdef _WIN32
-  // Memory must be reserved on Windows
-  win_reserve((char*)info, page_bsize);
-#endif
 }
 
 static void define_mappings(int page_bsize) {
   assert(info != NULL);
   size_t locals_bsize = info->locals_bsize;
-  size_t hashtbl_bsize = info->hashtbl_bsize;
-  size_t heap_bsize = info->heap_bsize;
-
+  size_t mark_stack_max_bsize = MARK_STACK_MAX_SIZE * sizeof(mark_stack[0]);
   shared_mem = memfd_map(info->shared_mem_bsize);
-
-  /* Process-local storage */
   locals = (local_t*)(shared_mem + page_bsize);
-
-  /* Hashtable */
-  hashtbl = (helt_t*)(shared_mem + page_bsize + locals_bsize);
-
-#ifdef _WIN32
-  // Memory must be reserved on Windows. Heap allocations will be reserved
-  // in hh_alloc, so we just reserve the locals and hashtbl memory here.
-  win_reserve((char*)locals, locals_bsize);
-  win_reserve((char*)hashtbl, hashtbl_bsize);
-#endif
-
-#ifdef MADV_DONTDUMP
-  // We are unlikely to get much useful information out of the shared heap in
-  // a core file. Moreover, it can be HUGE, and the extensive work done dumping
-  // it once for each CPU can mean that the user will reboot their machine
-  // before the much more useful stack gets dumped!
-  madvise(hashtbl, hashtbl_bsize + heap_bsize, MADV_DONTDUMP);
-#endif
+  mark_stack = (addr_t*)(shared_mem + page_bsize + locals_bsize);
+  hashtbl =
+      (helt_t*)(shared_mem + page_bsize + locals_bsize + mark_stack_max_bsize);
 }
 
 static value alloc_heap_bigarray(void) {
@@ -755,13 +734,14 @@ CAMLprim value hh_shared_init(value config_val, value num_workers_val) {
   size_t num_workers = Long_val(num_workers_val);
   size_t locals_bsize = CACHE_ALIGN((1 + num_workers) * sizeof(local_t));
   size_t hashtbl_slots = 1ul << Long_val(Field(config_val, 1));
+  size_t mark_stack_max_bsize = MARK_STACK_MAX_SIZE * sizeof(mark_stack[0]);
   size_t hashtbl_bsize = CACHE_ALIGN(hashtbl_slots * sizeof(helt_t));
   size_t heap_bsize = Long_val(Field(config_val, 0));
 
   /* The total size of the shared file must have space for the info page, local
-   * data, the hash table, and the heap. */
-  size_t shared_mem_bsize =
-      page_bsize + locals_bsize + hashtbl_bsize + heap_bsize;
+   * data, the mark stack, the hash table, and the heap. */
+  size_t shared_mem_bsize = page_bsize + locals_bsize + mark_stack_max_bsize +
+      hashtbl_bsize + heap_bsize;
 
   memfd_init(shared_mem_bsize);
 
@@ -770,6 +750,8 @@ CAMLprim value hh_shared_init(value config_val, value num_workers_val) {
    * workers, like the heap pointer; and (3) various configuration which is
    * conventient to stick here, like the log level. */
   map_info_page(page_bsize);
+  memfd_reserve((char*)info, (char*)info, page_bsize);
+
   info->locals_bsize = locals_bsize;
   info->hashtbl_bsize = hashtbl_bsize;
   info->heap_bsize = heap_bsize;
@@ -786,17 +768,28 @@ CAMLprim value hh_shared_init(value config_val, value num_workers_val) {
   // Initialize top heap pointers
   info->heap = info->heap_init;
 
+  // Invariant: info->heap_init <= info->gc_end <= info->heap
+  // See declaration of gc_end
+  info->gc_end = info->heap;
+
   define_mappings(page_bsize);
 
-  mark_stack_size = MARK_STACK_INIT_SIZE;
-  mark_stack_init = malloc(MARK_STACK_INIT_SIZE * sizeof(addr_t));
-  mark_stack = mark_stack_init;
-  mark_stack_ptr = mark_stack;
-  mark_stack_end = mark_stack + MARK_STACK_INIT_SIZE;
+  // Reserve memory for locals, the initial mark stack, and hashtbl.
+  // This is required on Windows.
+  memfd_reserve(shared_mem, (char*)locals, locals_bsize);
+  memfd_reserve(
+      shared_mem,
+      (char*)mark_stack,
+      MARK_STACK_INIT_SIZE * sizeof(mark_stack[0]));
+  memfd_reserve(shared_mem, (char*)hashtbl, hashtbl_bsize);
 
-  // Invariant: info->heap_init <= gc_end <= info->heap
-  // See declaration of gc_end
-  gc_end = info->heap;
+#ifdef MADV_DONTDUMP
+  // We are unlikely to get much useful information out of the shared heap in
+  // a core file. Moreover, it can be HUGE, and the extensive work done dumping
+  // it once for each CPU can mean that the user will reboot their machine
+  // before the much more useful stack gets dumped!
+  madvise(hashtbl, hashtbl_bsize + heap_bsize, MADV_DONTDUMP);
+#endif
 
 #ifndef _WIN32
   // Uninstall ocaml's segfault handler. It's supposed to throw an exception on
@@ -943,9 +936,9 @@ CAMLprim value hh_check_should_exit(value unit) {
  *
  * For snapshot-at-the-beginning, we use a Yuasa style deletion barrier. If a
  * field is modified during collection, the "old" reference is added to the mark
- * stack. The only modifications that happen during a GC pass are hh_move and
- * hh_remove. These are both only called from the main server process, which
- * means we don't need to store the mark stack in shared memory.
+ * stack. The only modification that happens during a GC pass is hh_remove,
+ * which is only called from the main server process, meaning we don't need to
+ * store the mark stack in shared memory.
  *
  * The "allocate black" strategy is a bit non-standard. Because the shared heap
  * is a bump allocator, we don't actually use the black color for new
@@ -959,57 +952,83 @@ CAMLprim value hh_check_should_exit(value unit) {
 CAMLprim value hh_start_cycle(value unit) {
   CAMLparam1(unit);
   assert(info->gc_phase == Phase_idle);
-  gc_end = info->heap;
+  info->gc_end = info->heap;
   roots_ptr = 0;
   sweep_ptr = info->heap_init;
   info->gc_phase = Phase_mark;
   CAMLreturn(Val_unit);
 }
 
+CAMLnoreturn_start static void mark_stack_overflow() CAMLnoreturn_end;
+
 static void mark_stack_overflow() {
   caml_failwith("mark_stack_resize: could not allocate space for mark stack");
 }
 
-// Mark stack starts out with some initial capacity, which grows as needed.
-static void mark_stack_resize(void) {
-  assert(mark_stack_ptr == mark_stack_end);
-
-  uintnat new_size = 2 * mark_stack_size;
-
-  // To avoid exhausting the heap in the event of a programmer error, we fail if
-  // the mark stack exceeds some fixed huge size (currently ~1.5 GB).
-  if (new_size >= MARK_STACK_MAX_SIZE)
-    mark_stack_overflow();
-
-  // Keep the initial stack, which will be restored by mark_stack_reset.
-  // Otherwise realloc, which frees the underlying memory if necessary.
-  addr_t* new_stack;
-  if (mark_stack == mark_stack_init) {
-    new_stack = malloc(new_size * sizeof(addr_t));
-    if (new_stack == NULL)
+// Check if the mark stack needs to be resized
+//
+// The mark stack has an initial size of 4KiB. When we reach the end of the mark
+// stack, we double the size until we reach the maximum size of 256MiB. Notice
+// that the capacity of the mark stack is always a power of 2.
+//
+// The expression `x & (-x)` returns the least set bit in `x`. When this number
+// is equal to `x`, we know that `x` is a power of 2.
+//
+// Thus, when the mark stack pointer is a power of 2, we know that we are at
+// capacity and need to resize. We resize by doubling the capacity.
+//
+// Note that this operation is idempotent because `memfd_reserve` is idempotent.
+static void mark_stack_try_resize(uintnat mark_ptr) {
+  if (mark_ptr > MARK_STACK_INIT_SIZE &&
+      ((mark_ptr & (-mark_ptr)) == mark_ptr)) {
+    if (mark_ptr == MARK_STACK_MAX_SIZE) {
       mark_stack_overflow();
-    memcpy(new_stack, mark_stack_init, MARK_STACK_INIT_SIZE * sizeof(addr_t));
-  } else {
-    new_stack = realloc(mark_stack, new_size * sizeof(addr_t));
-    if (new_stack == NULL)
-      mark_stack_overflow();
+    }
+    // Double the size of the mark stack by reserving `mark_ptr` amount of space
+    // starting at `mark_ptr`.
+    memfd_reserve(
+        shared_mem,
+        (char*)&mark_stack[mark_ptr],
+        mark_ptr * sizeof(mark_stack[0]));
   }
-
-  mark_stack = new_stack;
-  mark_stack_ptr = new_stack + mark_stack_size;
-  mark_stack_size = new_size;
-  mark_stack_end = mark_stack + new_size;
 }
 
-// Free any additional stack space allocated during marking. The initial stack
-// space allocation is re-used across marking passes.
-static void mark_stack_reset(void) {
-  if (mark_stack != mark_stack_init) {
-    free(mark_stack);
-    mark_stack_size = MARK_STACK_INIT_SIZE;
-    mark_stack = mark_stack_init;
-    mark_stack_ptr = mark_stack;
-    mark_stack_end = mark_stack + MARK_STACK_INIT_SIZE;
+// When an address is overwritten during the mark phase, we add the old value to
+// the mark stack. This function can be called concurrently from workers when
+// they modify the heap.
+static void write_barrier(addr_t old) {
+  if (old != NULL_ADDR && info->gc_phase == Phase_mark && old < info->gc_end) {
+    hh_header_t hd = Deref(old);
+    if (Is_white(hd)) {
+      // Color the object black. Note that two workers might both enter this
+      // branch for the same value. Both workers will color the object black and
+      // both workers will add the value to the mark stack.
+      //
+      // This is okay, because marking is idempotent.
+      Deref(old) = Black_hd(hd);
+
+      // Add to mark stack. We need a CAS here instead of simply a fetch-add
+      // because we need to know whether to resize the mark stack.
+      //
+      // We resize the mark stack at power-of-2 boundaries. Note that two
+      // workers might observe the same power-of-2 value for mark_ptr, and both
+      // try to resize. This is okay because `mark_stack_try_resize` is
+      // idempotent.
+      uintnat mark_ptr = __atomic_load_n(&info->mark_ptr, __ATOMIC_ACQUIRE);
+      while (1) {
+        mark_stack_try_resize(mark_ptr);
+        if (__atomic_compare_exchange_n(
+                &info->mark_ptr,
+                &mark_ptr,
+                mark_ptr + 1,
+                0,
+                __ATOMIC_SEQ_CST,
+                __ATOMIC_SEQ_CST)) {
+          mark_stack[mark_ptr] = old;
+          break;
+        }
+      }
+    }
   }
 }
 
@@ -1020,22 +1039,45 @@ static void mark_stack_reset(void) {
 // except we allocate white to avoid needing to sweep. Because we allocate
 // white and don't sweep these addresses, it's important that they are not
 // darkened.
-static inline void mark_slice_darken(addr_t addr) {
-  if (addr != NULL_ADDR && addr < gc_end) {
-    hh_header_t hd = Deref(addr);
+static inline void mark_slice_darken(field_t fld) {
+  if ((fld & 1) == 0 && fld != NULL_ADDR && fld < info->gc_end) {
+    hh_header_t hd = Deref(fld);
     if (Is_white(hd)) {
-      Deref(addr) = Black_hd(hd);
-      if (mark_stack_ptr == mark_stack_end) {
-        mark_stack_resize();
-      }
-      *mark_stack_ptr++ = addr;
+      Deref(fld) = Black_hd(hd);
+      uintnat mark_ptr = info->mark_ptr;
+      mark_stack_try_resize(mark_ptr);
+      mark_stack[mark_ptr] = fld;
+      info->mark_ptr = mark_ptr + 1;
     }
+  }
+}
+
+// Entities have a committed value and potentially a "latest" value which is
+// being written by the current transaction. There are two cases:
+//
+// 1. entity_version < next_version
+//
+//    The data at `entity_version & 1` is the committed value and is reachable.
+//    The other slot is unreachable.
+//
+// 2. entity_version >= next_version
+//
+//    The data at `entity_version & 1` is the latest value and is reachable. The
+//    other slot is the committed and is also reachable.
+static void mark_entity(addr_t v, intnat next_version) {
+  intnat entity_version = Deref(Obj_field(v, 2));
+  mark_slice_darken(Deref(Obj_field(v, entity_version & 1)));
+  if (entity_version >= next_version) {
+    mark_slice_darken(Deref(Obj_field(v, ~entity_version & 1)));
   }
 }
 
 // Perform a bounded amount of marking work, incrementally. During the marking
 // phase, this function is called repeatedly until marking is complete. Once
 // complete, this function will transition to the sweep phase.
+//
+// This function will mark at most `work` words before returning. This includes
+// the hash table and heap.
 CAMLprim value hh_mark_slice(value work_val) {
   CAMLparam1(work_val);
   assert(info->gc_phase == Phase_mark);
@@ -1052,6 +1094,7 @@ CAMLprim value hh_mark_slice(value work_val) {
 
   intnat work = Long_val(work_val);
   intnat hashtbl_slots = info->hashtbl_slots;
+  intnat next_version = info->next_version;
 
   addr_t v;
   hh_header_t hd;
@@ -1067,19 +1110,26 @@ CAMLprim value hh_mark_slice(value work_val) {
   // Because roots are colored gray but not added to the mark stack, also walk
   // the heap to find marked roots.
   while (work > 0) {
-    if (v == NULL_ADDR && mark_stack_ptr > mark_stack) {
-      v = *--mark_stack_ptr;
+    if (v == NULL_ADDR && info->mark_ptr > 0) {
+      v = mark_stack[--info->mark_ptr];
+      work--; // header word
     }
     if (v != NULL_ADDR) {
       hd = Deref(v);
       tag = Obj_tag(hd);
       size = Obj_wosize_tag(hd, tag);
-      if (should_scan(tag)) {
+      if (tag == Entity_tag) {
+        mark_entity(v, next_version);
+        v = NULL_ADDR;
+        start = 0;
+        work -= size;
+      } else if (should_scan(tag)) {
         // Avoid scanning large objects all at once
         end = start + work;
         if (size < end) {
           end = size;
         }
+        work -= end - start;
         for (i = start; i < end; i++) {
           mark_slice_darken(Deref(Obj_field(v, i)));
         }
@@ -1093,15 +1143,14 @@ CAMLprim value hh_mark_slice(value work_val) {
         }
       } else {
         v = NULL_ADDR;
+        work -= size;
       }
-      work--;
     } else if (roots_ptr < hashtbl_slots) {
       // Visit roots in shared hash table
       mark_slice_darken(hashtbl[roots_ptr++].addr);
       work--;
     } else {
       // Done marking, transition to sweep phase.
-      mark_stack_reset();
       info->gc_phase = Phase_sweep;
       break;
     }
@@ -1123,9 +1172,10 @@ CAMLprim value hh_sweep_slice(value work_val) {
   intnat work = Long_val(work_val);
 
   while (work > 0) {
-    if (sweep_ptr < gc_end) {
+    if (sweep_ptr < info->gc_end) {
       uintnat hd = Deref(sweep_ptr);
-      uintnat bhsize = Obj_bhsize(hd);
+      uintnat whsize = Obj_whsize(hd);
+      uintnat bhsize = Bsize_wsize(whsize);
       switch (Color_hd(hd)) {
         case Color_white:
           Deref(sweep_ptr) = Blue_hd(hd);
@@ -1138,7 +1188,7 @@ CAMLprim value hh_sweep_slice(value work_val) {
           break;
       }
       sweep_ptr += bhsize;
-      work--;
+      work -= whsize;
     } else {
       // Done sweeping
       info->gc_phase = Phase_idle;
@@ -1226,22 +1276,32 @@ CAMLprim value hh_sweep_slice(value work_val) {
 // | X |<--| * |<--| * |
 // +---+   +---+   +---+
 static void gc_thread(addr_t p) {
-  if (Deref(p) == NULL_ADDR) {
-    return;
+  field_t q = Deref(p);
+  if ((q & 1) == 0 && q != NULL_ADDR) {
+    Deref(p) = Deref(q);
+    Deref(q) = p;
   }
-  uintnat q = Deref(p);
-  Deref(p) = Deref(q);
-  Deref(q) = p;
+}
+
+// See comment above `mark_entity`
+static void gc_scan_entity(addr_t v, intnat next_version) {
+  intnat entity_version = Deref(Obj_field(v, 2));
+  gc_thread(Obj_field(v, entity_version & 1));
+  if (entity_version >= next_version) {
+    gc_thread(Obj_field(v, ~entity_version & 1));
+  }
 }
 
 // As we walk the heap, we must be sure to thread every pointer to live data, as
 // any live object may be relocated.
-static void gc_scan(addr_t addr) {
-  hh_header_t hd = Deref(addr);
+static void gc_scan(addr_t v, intnat next_version) {
+  hh_header_t hd = Deref(v);
   hh_tag_t tag = Obj_tag(hd);
-  if (should_scan(tag)) {
+  if (tag == Entity_tag) {
+    gc_scan_entity(v, next_version);
+  } else if (should_scan(tag)) {
     for (int i = 0; i < Obj_wosize_tag(hd, tag); i++) {
-      gc_thread(Obj_field(addr, i));
+      gc_thread(Obj_field(v, i));
     }
   }
 }
@@ -1270,6 +1330,7 @@ CAMLprim value hh_compact(value unit) {
   assert(info->gc_phase == Phase_idle);
 
   intnat hashtbl_slots = info->hashtbl_slots;
+  intnat next_version = info->next_version;
 
   // Step 1: Scan the root set, threading any pointers to the heap. The
   // threading performed during this step will be unthreaded in the next step,
@@ -1313,7 +1374,7 @@ CAMLprim value hh_compact(value unit) {
       gc_update(src, dst);
       hd = Deref(src);
       size = Obj_bhsize(hd);
-      gc_scan(src);
+      gc_scan(src, next_version);
       dst += size;
     }
     src += size;
@@ -1341,7 +1402,27 @@ CAMLprim value hh_compact(value unit) {
       gc_update(src, dst);
       hd = Deref(src);
       size = Obj_bhsize(hd);
-      memmove(Ptr_of_addr(dst), Ptr_of_addr(src), size);
+      if (Obj_tag(hd) == Entity_tag) {
+        // Move entities manually, resetting the entity version to 0 and writing
+        // the previous entity data to the correct offset. If the entity version
+        // is >= the next version, that means we're compacting after a canceled
+        // recheck, so we must preserve the committed and latest data.
+        intnat v = Deref(Obj_field(src, 2));
+        addr_t data0 = Deref(Obj_field(src, v & 1));
+        addr_t data1 = NULL_ADDR;
+        if (v >= next_version) {
+          data1 = Deref(Obj_field(src, ~v & 1));
+          v = 2;
+        } else {
+          v = 0;
+        }
+        Deref(dst) = hd;
+        Deref(Obj_field(dst, 0)) = data0;
+        Deref(Obj_field(dst, 1)) = data1;
+        Deref(Obj_field(dst, 2)) = v;
+      } else {
+        memmove(Ptr_of_addr(dst), Ptr_of_addr(src), size);
+      }
       dst += size;
     }
     src += size;
@@ -1357,11 +1438,15 @@ CAMLprim value hh_compact(value unit) {
 
   info->heap = dst;
 
-  // Invariant: info->heap_init <= gc_end <= info->heap
+  // Invariant: info->heap_init <= info->gc_end <= info->heap
   // See declaration of gc_end
-  gc_end = dst;
+  info->gc_end = dst;
 
   info->free_bsize = 0;
+
+  // All live entities have been reset to version 0, so we can also reset the
+  // global version counter.
+  info->next_version = 2;
 
   CAMLreturn(Val_unit);
 }
@@ -1379,12 +1464,14 @@ static void raise_heap_full(void) {
 /*****************************************************************************/
 
 static addr_t hh_alloc(size_t wsize) {
+  if (wsize == 0)
+    return info->heap;
   size_t slot_size = Bsize_wsize(wsize);
   addr_t addr = __sync_fetch_and_add(&info->heap, slot_size);
   if (addr + slot_size > info->heap_max) {
     raise_heap_full();
   }
-  memfd_reserve(Ptr_of_addr(addr), slot_size);
+  memfd_reserve(shared_mem, Ptr_of_addr(addr), slot_size);
   return addr;
 }
 
@@ -1523,79 +1610,57 @@ static void raise_hash_table_full(void) {
 /* Adds a key value to the hashtable. This code is perf sensitive, please
  * check the perf before modifying.
  *
- * Returns the number of bytes allocated into the shared heap, or a negative
- * number if nothing no new memory was allocated.
+ * Returns the address associated with this key in the hash table, which may not
+ * be the same as the address passed in by the caller.
  */
 /*****************************************************************************/
 CAMLprim value hh_add(value key, value addr) {
   CAMLparam2(key, addr);
   check_should_exit();
 
-  helt_t elt;
-  elt.hash = get_hash(key);
-  elt.addr = Long_val(addr);
+  uint64_t elt_hash = get_hash(key);
+  addr_t elt_addr = Long_val(addr);
 
   size_t hashtbl_slots = info->hashtbl_slots;
-  unsigned int slot = elt.hash & (hashtbl_slots - 1);
-  unsigned int init_slot = slot;
+  size_t slot = elt_hash & (hashtbl_slots - 1);
+  size_t init_slot = slot;
 
   while (1) {
-    uint64_t slot_hash = hashtbl[slot].hash;
+    uint64_t old_hash = __atomic_load_n(&hashtbl[slot].hash, __ATOMIC_ACQUIRE);
 
-    if (slot_hash == elt.hash) {
-      // This value has already been been written to this slot, except that the
-      // value may have been deleted. Deleting a slot leaves the hash in place
-      // but replaces the addr field with NULL_ADDR. In this case, we can re-use
-      // the slot by writing the new address into.
-      //
-      // Remember that only reads and writes can happen concurrently, so we
-      // don't need to worry about concurrent deletes.
-
-      if (hashtbl[slot].addr == NULL_ADDR) {
-        // Two threads may be racing to write this value, so try to grab the
-        // slot atomically.
-        if (__sync_bool_compare_and_swap(
-                &hashtbl[slot].addr, NULL_ADDR, elt.addr)) {
-          __sync_fetch_and_add(&info->hcounter_filled, 1);
-        }
-      }
-
-      break;
+    // If this slot looks free, try to take it. If we are racing with another
+    // thread and lose, the CAS operation will write the current value of the
+    // hash slot into `old_hash`.
+    if (old_hash == 0 &&
+        __atomic_compare_exchange_n(
+            &hashtbl[slot].hash,
+            &old_hash,
+            elt_hash,
+            0, /* strong */
+            __ATOMIC_SEQ_CST,
+            __ATOMIC_SEQ_CST)) {
+      __atomic_fetch_add(&info->hcounter, 1, __ATOMIC_RELAXED);
+      old_hash = elt_hash; // Try to take the addr slot next
     }
 
-    if (slot_hash == 0) {
-      helt_t old;
-
-      // This slot is free, but two threads may be racing to write to this slot,
-      // so try to grab the slot atomically. Note that this is a 16-byte CAS
-      // writing both the hash and the address at the same time. We expect the
-      // slot to contain `0`. If that's the case, `success == true`; otherwise,
-      // whatever data was in the slot at the time of the CAS will be stored in
-      // `old`.
-      old.value = 0;
-      _Bool success = __atomic_compare_exchange(
-          /* ptr */ &hashtbl[slot].value,
-          /* expected */ &old.value,
-          /* desired */ &elt.value,
-          /* weak */ 0,
-          /* success_memorder */ __ATOMIC_SEQ_CST,
-          /* failure_memorder */ __ATOMIC_SEQ_CST);
-
-      if (success) {
-        // The slot was still empty when we tried to CAS, meaning we
-        // successfully grabbed the slot.
-        uint64_t size = __sync_fetch_and_add(&info->hcounter, 1);
-        __sync_fetch_and_add(&info->hcounter_filled, 1);
-        assert(size < hashtbl_slots); // sanity check
-        break;
+    if (old_hash == elt_hash) {
+      // Try to acquire the addr slot if needed. If the slot is already taken or
+      // we lose a race to acquire it, we want to return the value of the addr
+      // slot to the caller.
+      addr_t old_addr = __atomic_load_n(&hashtbl[slot].addr, __ATOMIC_ACQUIRE);
+      if (old_addr == NULL_ADDR &&
+          __atomic_compare_exchange_n(
+              &hashtbl[slot].addr,
+              &old_addr,
+              elt_addr,
+              0, /* strong */
+              __ATOMIC_SEQ_CST,
+              __ATOMIC_SEQ_CST)) {
+        __atomic_fetch_add(&info->hcounter_filled, 1, __ATOMIC_RELAXED);
+      } else {
+        addr = Val_long(old_addr);
       }
-
-      if (old.hash == elt.hash) {
-        // The slot was non-zero, so we failed to grab the slot. However, the
-        // thread which won the race wrote the value we were trying to write,
-        // meaning out work is done.
-        break;
-      }
+      break;
     }
 
     slot = (slot + 1) & (hashtbl_slots - 1);
@@ -1605,7 +1670,7 @@ CAMLprim value hh_add(value key, value addr) {
     }
   }
 
-  CAMLreturn(Val_unit);
+  CAMLreturn(addr);
 }
 
 /*****************************************************************************/
@@ -1613,20 +1678,17 @@ CAMLprim value hh_add(value key, value addr) {
  * is either free or points to the key.
  */
 /*****************************************************************************/
-static unsigned int find_slot(value key) {
+static size_t find_slot(value key, helt_t* elt) {
   size_t hashtbl_slots = info->hashtbl_slots;
   uint64_t hash = get_hash(key);
-  unsigned int slot = hash & (hashtbl_slots - 1);
-  unsigned int init_slot = slot;
+  size_t slot = hash & (hashtbl_slots - 1);
+  size_t init_slot = slot;
   while (1) {
-    if (hashtbl[slot].hash == hash) {
-      return slot;
-    }
-    if (hashtbl[slot].hash == 0) {
+    *elt = hashtbl[slot];
+    if (elt->hash == hash || elt->hash == 0) {
       return slot;
     }
     slot = (slot + 1) & (hashtbl_slots - 1);
-
     if (slot == init_slot) {
       raise_hash_table_full();
     }
@@ -1643,8 +1705,9 @@ static unsigned int find_slot(value key) {
 CAMLprim value hh_mem(value key) {
   CAMLparam1(key);
   check_should_exit();
-  helt_t elt = hashtbl[find_slot(key)];
-  CAMLreturn(Val_bool(elt.hash == get_hash(key) && elt.addr != NULL_ADDR));
+  helt_t elt;
+  find_slot(key, &elt);
+  CAMLreturn(Val_bool(elt.hash != 0 && elt.addr != NULL_ADDR));
 }
 
 /*****************************************************************************/
@@ -1678,9 +1741,10 @@ CAMLprim value hh_get(value key) {
   CAMLparam1(key);
   check_should_exit();
 
-  unsigned int slot = find_slot(key);
-  assert(hashtbl[slot].hash == get_hash(key));
-  CAMLreturn(Val_long(hashtbl[slot].addr));
+  helt_t elt;
+  find_slot(key, &elt);
+
+  CAMLreturn(Val_long(elt.hash == 0 ? NULL_ADDR : elt.addr));
 }
 
 /*****************************************************************************/
@@ -1694,59 +1758,25 @@ CAMLprim value hh_get_size(value addr_val) {
 }
 
 /*****************************************************************************/
-/* Moves the data associated to key1 to key2.
- * key1 must be present.
- * key2 must be free.
- * Only the master can perform this operation.
- */
-/*****************************************************************************/
-CAMLprim value hh_move(value key1, value key2) {
-  CAMLparam2(key1, key2);
-  unsigned int slot1 = find_slot(key1);
-  unsigned int slot2 = find_slot(key2);
-
-  assert_master();
-  assert(hashtbl[slot1].hash == get_hash(key1));
-  assert(hashtbl[slot2].addr == NULL_ADDR);
-
-  // We are taking up a previously empty slot. Let's increment the counter.
-  // hcounter_filled doesn't change, since slot1 becomes empty and slot2 becomes
-  // filled.
-  if (hashtbl[slot2].hash == 0) {
-    info->hcounter += 1;
-  }
-
-  // GC write barrier
-  if (info->gc_phase == Phase_mark) {
-    mark_slice_darken(hashtbl[slot1].addr);
-  }
-
-  hashtbl[slot2].hash = get_hash(key2);
-  hashtbl[slot2].addr = hashtbl[slot1].addr;
-  hashtbl[slot1].addr = NULL_ADDR;
-  CAMLreturn(Val_unit);
-}
-
-/*****************************************************************************/
 /* Removes a key from the hash table.
  * Only the master can perform this operation.
  */
 /*****************************************************************************/
 CAMLprim value hh_remove(value key) {
   CAMLparam1(key);
-  unsigned int slot = find_slot(key);
-
   assert_master();
-  assert(hashtbl[slot].hash == get_hash(key));
-  assert(hashtbl[slot].addr != NULL_ADDR);
 
-  // GC write barrier
-  if (info->gc_phase == Phase_mark) {
-    mark_slice_darken(hashtbl[slot].addr);
+  helt_t elt;
+  size_t slot = find_slot(key, &elt);
+  if (elt.hash != 0 && elt.addr != NULL_ADDR) {
+    // GC write barrier
+    if (info->gc_phase == Phase_mark) {
+      mark_slice_darken(elt.addr);
+    }
+    hashtbl[slot].addr = NULL_ADDR;
+    info->hcounter_filled -= 1;
   }
 
-  hashtbl[slot].addr = NULL_ADDR;
-  info->hcounter_filled -= 1;
   CAMLreturn(Val_unit);
 }
 
@@ -1801,23 +1831,115 @@ CAMLprim value hh_read_string(value addr, value wsize) {
   CAMLreturn(s);
 }
 
-/* Iterates the shared hash table looking for heap values with a given tag. The
- * tag must correspond to a serialized OCaml value, which is deserialized and
- * passed to the callback function. */
-CAMLprim value hh_iter_serialized(value f, value filter_tag_val) {
-  CAMLparam2(f, filter_tag_val);
-  CAMLlocal1(x);
-  intnat hashtbl_slots = info->hashtbl_slots;
-  for (intnat i = 0; i < hashtbl_slots; i++) {
-    addr_t addr = hashtbl[i].addr;
-    if (addr != NULL_ADDR) {
-      hh_header_t hd = Deref(addr);
-      int tag = (hd >> 2) & 0x3F;
-      if (tag == Long_val(filter_tag_val)) {
-        x = hh_deserialize(Val_long(addr));
-        caml_callback(f, x);
-      }
-    }
+static size_t hh_string_len(addr_t addr, char** ptr) {
+  *ptr = Ptr_of_addr(Obj_field(addr, 0));
+  size_t tmp = Obj_bosize(Deref(addr)) - 1;
+  return tmp - (*ptr)[tmp];
+}
+
+CAMLprim value hh_compare_string(value addr1_val, value addr2_val) {
+  if (addr1_val == addr2_val)
+    return Val_int(0);
+  char *ptr1, *ptr2;
+  size_t len1 = hh_string_len(Long_val(addr1_val), &ptr1);
+  size_t len2 = hh_string_len(Long_val(addr2_val), &ptr2);
+  int res = memcmp(ptr1, ptr2, len1 <= len2 ? len1 : len2);
+  return Val_int(res ? res : len1 - len2);
+}
+
+CAMLprim value hh_entity_advance(value entity_val, value data_val) {
+  CAMLparam2(entity_val, data_val);
+  addr_t entity = Long_val(entity_val);
+  addr_t data = Long_val(data_val);
+
+  intnat next_version = info->next_version;
+  intnat entity_version_fld = Obj_field(entity, 2);
+  intnat entity_version = Deref(entity_version_fld);
+  intnat slot = entity_version & 1;
+
+  if (entity_version < next_version) {
+    // By updating the version, we are doing a kind of deferred logical deletion
+    // of the committed data. Once we commit this transaction, the data in
+    // `slot` will no longer be reachable.
+    write_barrier(Deref(Obj_field(entity, slot)));
+    slot = 1 - slot;
+    Deref(entity_version_fld) = next_version | slot;
   }
+
+  Deref(Obj_field(entity, slot)) = data;
+
   CAMLreturn(Val_unit);
+}
+
+CAMLprim value hh_load_acquire(value addr_val) {
+  int64_t* ptr = (int64_t*)Ptr_of_addr(Long_val(addr_val));
+  return __atomic_load_n(ptr, __ATOMIC_ACQUIRE);
+}
+
+CAMLprim value hh_store_release(value addr_val, int64_t v) {
+  int64_t* ptr = (int64_t*)Ptr_of_addr(Long_val(addr_val));
+  __atomic_store_n(ptr, v, __ATOMIC_RELEASE);
+  return Val_unit;
+}
+
+CAMLprim value hh_compare_exchange(
+    value weak_val,
+    value addr_val,
+    int64_t expected,
+    int64_t desired) {
+  int64_t* ptr = (int64_t*)Ptr_of_addr(Long_val(addr_val));
+  return Val_bool(__atomic_compare_exchange_n(
+      ptr,
+      &expected,
+      desired,
+      Bool_val(weak_val),
+      __ATOMIC_SEQ_CST,
+      __ATOMIC_SEQ_CST));
+}
+
+CAMLprim value hh_compare_modify_addr(
+    value weak_val,
+    value addr_val,
+    value expected_val,
+    int64_t desired) {
+  CAMLparam3(weak_val, addr_val, expected_val);
+  int64_t* ptr = (int64_t*)Ptr_of_addr(Long_val(addr_val));
+  int64_t expected = Long_val(expected_val);
+  int success = __atomic_compare_exchange_n(
+      ptr,
+      &expected,
+      desired,
+      Bool_val(weak_val),
+      __ATOMIC_SEQ_CST,
+      __ATOMIC_SEQ_CST);
+  if (success) {
+    write_barrier(expected);
+  }
+  CAMLreturn(Val_bool(success));
+}
+
+CAMLprim value hh_load_acquire_byte(value addr_val) {
+  return caml_copy_int64(hh_load_acquire(addr_val));
+}
+
+CAMLprim value hh_store_release_byte(value addr_val, value v) {
+  return hh_store_release(addr_val, Int64_val(v));
+}
+
+CAMLprim value hh_compare_exchange_byte(
+    value weak_val,
+    value addr_val,
+    value expected_val,
+    value desired_val) {
+  return hh_compare_exchange(
+      weak_val, addr_val, Int64_val(expected_val), Int64_val(desired_val));
+}
+
+CAMLprim value hh_compare_modify_addr_byte(
+    value weak_val,
+    value addr_val,
+    value expected_val,
+    value desired_val) {
+  return hh_compare_modify_addr(
+      weak_val, addr_val, expected_val, Int64_val(desired_val));
 }

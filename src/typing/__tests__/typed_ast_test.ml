@@ -1,196 +1,115 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 open OUnit2
-module File_sig = File_sig.With_Loc
-module Env = Env.Env
-include Type_inference_js.Make_Inference (Env)
 
 (* pretty much copied from Flow_dot_js *)
 let metadata =
   {
-    Context.checked (* local *) = true;
-    munge_underscores = false;
-    verbose = None;
+    (* local *)
+    Context.checked = true;
+    include_suppressions = false;
     jsx = Options.Jsx_react;
+    munge_underscores = false;
     strict = false;
     strict_local = false;
-    include_suppressions = false;
+    verbose = None;
     (* global *)
     any_propagation = true;
     automatic_require_default = false;
     babel_loose_array_spread = false;
-    max_literal_length = 100;
+    conditional_type = false;
+    cycle_errors = false;
+    cycle_errors_includes = [];
     enable_const_params = false;
     enable_enums = true;
     enable_relay_integration = false;
-    env_mode = Options.ClassicEnv [];
-    env_mode_constrain_write_dirs = [];
     enforce_strict_call_arity = true;
-    enforce_local_inference_annotations = false;
-    local_inference_annotation_dirs = [];
-    enforce_this_annotations = false;
-    experimental_infer_indexers = false;
+    inference_mode = Options.LTI;
+    inference_mode_lti_includes = [];
     exact_by_default = false;
     facebook_fbs = None;
     facebook_fbt = None;
     facebook_module_interop = false;
     haste_module_ref_prefix = None;
     ignore_non_literal_requires = false;
+    max_literal_length = 100;
     max_trace_depth = 0;
     max_workers = 0;
+    missing_module_generators = [];
+    array_literal_providers = false;
+    array_literal_providers_includes = [];
     react_runtime = Options.ReactRuntimeClassic;
     react_server_component_exts = SSet.empty;
     recursion_limit = 10000;
     relay_integration_excludes = [];
     relay_integration_module_prefix = None;
     relay_integration_module_prefix_includes = [];
-    statement_reorder_checking = Options.Lexical;
     root = Path.dummy_path;
     run_post_inference_implicit_instantiation = false;
+    enable_post_inference_targ_widened_check = false;
+    save_implicit_instantiation_results = false;
     strict_es6_import_export = false;
     strict_es6_import_export_excludes = [];
     strip_root = true;
     suppress_types = SSet.empty;
     trust_mode = Options.NoTrust;
-    type_asserts = false;
-    cycle_errors = false;
   }
 
 (* somewhat copied from Flow_dot_js *)
 let parse_content file content =
   let parse_options =
-    Some
-      Parser_env.
-        {
-          enums = true;
-          esproposal_class_instance_fields = true;
-          esproposal_class_static_fields = true;
-          esproposal_decorators = true;
-          esproposal_export_star_as = true;
-          esproposal_optional_chaining = true;
-          esproposal_nullish_coalescing = true;
-          types = true;
-          use_strict = false;
-        }
-      
+    Some { Parser_env.enums = true; esproposal_decorators = true; types = true; use_strict = false }
   in
 
   let (ast, _parse_errors) =
     Parser_flow.program_file ~fail:false ~parse_options content (Some file)
   in
-  match File_sig.program ~ast ~opts:File_sig.default_opts with
-  | Ok (fsig, _) -> Ok (ast, fsig)
-  | Error e -> Error e
-
-(* copied from Type_inference_js *)
-(* TODO: consider whether require tvars are necessary, and if not, take this out *)
-let add_require_tvars =
-  let add cx desc loc =
-    let loc = ALoc.of_loc loc in
-    let reason = Reason.mk_reason desc loc in
-    let id = Tvar.mk_no_wrap cx reason in
-    Context.add_require cx loc (reason, id)
-  in
-  let add_decl cx m_name desc loc =
-    (* TODO: Imports within `declare module`s can only reference other `declare
-       module`s (for now). This won't fly forever so at some point we'll need to
-       move `declare module` storage into the modulemap just like normal modules
-       and merge them as such. *)
-    let loc = ALoc.of_loc loc in
-    let reason = Reason.mk_reason desc loc in
-    let tvar = Flow_js.get_builtin_tvar cx m_name reason in
-    Context.add_require cx loc (reason, tvar)
-  in
-  fun cx file_sig ->
-    File_sig.(
-      SMap.iter
-        (fun mref locs ->
-          let desc = Reason.RCustom mref in
-          Nel.iter (add cx desc) locs)
-        (require_loc_map file_sig.module_sig);
-      SMap.iter
-        (fun _ (_, module_sig) ->
-          SMap.iter
-            (fun mref locs ->
-              let m_name = Reason.internal_module_name mref in
-              let desc = Reason.RCustom mref in
-              Nel.iter (add_decl cx m_name desc) locs)
-            (require_loc_map module_sig))
-        file_sig.declare_modules
-    )
+  let (file_sig, _) = File_sig.With_Loc.program ~ast ~opts:File_sig.With_Loc.default_opts in
+  (ast, file_sig)
 
 let before_and_after_stmts file_name =
   let content = Sys_utils.cat file_name in
   let file_key = File_key.LibFile file_name in
-  match parse_content file_key content with
-  | Error e -> Error e
-  | Ok ((_, { Flow_ast.Program.statements = stmts; _ }), file_sig) ->
-    (* Loading the entire libdefs here would be overkill, but the typed_ast tests do use Object
-     * in a few tests. In order to avoid EBuiltinLookupFailed errors with an empty source location,
-     * we manually add "Object" -> Any into the builtins map. We use the UnresolvedName any type
-     * to avoid any "Any value used as type" errors that may otherwise appear *)
-    let master_cx = Context.empty_master_cx () in
-    let () =
-      let reason =
-        let loc = ALoc.none in
-        let desc = Reason.RCustom "Explicit any used in type_ast tests" in
-        Reason.mk_reason desc loc
-      in
-      Builtins.set_builtin
-        ~flow_t:(fun _ -> ())
-        master_cx.Context.builtins
-        (Reason.OrdinaryName "Object")
-        (Type.AnyT (reason, Type.AnyError (Some Type.UnresolvedName)))
+  let (((_, { Flow_ast.Program.statements = stmts; _ }) as ast), file_sig) =
+    parse_content file_key content
+  in
+  (* Loading the entire libdefs here would be overkill, but the typed_ast tests do use Object
+   * in a few tests. In order to avoid EBuiltinLookupFailed errors with an empty source location,
+   * we manually add "Object" -> Any into the builtins map. We use the UnresolvedName any type
+   * to avoid any "Any value used as type" errors that may otherwise appear *)
+  let master_cx = Context.empty_master_cx () in
+  let () =
+    let reason =
+      let loc = ALoc.none in
+      let desc = Reason.RCustom "Explicit any used in type_ast tests" in
+      Reason.mk_reason desc loc
     in
-    let cx =
-      let aloc_table = lazy (ALoc.empty_table file_key) in
-      let ccx = Context.(make_ccx master_cx) in
-      Context.make
-        ccx
-        metadata
-        file_key
-        aloc_table
-        (Reason.OrdinaryName Files.lib_module_ref)
-        Context.Checking
-    in
-    add_require_tvars cx file_sig;
-    let module_scope = Scope.fresh () in
-    Env.init_env cx module_scope;
-    let stmts = Base.List.map ~f:Ast_loc_utils.loc_to_aloc_mapper#statement stmts in
-    let t_stmts =
-      try
-        Abnormal.try_with_abnormal_exn
-          ~f:(fun _ ->
-            Statement.toplevel_decls cx stmts;
-            Statement.Toplevels.toplevels Statement.statement cx stmts)
-          ~on_abnormal_exn:(function
-            | (Abnormal.Stmts t_stmts, _) -> t_stmts
-            | (Abnormal.Stmt t_stmt, _) -> [t_stmt]
-            | (Abnormal.Expr (annot, t_expr), _) ->
-              [
-                ( annot,
-                  Flow_ast.Statement.Expression
-                    {
-                      Flow_ast.Statement.Expression.expression = t_expr;
-                      directive = None;
-                      comments = None;
-                    }
-                );
-              ])
-          ()
-      with
-      | e ->
-        let e = Exception.wrap e in
-        let message = Exception.get_ctor_string e in
-        let stack = Exception.get_backtrace_string e in
-        assert_failure (Utils_js.spf "Exception: %s\nStack:\n%s\n" message stack)
-    in
-    Ok (stmts, t_stmts)
+    Builtins.set_builtin
+      ~flow_t:(fun _ -> ())
+      master_cx.Context.builtins
+      (Reason.OrdinaryName "Object")
+      (Type.AnyT (reason, Type.AnyError (Some Type.UnresolvedName)))
+  in
+  let cx =
+    let aloc_table = lazy (ALoc.empty_table file_key) in
+    let ccx = Context.(make_ccx master_cx) in
+    Context.make ccx metadata file_key aloc_table Context.Checking
+  in
+  let stmts = Base.List.map ~f:Ast_loc_utils.loc_to_aloc_mapper#statement stmts in
+  let (_, t_stmts) =
+    Type_inference_js.infer_lib_file
+      cx
+      ast
+      ~exclude_syms:(NameUtils.Set.singleton (Reason.OrdinaryName "Object"))
+      ~file_sig:(File_sig.abstractify_locs file_sig)
+      ~lint_severities:LintSettings.empty_severities
+  in
+  (stmts, t_stmts)
 
 class ['a, 'b] loc_none_mapper =
   object
@@ -211,10 +130,9 @@ class aloc_mapper =
   end
 
 let diff_dir =
-  let tmp_dir = FlowConfig.temp_dir FlowConfig.empty_config in
   Random.self_init ();
   let extension = Printf.sprintf "typed_ast_test_%d" (Random.int 0x3FFFFFFF) in
-  Filename.concat tmp_dir extension
+  Filename.concat Server_files_js.default_temp_dir extension
 
 let system_diff ~f prefix =
   let dump_stmts filename stmts =
@@ -304,18 +222,17 @@ let check_structural_equality relative_path file_name stmts1 stmts2 =
   assert_equal ~pp_diff ~msg stmts1 stmts2
 
 let test_case relative_path file_name _ =
-  match before_and_after_stmts file_name with
-  | Ok (s, s') -> check_structural_equality relative_path file_name s s'
-  | Error (File_sig.IndeterminateModuleType _) -> ()
+  let (s, s') = before_and_after_stmts file_name in
+  check_structural_equality relative_path file_name s s'
 
 (* This list includes files for which the produced Typed AST differs in structure
  * from the parsed AST. *)
-let blocklist = SSet.of_list ["invariant_reachability/index.js"; "return/implicit_void.js"]
+let blocklist =
+  SSet.of_list
+    ["invariant_reachability/index.js"; "return/implicit_void.js"; "sealed_tvars/abnormal.js"]
 
-let tests =
-  let relative_test_dir = "flow/tests" in
-  let root = Base.Option.value_exn (Sys_utils.realpath relative_test_dir) in
-  let files = CommandUtils.expand_file_list [relative_test_dir] in
+let tests root =
+  let files = CommandUtils.expand_file_list [root] in
   let tests =
     let slash_regex = Str.regexp_string "/" in
     SSet.fold
@@ -327,8 +244,34 @@ let tests =
           let test_name =
             relative_path |> Str.global_replace slash_regex "_" |> Filename.chop_extension
           in
-          (test_name >:: test_case relative_path (relative_test_dir ^ "/" ^ relative_path)) :: acc)
+          (test_name >:: test_case relative_path (root ^ "/" ^ relative_path)) :: acc)
       files
       []
   in
   "TypedAST" >::: tests
+
+let _handle =
+  let one_gig = 1024 * 1024 * 1024 in
+  SharedMem.(init ~num_workers:0 { heap_size = 5 * one_gig; hash_table_pow = 19; log_level = 0 })
+
+let tests_dir = OUnitConf.make_string "dir" "tests" "Path to tests/ dir"
+
+let () =
+  (* args copied from OUnitCore *)
+  let only_test = ref [] in
+  let list_test = ref false in
+  let extra_specs =
+    [
+      ( "-only-test",
+        Arg.String (fun str -> only_test := str :: !only_test),
+        "path Run only the selected tests."
+      );
+      ("-list-test", Arg.Set list_test, " List tests DERP");
+    ]
+  in
+  let conf = !OUnitCore.run_test_tt_main_conf extra_specs in
+  (* reset Arg so run_test_tt_main can generate its own conf *)
+  Arg.current := 0;
+  let relative_test_dir = tests_dir conf in
+  let root = Base.Option.value_exn (Sys_utils.realpath relative_test_dir) in
+  run_test_tt_main (tests root)

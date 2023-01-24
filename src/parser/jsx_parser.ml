@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -119,7 +119,7 @@ module JSX (Parse : Parser_common.PARSER) = struct
     let loc = Peek.loc env in
     let name =
       match Peek.token env with
-      | T_JSX_IDENTIFIER { raw } -> raw
+      | T_JSX_IDENTIFIER { raw; _ } -> raw
       | _ ->
         error_unexpected ~expected:"an identifier" env;
         ""
@@ -433,22 +433,20 @@ module JSX (Parse : Parser_common.PARSER) = struct
                 children;
                 comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
               }
-            | (start_loc, Ok `Fragment)
-            | (start_loc, Error `Fragment) ->
-              `Fragment
-                JSX.
-                  {
-                    frag_opening_element = start_loc;
-                    frag_closing_element =
-                      (match closing_element with
-                      | `Fragment loc -> loc
-                      (* the following are parse erros *)
-                      | `Element (loc, _) -> loc
-                      | _ -> end_loc);
-                    frag_children = children;
-                    frag_comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
-                  }
-                
+        | (start_loc, Ok `Fragment)
+        | (start_loc, Error `Fragment) ->
+          `Fragment
+            {
+              JSX.frag_opening_element = start_loc;
+              frag_closing_element =
+                (match closing_element with
+                | `Fragment loc -> loc
+                (* the following are parse erros *)
+                | `Element (loc, _) -> loc
+                | _ -> end_loc);
+              frag_children = children;
+              frag_comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+            }
       in
 
       (Loc.btwn (fst opening_element) end_loc, result)

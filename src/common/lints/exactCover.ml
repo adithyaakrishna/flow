@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -103,7 +103,7 @@ let update_entry ((old_range, old_value) as original) new_range map_fun builder 
   let new_overlap = (overlap, map_fun old_value) in
   let new_remaining = Base.List.map ~f:(fun loc -> (loc, old_value)) remaining_ranges in
   let builder = builder |> remove original |> add new_overlap in
-  List.fold_left (Fn.flip add) builder new_remaining
+  List.fold_left (Fun.flip add) builder new_remaining
 
 (* Given a range over which to perform a modification, a modification function,
  * and a builder to work on, returns a builder modified by the modification
@@ -182,9 +182,6 @@ let default_file_cover source = file_cover source LintSettings.empty_severities
 
 let get_severity lint_kind loc severity_cover =
   find loc severity_cover |> LintSettings.get_value lint_kind
-
-let is_suppressed lint_kind loc severity_cover =
-  find loc severity_cover |> LintSettings.is_suppressed lint_kind
 
 let is_explicit lint_kind loc severity_cover =
   find loc severity_cover |> LintSettings.is_explicit lint_kind

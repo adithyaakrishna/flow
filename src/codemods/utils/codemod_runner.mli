@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -55,10 +55,17 @@ module type TYPED_RUNNER_WITH_PREPASS_CONFIG = sig
 
   val prepass_init : unit -> prepass_state
 
+  val mod_prepass_options : Options.t -> Options.t
+
+  val check_options : Options.t -> Options.t
+
+  val include_dependents_in_prepass : bool
+
   val prepass_run :
     Context.t ->
     prepass_state ->
     File_key.t ->
+    Files.options ->
     Mutator_state_reader.t ->
     File_sig.With_ALoc.t ->
     (ALoc.t, ALoc.t * Type.t) Flow_ast.Program.t ->

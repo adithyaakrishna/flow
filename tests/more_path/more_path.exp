@@ -12,34 +12,6 @@ References:
                       ^ [1]
 
 
-Error ---------------------------------------------------------------------------------------------------- Sigma.js:15:5
-
-Cannot assign number to `x` because number [1] is incompatible with `B` [2]. [incompatible-type]
-
-   Sigma.js:15:5
-   15|     x++; // TODO no error? since unreachable (x: B implies x: A)
-           ^^^ [1]
-
-References:
-   Sigma.js:10:16
-   10| function bar(x:B) {
-                      ^ [2]
-
-
-Error ---------------------------------------------------------------------------------------------------- Sigma.js:15:5
-
-number [1] is incompatible with `B` [2]. [incompatible-type]
-
-   Sigma.js:15:5
-   15|     x++; // TODO no error? since unreachable (x: B implies x: A)
-           ^^^ [1]
-
-References:
-   Sigma.js:10:16
-   10| function bar(x:B) {
-                      ^ [2]
-
-
 Error ---------------------------------------------------------------------------------------------------- Sigma.js:24:7
 
 Cannot call `x.d` because property `d` is missing in `C` [1]. [prop-missing]
@@ -68,23 +40,6 @@ References:
                       ^ [1]
 
 
-Error --------------------------------------------------------------------------------------------------- Sigma.js:35:20
-
-`A` [1] is incompatible with `D` [2]. [incompatible-type]
-
-   Sigma.js:35:20
-   35|   if (x instanceof A) {
-                          ^
-
-References:
-   Sigma.js:4:7
-    4| class A { a() {} }
-             ^ [1]
-   Sigma.js:34:16
-   34| function baz(x:D) {
-                      ^ [2]
-
-
 Error ---------------------------------------------------------------------------------------------------- test.js:11:16
 
 Cannot get `obj.childProp_TYPO` because property `childProp_TYPO` is missing in `ChildClass` [1]. [prop-missing]
@@ -100,4 +55,4 @@ References:
 
 
 
-Found 7 errors
+Found 4 errors

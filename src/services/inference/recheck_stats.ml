@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -79,25 +79,7 @@ let load_per_file_time ~options =
            | None ->
              Result.Error
                (Printf.sprintf "Failed to find key %S in JSON %S" per_file_time_key contents)
-           | Some v ->
-             Hh_json_helpers.Jget.(
-               let last_estimates =
-                 match obj_opt json estimates_key with
-                 | None -> None
-                 | Some json ->
-                   let json = Some json in
-                   Some
-                     {
-                       estimated_time_to_recheck = float_exn json estimated_time_to_recheck_key;
-                       estimated_time_to_restart = float_exn json estimated_time_to_restart_key;
-                       estimated_time_to_init = float_exn json estimated_time_to_init_key;
-                       estimated_time_per_file = float_exn json estimated_time_per_file_key;
-                       estimated_files_to_recheck = int_exn json estimated_files_to_recheck_key;
-                       estimated_files_to_init = int_exn json estimated_files_to_init_key;
-                     }
-               in
-               Result.Ok (v, last_estimates)
-             )
+           | Some v -> Result.Ok v
          with
         | Hh_json.Syntax_error str ->
           Result.Error (Printf.sprintf "Failed to parse as JSON contents. %S: %S" str contents)
@@ -105,10 +87,10 @@ let load_per_file_time ~options =
           Result.Error (Printf.sprintf "Failed to find key %S in estimates object. %S" key contents))
     in
     match result with
-    | Result.Ok (per_file_time, last_estimates) -> Lwt.return (per_file_time, last_estimates)
+    | Result.Ok per_file_time -> Lwt.return per_file_time
     | Result.Error reason ->
       Hh_logger.info "Failed to load recheck stats from %S. Reason: %S" file reason;
-      Lwt.return (per_file_time_guess, None)
+      Lwt.return per_file_time_guess
   )
 
 let save_averages ~options ?estimates new_averages =
@@ -128,31 +110,31 @@ let save_averages ~options ?estimates new_averages =
              estimated_files_to_init;
            }
          ->
-        Hh_json.
-          [
-            ( estimates_key,
-              JSON_Object
-                [
-                  ( estimated_time_to_recheck_key,
-                    JSON_Number (Dtoa.ecma_string_of_float estimated_time_to_recheck)
-                  );
-                  ( estimated_time_to_restart_key,
-                    JSON_Number (Dtoa.ecma_string_of_float estimated_time_to_restart)
-                  );
-                  ( estimated_time_to_init_key,
-                    JSON_Number (Dtoa.ecma_string_of_float estimated_time_to_init)
-                  );
-                  ( estimated_time_per_file_key,
-                    JSON_Number (Dtoa.ecma_string_of_float estimated_time_per_file)
-                  );
-                  ( estimated_files_to_recheck_key,
-                    JSON_Number (string_of_int estimated_files_to_recheck)
-                  );
-                  (estimated_files_to_init_key, JSON_Number (string_of_int estimated_files_to_init));
-                ]
-            );
-          ]
-        
+        [
+          ( estimates_key,
+            Hh_json.JSON_Object
+              [
+                ( estimated_time_to_recheck_key,
+                  Hh_json.JSON_Number (Dtoa.ecma_string_of_float estimated_time_to_recheck)
+                );
+                ( estimated_time_to_restart_key,
+                  Hh_json.JSON_Number (Dtoa.ecma_string_of_float estimated_time_to_restart)
+                );
+                ( estimated_time_to_init_key,
+                  Hh_json.JSON_Number (Dtoa.ecma_string_of_float estimated_time_to_init)
+                );
+                ( estimated_time_per_file_key,
+                  Hh_json.JSON_Number (Dtoa.ecma_string_of_float estimated_time_per_file)
+                );
+                ( estimated_files_to_recheck_key,
+                  Hh_json.JSON_Number (string_of_int estimated_files_to_recheck)
+                );
+                ( estimated_files_to_init_key,
+                  Hh_json.JSON_Number (string_of_int estimated_files_to_init)
+                );
+              ]
+          );
+        ]
     )
   in
   let json_str =
@@ -160,7 +142,7 @@ let save_averages ~options ?estimates new_averages =
       json_to_string
       @@ JSON_Object
            ((per_file_time_key, JSON_Number (Dtoa.ecma_string_of_float new_averages.per_file_time))
-            :: estimates
+           :: estimates
            )
     )
   in
@@ -198,9 +180,9 @@ let save_averages ~options ?estimates new_averages =
   )
 
 let init ~options ~init_time ~parsed_count =
-  let%lwt (per_file_time, last_estimates) = load_per_file_time ~options in
+  let%lwt per_file_time = load_per_file_time ~options in
   averages := Some { init_time; per_file_time; parsed_count };
-  Lwt.return last_estimates
+  Lwt.return_unit
 
 let with_averages f =
   match !averages with

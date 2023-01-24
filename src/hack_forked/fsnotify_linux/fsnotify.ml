@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -43,9 +43,8 @@ type event = {
 let init _roots = { fd = wrap Inotify.create (); wpaths = WMap.empty }
 
 let select_events =
-  Inotify.
-    [S_Create; S_Delete; S_Delete_self; S_Modify; S_Move_self; S_Moved_from; S_Moved_to; S_Attrib]
-  
+  let open Inotify in
+  [S_Create; S_Delete; S_Delete_self; S_Modify; S_Move_self; S_Moved_from; S_Moved_to; S_Attrib]
 
 (* Returns None if we're already watching that path and Some watch otherwise *)
 let add_watch env path =

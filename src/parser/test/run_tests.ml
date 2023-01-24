@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,16 +10,9 @@ module Ast = Flow_ast
 module String_utils = struct
   let spf = Printf.sprintf
 
-  let string_starts_with long short =
-    try
-      let long = String.sub long 0 (String.length short) in
-      long = short
-    with
-    | Invalid_argument _ -> false
-
   let strip_prefix prefix str =
-    let prefix_length = String.length prefix in
-    if string_starts_with str prefix then
+    if String.starts_with ~prefix str then
+      let prefix_length = String.length prefix in
       String.sub str prefix_length (String.length str - prefix_length)
     else
       str
@@ -78,10 +71,15 @@ end = struct
     cases: case SMap.t;
   }
 
+  type fix = {
+    path: string list;
+    json: Hh_json.json;
+  }
+
   type case_result =
     | Case_ok
     | Case_skipped of string option (* reason *)
-    | Case_error of string list
+    | Case_error of (string * fix option) list
 
   let empty_case =
     {
@@ -124,24 +122,9 @@ end = struct
           match k with
           | "enums" ->
             get_bool k v >>= fun v -> return (test_opts, { opts with Parser_env.enums = v })
-          | "esproposal_class_instance_fields" ->
-            get_bool k v >>= fun v ->
-            return (test_opts, { opts with Parser_env.esproposal_class_instance_fields = v })
-          | "esproposal_class_static_fields" ->
-            get_bool k v >>= fun v ->
-            return (test_opts, { opts with Parser_env.esproposal_class_static_fields = v })
           | "esproposal_decorators" ->
             get_bool k v >>= fun v ->
             return (test_opts, { opts with Parser_env.esproposal_decorators = v })
-          | "esproposal_export_star_as" ->
-            get_bool k v >>= fun v ->
-            return (test_opts, { opts with Parser_env.esproposal_export_star_as = v })
-          | "esproposal_optional_chaining" ->
-            get_bool k v >>= fun v ->
-            return (test_opts, { opts with Parser_env.esproposal_optional_chaining = v })
-          | "esproposal_nullish_coalescing" ->
-            get_bool k v >>= fun v ->
-            return (test_opts, { opts with Parser_env.esproposal_nullish_coalescing = v })
           | "types" ->
             get_bool k v >>= fun v -> return (test_opts, { opts with Parser_env.types = v })
           | "use_strict" ->
@@ -151,6 +134,54 @@ end = struct
         (return ({ intern_comments = false }, Parser_env.default_parse_options))
         props
     )
+
+  (** .source.js files look like `var source = 'X'`. the esprima runner evals this
+      and runs the test on the value of `source`. For example, to test invalid Unicode,
+      the invalid codepoints are validly encoded into the string; when eval'd, the
+      result is invalid, but the test file itself is valid UTF8. *)
+  let eval_source content =
+    let open Flow_ast in
+    match Parser_flow.program_file ~fail:false content None with
+    | ( ( _,
+          {
+            Program.statements =
+              [
+                ( _,
+                  Statement.VariableDeclaration
+                    {
+                      Statement.VariableDeclaration.declarations =
+                        [
+                          ( _,
+                            {
+                              Statement.VariableDeclaration.Declarator.id =
+                                ( _,
+                                  Pattern.Identifier
+                                    {
+                                      Pattern.Identifier.name =
+                                        (_, { Identifier.name = "source"; _ });
+                                      _;
+                                    }
+                                );
+                              init =
+                                Some
+                                  ( _,
+                                    Expression.Literal { Literal.value = Literal.String source; _ }
+                                  );
+                            }
+                          );
+                        ];
+                      kind = Statement.VariableDeclaration.Var;
+                      _;
+                    }
+                );
+              ];
+            _;
+          }
+        ),
+        []
+      ) ->
+      Some source
+    | _ -> None
 
   let tests_of_path path =
     let relativize = strip_prefix path in
@@ -162,56 +193,60 @@ end = struct
         | File_utils.Dir dir ->
           let test = { test_name = relativize dir; cases = SMap.empty } in
           test :: acc
-        | File_utils.File file ->
-          begin
-            match acc with
-            | test :: rest ->
-              let case_name = strip_prefix (test.test_name ^ Filename.dir_sep) (relativize file) in
-              let (case_name, ext) = split_extension case_name in
-              let cases =
-                match ext with
-                | "js" when Filename.check_suffix case_name ".source" ->
-                  let case_name = Filename.chop_suffix case_name ".source" in
-                  let case = find_case case_name test.cases in
-                  let case = { case with skipped = file :: case.skipped } in
-                  SMap.add case_name case test.cases
-                | "js" ->
-                  let case = find_case case_name test.cases in
-                  let source = Sys_utils.cat file in
-                  let case = { case with source = Some source } in
-                  SMap.add case_name case test.cases
-                | "json" ->
-                  let (case_name, kind) = split_extension case_name in
-                  let case = find_case case_name test.cases in
+        | File_utils.File file -> begin
+          match acc with
+          | test :: rest ->
+            let case_name = strip_prefix (test.test_name ^ Filename.dir_sep) (relativize file) in
+            let (case_name, ext) = split_extension case_name in
+            let cases =
+              match ext with
+              | "js" when Filename.check_suffix case_name ".source" ->
+                let case_name = Filename.chop_suffix case_name ".source" in
+                let case = find_case case_name test.cases in
+                let case =
                   let content = Sys_utils.cat file in
-                  let case =
-                    match kind with
-                    | "module" -> { case with expected = Some (Module content) }
-                    | "tree" -> { case with expected = Some (Tree content) }
-                    | "tokens" -> { case with expected = Some (Tokens content) }
-                    | "failure" -> { case with expected = Some (Failure content) }
-                    | "options" ->
-                      (* TODO: propagate errors better *)
-                      let options = Base.Result.ok_or_failwith (parse_options content) in
-                      { case with options = (fst options, Some (snd options)) }
-                    | _ -> { case with skipped = file :: case.skipped }
-                  in
-                  SMap.add case_name case test.cases
-                | "diff" ->
-                  let case = find_case case_name test.cases in
-                  let source = Sys_utils.cat file in
-                  let case = { case with diff = Diff source } in
-                  SMap.add case_name case test.cases
-                | "skip" ->
-                  let case = find_case case_name test.cases in
-                  let skip = Sys_utils.cat file |> String.trim in
-                  let case = { case with diff = Todo skip } in
-                  SMap.add case_name case test.cases
-                | _ -> test.cases
-              in
-              { test with cases } :: rest
-            | _ -> acc
-          end)
+                  match eval_source content with
+                  | Some source -> { case with source = Some source }
+                  | None -> { case with skipped = file :: case.skipped }
+                in
+                SMap.add case_name case test.cases
+              | "js" ->
+                let case = find_case case_name test.cases in
+                let source = Sys_utils.cat file in
+                let case = { case with source = Some source } in
+                SMap.add case_name case test.cases
+              | "json" ->
+                let (case_name, kind) = split_extension case_name in
+                let case = find_case case_name test.cases in
+                let content = Sys_utils.cat file in
+                let case =
+                  match kind with
+                  | "module" -> { case with expected = Some (Module content) }
+                  | "tree" -> { case with expected = Some (Tree content) }
+                  | "tokens" -> { case with expected = Some (Tokens content) }
+                  | "failure" -> { case with expected = Some (Failure content) }
+                  | "options" ->
+                    (* TODO: propagate errors better *)
+                    let options = Base.Result.ok_or_failwith (parse_options content) in
+                    { case with options = (fst options, Some (snd options)) }
+                  | _ -> { case with skipped = file :: case.skipped }
+                in
+                SMap.add case_name case test.cases
+              | "diff" ->
+                let case = find_case case_name test.cases in
+                let source = Sys_utils.cat file in
+                let case = { case with diff = Diff source } in
+                SMap.add case_name case test.cases
+              | "skip" ->
+                let case = find_case case_name test.cases in
+                let skip = Sys_utils.cat file |> String.trim in
+                let case = { case with diff = Todo skip } in
+                SMap.add case_name case test.cases
+              | _ -> test.cases
+            in
+            { test with cases } :: rest
+          | _ -> acc
+        end)
       []
     |> List.filter (fun test -> SMap.cardinal test.cases > 0)
     |> List.rev
@@ -298,7 +333,7 @@ end = struct
       (path : path_part list)
       (actual : Hh_json.json)
       (expected : (Loc.t, Loc.t) Ast.Expression.t)
-      (errors : string list) : string list =
+      (errors : (string * fix option) list) : (string * fix option) list =
     let open Ast.Expression in
     match (actual, expected) with
     | (JSON_Object aprops, (_, Object { Object.properties = eprops; comments = _ })) ->
@@ -312,7 +347,7 @@ end = struct
       let e_len = List.length eitems in
       if e_len <> a_len then
         let path = string_of_path path in
-        let err = spf "%s: Expected %d elements, got %d." path e_len a_len in
+        let err = (spf "%s: Expected %d elements, got %d." path e_len a_len, None) in
         err :: errors
       else
         let (_, diffs) =
@@ -322,7 +357,7 @@ end = struct
               let acc =
                 match expected with
                 | Array.Expression expr -> test_tree path actual expr acc
-                | _ -> spf "%s: invalid JSON" (string_of_path path) :: acc
+                | _ -> (spf "%s: invalid JSON" (string_of_path path), None) :: acc
               in
               (i + 1, acc))
             (0, errors)
@@ -335,7 +370,7 @@ end = struct
       ) ->
       if actual <> expected then
         let path = string_of_path path in
-        spf "%s: Expected %b, got %b." path expected actual :: errors
+        (spf "%s: Expected %b, got %b." path expected actual, None) :: errors
       else
         errors
     | ( JSON_Number actual,
@@ -343,7 +378,7 @@ end = struct
       ) ->
       if actual <> expected then
         let path = string_of_path path in
-        spf "%s: Expected %s, got %s." path expected actual :: errors
+        (spf "%s: Expected %s, got %s." path expected actual, None) :: errors
       else
         errors
     | ( JSON_Number actual,
@@ -362,7 +397,7 @@ end = struct
       let expected = "-" ^ expected in
       if actual <> expected then
         let path = string_of_path path in
-        spf "%s: Expected %s, got %s." path expected actual :: errors
+        (spf "%s: Expected %s, got %s." path expected actual, None) :: errors
       else
         errors
     | ( JSON_String actual,
@@ -370,7 +405,7 @@ end = struct
       ) ->
       if not (string_value_matches expected actual) then
         let path = string_of_path path in
-        spf "%s: Expected %S, got %S." path expected actual :: errors
+        (spf "%s: Expected %S, got %S." path expected actual, None) :: errors
       else
         errors
     | (JSON_Null, (_, Literal { Ast.Literal.value = Ast.Literal.Null; raw = _; comments = _ })) ->
@@ -378,7 +413,7 @@ end = struct
     | (_, _) ->
       let path = string_of_path path in
       let act_type = string_of_json_type actual in
-      spf "%s: Types do not match, got %s" path act_type :: errors
+      (spf "%s: Types do not match, got %s" path act_type, None) :: errors
 
   and test_actual_prop path expected_map name value acc =
     if SMap.mem name expected_map then
@@ -394,14 +429,14 @@ end = struct
       acc
     else
       let path = string_of_path path in
-      spf "%s: Unexpected key %S" path name :: acc
+      (spf "%s: Unexpected key %S" path name, None) :: acc
 
   and test_expected_prop path actual_map name _ acc =
     if SMap.mem name actual_map || expected_different_property path (Some name) None then
       acc
     else
       let path = string_of_path path in
-      spf "%s: Missing key %S" path name :: acc
+      (spf "%s: Missing key %S" path name, None) :: acc
 
   let prop_name_and_value =
     let open Ast.Expression in
@@ -426,93 +461,121 @@ end = struct
       )
       haystack
 
+  let test_failure ~expected ~actual ~diff =
+    let open Hh_json_helpers in
+    let expected = Some expected in
+    let actual = Some actual in
+    let expected_message =
+      match Jget.string_opt diff "message" with
+      | Some message -> message
+      | None -> Jget.string_exn expected "message"
+    in
+    let expected_message =
+      if Str.string_match expected_error_regex expected_message 0 then
+        Str.matched_group 1 expected_message
+      else
+        expected_message
+    in
+    match Jget.array_opt actual "errors" with
+    | Some []
+    | None ->
+      [("Expected errors but Flow didn't error", None)]
+    | Some (first_error :: _) ->
+      let actual_message = Jget.string_exn first_error "message" in
+      let errs = [] in
+      (* TODO: also check line and column *)
+      if not (String.equal expected_message actual_message) then
+        let err = Printf.sprintf "Expected message %S, got %S" expected_message actual_message in
+        let fix = Some { path = ["message"]; json = JSON_String actual_message } in
+        (err, fix) :: errs
+      else
+        errs
+
   let rec apply_diff diff expected =
     let open Ast.Expression in
     match diff with
-    | (_, Object { Object.properties = diff_props; _ }) ->
-      begin
-        match expected with
-        | (loc, Object { Object.properties = expected_props; comments }) ->
-          let properties =
-            List.fold_left
-              (fun props diff_prop ->
-                match diff_prop with
-                | Object.Property (diff_loc, diff_prop) ->
-                  let (diff_name, diff_value) = prop_name_and_value diff_prop in
-                  if not (has_prop diff_name props) then
-                    Object.Property (diff_loc, diff_prop) :: props
-                  else
-                    List.fold_left
-                      (fun acc exp ->
-                        match exp with
-                        | Object.Property (exp_loc, exp_prop) ->
-                          let exp_key =
-                            match exp_prop with
-                            | Object.Property.Init { key; _ } -> key
-                            | _ -> failwith "Invalid JSON"
-                          in
-                          let (exp_name, exp_value) = prop_name_and_value exp_prop in
-                          if exp_name = diff_name then
-                            (* recursively apply diff *)
-                            match apply_diff diff_value exp_value with
-                            | Some value ->
-                              let prop =
-                                Object.Property
-                                  ( exp_loc,
-                                    Object.Property.Init { key = exp_key; value; shorthand = false }
-                                  )
-                              in
-                              prop :: acc
-                            | None -> acc
-                          else
-                            let prop = Object.Property (exp_loc, exp_prop) in
+    | (_, Object { Object.properties = diff_props; _ }) -> begin
+      match expected with
+      | (loc, Object { Object.properties = expected_props; comments }) ->
+        let properties =
+          List.fold_left
+            (fun props diff_prop ->
+              match diff_prop with
+              | Object.Property (diff_loc, diff_prop) ->
+                let (diff_name, diff_value) = prop_name_and_value diff_prop in
+                if not (has_prop diff_name props) then
+                  Object.Property (diff_loc, diff_prop) :: props
+                else
+                  List.fold_left
+                    (fun acc exp ->
+                      match exp with
+                      | Object.Property (exp_loc, exp_prop) ->
+                        let exp_key =
+                          match exp_prop with
+                          | Object.Property.Init { key; _ } -> key
+                          | _ -> failwith "Invalid JSON"
+                        in
+                        let (exp_name, exp_value) = prop_name_and_value exp_prop in
+                        if exp_name = diff_name then
+                          (* recursively apply diff *)
+                          match apply_diff diff_value exp_value with
+                          | Some value ->
+                            let prop =
+                              Object.Property
+                                ( exp_loc,
+                                  Object.Property.Init { key = exp_key; value; shorthand = false }
+                                )
+                            in
                             prop :: acc
-                        | prop -> prop :: acc)
-                      []
-                      props
-                | _ -> failwith "Invalid JSON")
-              expected_props
-              diff_props
-          in
-          Some (loc, Object { Object.properties; comments })
-        | (loc, Array { Array.elements = expected_elems; comments }) ->
-          let expected_length = List.length expected_elems in
-          let elements =
-            List.fold_left
-              (fun elems diff_prop ->
-                match diff_prop with
-                | Object.Property (_, diff_prop) ->
-                  let (diff_name, diff_value) = prop_name_and_value diff_prop in
-                  let diff_index = int_of_string diff_name in
-                  if diff_index >= expected_length then
-                    (* append the diff *)
-                    (* TODO: this should insert gaps, but I don't expect people to
-                       write diffs that have gaps. *)
-                    List.rev (Array.Expression diff_value :: List.rev elems)
-                  else
-                    (* apply the diff *)
-                    Base.List.mapi
-                      ~f:(fun index elem ->
-                        if index <> diff_index then
-                          elem
+                          | None -> acc
                         else
-                          match elem with
-                          | Array.Hole _ -> Array.Expression diff_value
-                          | Array.Expression exp_value ->
-                            begin
-                              match apply_diff diff_value exp_value with
-                              | Some value -> Array.Expression value
-                              | None -> Array.Hole Loc.none
-                            end
-                          | Array.Spread _ -> failwith "Invalid JSON")
-                      elems
-                | _ -> failwith "Invalid JSON")
-              expected_elems
-              diff_props
-          in
-          Some (loc, Array { Array.elements; comments })
-        | _ -> Some expected
-      end
+                          let prop = Object.Property (exp_loc, exp_prop) in
+                          prop :: acc
+                      | prop -> prop :: acc)
+                    []
+                    props
+              | _ -> failwith "Invalid JSON")
+            expected_props
+            diff_props
+        in
+        Some (loc, Object { Object.properties; comments })
+      | (loc, Array { Array.elements = expected_elems; comments }) ->
+        let expected_length = List.length expected_elems in
+        let elements =
+          List.fold_left
+            (fun elems diff_prop ->
+              match diff_prop with
+              | Object.Property (_, diff_prop) ->
+                let (diff_name, diff_value) = prop_name_and_value diff_prop in
+                let diff_index = int_of_string diff_name in
+                if diff_index >= expected_length then
+                  (* append the diff *)
+                  (* TODO: this should insert gaps, but I don't expect people to
+                     write diffs that have gaps. *)
+                  List.rev (Array.Expression diff_value :: List.rev elems)
+                else
+                  (* apply the diff *)
+                  Base.List.mapi
+                    ~f:(fun index elem ->
+                      if index <> diff_index then
+                        elem
+                      else
+                        match elem with
+                        | Array.Hole _ -> Array.Expression diff_value
+                        | Array.Expression exp_value -> begin
+                          match apply_diff diff_value exp_value with
+                          | Some value -> Array.Expression value
+                          | None -> Array.Hole Loc.none
+                        end
+                        | Array.Spread _ -> failwith "Invalid JSON")
+                    elems
+              | _ -> failwith "Invalid JSON")
+            expected_elems
+            diff_props
+        in
+        Some (loc, Array { Array.elements; comments })
+      | _ -> Some expected
+    end
     | (_, Literal _) -> Some diff
     | (_, Identifier (_, { Ast.Identifier.name = "undefined"; comments = _ })) -> None
     | _ -> failwith "Invalid diff format"
@@ -548,7 +611,7 @@ end = struct
     match case.source with
     | None ->
       if List.length case.skipped = 0 && case.diff = Same then
-        Case_error ["No source"]
+        Case_error [("No source", None)]
       else
         Case_skipped None
     | Some content ->
@@ -568,7 +631,7 @@ end = struct
               let (expected, json_errors) = Parser_flow.json_file ~fail:false tree None in
               (Some expected, json_errors)
             with
-            | Parse_error.Error errs -> (None, errs)
+            | Parse_error.Error (e, es) -> (None, e :: es)
           in
           (match parse_result with
           | (_, (loc, err) :: _) ->
@@ -579,8 +642,8 @@ end = struct
                 (Parse_error.PP.error err)
                 tree
             in
-            Case_error [str]
-          | (None, []) -> Case_error ["Unable to parse .tree.json: unknown error"]
+            Case_error [(str, None)]
+          | (None, []) -> Case_error [("Unable to parse .tree.json: unknown error", None)]
           | (Some expected, []) ->
             let expected =
               match diff with
@@ -597,13 +660,34 @@ end = struct
             begin
               match (errors, todo) with
               | ([], None) -> Case_ok
-              | ([], Some _) -> Case_error ["Skipped test passes"]
+              | ([], Some _) -> Case_error [("Skipped test passes", None)]
               | (_, Some reason) -> Case_skipped (Some reason)
               | (_, None) -> Case_error errors
             end)
         | Some (Tokens _) -> (* TODO *) Case_skipped None
-        | Some (Failure _) -> (* TODO *) Case_skipped None
-        | None -> Case_error ["Nothing to do"]
+        | Some (Failure contents) ->
+          let json =
+            try Ok (Hh_json.json_of_string contents) with
+            | Syntax_error err -> Error err
+          in
+          let diff =
+            match diff with
+            | Some str ->
+              (try Ok (Some (Hh_json.json_of_string str)) with
+              | Syntax_error err -> Error err)
+            | None -> Ok None
+          in
+          (match (json, diff) with
+          | (Ok expected, Ok diff) ->
+            let errors = test_failure ~expected ~actual ~diff in
+            (match (errors, todo) with
+            | ([], None) -> Case_ok
+            | ([], Some _) -> Case_error [("Skipped test passes", None)]
+            | (_, Some reason) -> Case_skipped (Some reason)
+            | (_, None) -> Case_error errors)
+          | (Error err, _) -> Case_error [(err, None)]
+          | (_, Error err) -> Case_error [("Invalid .diff: " ^ err, None)])
+        | None -> Case_error [("Nothing to do", None)]
       end
 
   type test_results = {
@@ -641,8 +725,46 @@ end = struct
       let oc = open_out filename in
       output_string oc (Hh_json.json_to_multiline json);
       output_char oc '\n';
-      close_out oc
-    | _ -> ()
+      close_out oc;
+      true
+    | _ -> false
+
+  let write_diff path test_name case_name case errs =
+    let ( / ) a b = a ^ Filename.dir_sep ^ b in
+    match case.expected with
+    | Some (Failure _) ->
+      let filename = path / test_name / (case_name ^ ".diff") in
+      let props =
+        Base.List.filter_map
+          ~f:(fun (_, fix) ->
+            match fix with
+            | Some { path = name :: _; json } ->
+              (* failures are flat objects so we don't need to handle
+                 deep paths. *)
+              Some (name, json)
+            | _ -> None)
+          errs
+      in
+      if not (Base.List.is_empty props) then (
+        let json = JSON_Object props in
+        let oc = open_out filename in
+        output_string oc (Hh_json.json_to_multiline json);
+        output_char oc '\n';
+        close_out oc;
+        true
+      ) else
+        false
+    | _ ->
+      (* TODO: handle writing other kinds of diffs *)
+      false
+
+  let write_skip path test_name case_name reason =
+    let ( / ) a b = a ^ Filename.dir_sep ^ b in
+    let filename = path / test_name / (case_name ^ ".skip") in
+    let oc = open_out filename in
+    output_string oc reason;
+    output_char oc '\n';
+    close_out oc
 
   type verbose_mode =
     | Quiet
@@ -653,11 +775,18 @@ end = struct
     let verbose_ref = ref Normal in
     let record_ref = ref false in
     let path_ref = ref None in
+    let diff_ref = ref false in
+    let skip_ref = ref None in
     let speclist =
       [
         ("-q", Arg.Unit (fun () -> verbose_ref := Quiet), "Enables quiet mode");
         ("-v", Arg.Unit (fun () -> verbose_ref := Verbose), "Enables verbose mode");
         ("-r", Arg.Set record_ref, "Re-record failing expected trees");
+        ("-d", Arg.Set diff_ref, "Write diffs for failing tests");
+        ( "-s",
+          Arg.String (fun reason -> skip_ref := Some reason),
+          "Write skip files for unfixable tests"
+        );
       ]
     in
     let usage_msg = "Runs flow parser on esprima tests. Options available:" in
@@ -672,6 +801,8 @@ end = struct
     let quiet = !verbose_ref = Quiet in
     let verbose = !verbose_ref = Verbose in
     let record = !record_ref in
+    let diff = !diff_ref in
+    let skip = !skip_ref in
     let tests = tests_of_path path in
     let results =
       List.fold_left
@@ -712,9 +843,15 @@ end = struct
                     [
                       (C.Normal C.Red, "[\xE2\x9C\x97] FAIL"); (C.Normal C.Default, spf ": %s\n" key);
                     ];
-                  List.iter (fun err -> print [(C.Normal C.Default, spf "    %s\n" err)]) errs;
+                  List.iter (fun (err, _) -> print [(C.Normal C.Default, spf "    %s\n" err)]) errs;
                   flush stdout;
-                  if record then record_tree path test_name key case;
+                  let fixed = record && record_tree path test_name key case in
+                  let fixed = fixed || (diff && write_diff path test_name key case errs) in
+                  ( if not fixed then
+                    match skip with
+                    | Some skip_reason -> write_skip path test_name key skip_reason
+                    | None -> ()
+                  );
                   ({ results with failed = results.failed + 1 }, true)
                 | exception exn ->
                   let exn = Exception.wrap exn in

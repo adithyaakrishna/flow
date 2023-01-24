@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -15,46 +15,53 @@
 
 open Utils_js
 
-type mode =
-  | ModuleMode_Checked
-  | ModuleMode_Weak
-  | ModuleMode_Unchecked
+exception
+  Failed_to_resolve_module of {
+    name: string;
+    file: File_key.t;
+    exn: Exception.t;
+  }
 
-type error =
-  | ModuleDuplicateProviderError of {
-      module_name: string;
-      provider: File_key.t;
-      conflict: File_key.t;
-    }
+let () =
+  Exception.register_printer (function
+      | Failed_to_resolve_module { name; file; exn } ->
+        Some
+          (Printf.sprintf
+             "Unexpected exception resolving module %S in %s: %s\n%s"
+             name
+             (File_key.to_string file)
+             (Exception.get_ctor_string exn)
+             (Exception.get_backtrace_string exn)
+          )
+      | _ -> None
+      )
 
 let choose_provider_and_warn_about_duplicates =
-  let warn_duplicate_providers m current modules errmap =
-    List.fold_left
-      (fun acc f ->
-        let w =
-          ModuleDuplicateProviderError { module_name = m; provider = current; conflict = f }
-        in
-        FilenameMap.add f [w] acc ~combine:(fun old new_ -> Base.List.rev_append new_ old))
-      errmap
-      modules
+  let warn_duplicate_providers m (provider, _) duplicates acc =
+    match duplicates with
+    | [] -> acc
+    | (f, _) :: fs -> SMap.add m (provider, (f, List.map fst fs)) acc
   in
   fun m errmap providers fallback ->
-    let (definitions, implementations) = List.partition Files.has_flow_ext providers in
+    let (definitions, implementations) =
+      let f (key, _) = Files.has_flow_ext key in
+      List.partition f providers
+    in
     match (implementations, definitions) with
     (* If there are no definitions or implementations, use the fallback *)
     | ([], []) -> (fallback (), errmap)
     (* Else if there are no definitions, use the first implementation *)
-    | (impl :: dup_impls, []) -> (impl, warn_duplicate_providers m impl dup_impls errmap)
+    | (impl :: dup_impls, []) -> (Some (snd impl), warn_duplicate_providers m impl dup_impls errmap)
     (* Else use the first definition *)
-    | ([], defn :: dup_defns) -> (defn, warn_duplicate_providers m defn dup_defns errmap)
+    | ([], defn :: dup_defns) -> (Some (snd defn), warn_duplicate_providers m defn dup_defns errmap)
     (* Don't complain about the first implementation being a duplicate *)
-    | (impl :: dup_impls, defn :: dup_defns) ->
+    | (_impl :: dup_impls, defn :: dup_defns) ->
       let errmap =
         errmap
-        |> warn_duplicate_providers m impl dup_impls
+        |> warn_duplicate_providers m defn dup_impls
         |> warn_duplicate_providers m defn dup_defns
       in
-      (defn, errmap)
+      (Some (snd defn), errmap)
 
 (**
  * A set of module.name_mapper config entry allows users to specify regexp
@@ -66,42 +73,41 @@ let choose_provider_and_warn_about_duplicates =
  * regexp string. For the node module system, we go a step further and only
  * choose candidates that match the string *and* are a valid, resolvable path.
  *)
-let module_name_candidates ~options =
-  Module_hashtables.memoize_with_module_name_candidates_cache ~f:(fun name ->
-      let mappers = Options.module_name_mappers options in
-      let root = Options.root options in
-      let expand_project_root_token = Files.expand_project_root_token ~root in
-      let map_name mapped_names (regexp, template) =
-        let new_name =
-          name
-          (* First we apply the mapper *)
-          |> Str.global_replace regexp template
-          (* Then we replace the PROJECT_ROOT placeholder. *)
-          |> expand_project_root_token
-        in
-        if new_name = name then
-          mapped_names
-        else
-          new_name :: mapped_names
-      in
-      List.rev (name :: List.fold_left map_name [] mappers)
-  )
+let module_name_candidates_cache = Hashtbl.create 50
 
-let add_package filename = function
-  | Ok package -> Package_heaps.Package_heap_mutator.add_package_json filename package
-  | Error _ -> Package_heaps.Package_heap_mutator.add_error filename
+let module_name_candidates ~options name =
+  match Hashtbl.find_opt module_name_candidates_cache name with
+  | Some candidates -> candidates
+  | None ->
+    let mappers = Options.module_name_mappers options in
+    let root = Options.root options in
+    let expand_project_root_token = Files.expand_project_root_token ~root in
+    let map_name mapped_names (regexp, template) =
+      let new_name =
+        name
+        (* First we apply the mapper *)
+        |> Str.global_replace regexp template
+        (* Then we replace the PROJECT_ROOT placeholder. *)
+        |> expand_project_root_token
+      in
+      if new_name = name then
+        mapped_names
+      else
+        new_name :: mapped_names
+    in
+    let candidates = Nel.rev (name, List.fold_left map_name [] mappers) in
+    Hashtbl.add module_name_candidates_cache name candidates;
+    candidates
 
 type package_incompatible_reason =
-  (* Didn't exist before, now it exists *)
-  | New
-  (* Was valid, now is invalid *)
-  | Became_invalid
-  (* Was invalid, now is valid *)
-  | Became_valid
-  (* The `name` property changed from the former to the latter *)
+  | New  (** Didn't exist before, now it exists *)
+  | Became_invalid  (** Was valid, now is invalid *)
+  | Became_valid  (** Was invalid, now is valid *)
   | Name_changed of string option * string option
-  (* The `main` property changed from the former to the latter *)
+      (** The `name` property changed from the former to the latter *)
   | Main_changed of string option * string option
+      (** The `main` property changed from the former to the latter *)
+  | Haste_commonjs_changed of bool  (** The `haste_commonjs` property changed to this value *)
   | Unknown
 
 let string_of_package_incompatible_reason =
@@ -117,15 +123,16 @@ let string_of_package_incompatible_reason =
     Printf.sprintf "name changed from `%s` to `%s`" (string_of_option old) (string_of_option new_)
   | Main_changed (old, new_) ->
     Printf.sprintf "main changed from `%s` to `%s`" (string_of_option old) (string_of_option new_)
+  | Haste_commonjs_changed new_ ->
+    Printf.sprintf "haste_commonjs changed from `%b` to `%b`" (not new_) new_
   | Unknown -> "Unknown"
 
 type package_incompatible_return =
   | Compatible
   | Incompatible of package_incompatible_reason
 
-let package_incompatible ~options ~reader filename ast =
-  let new_package = Package_json.parse ~node_main_fields:(Options.node_main_fields options) ast in
-  let old_package = Package_heaps.Reader.get_package ~reader filename in
+let package_incompatible ~reader filename new_package =
+  let old_package = Parsing_heaps.Reader.get_package_info ~reader filename in
   match (old_package, new_package) with
   | (None, Ok _) -> Incompatible New (* didn't exist before, found a new one *)
   | (None, Error _) -> Compatible (* didn't exist before, new one is invalid *)
@@ -140,24 +147,29 @@ let package_incompatible ~options ~reader filename ast =
       let new_main = Package_json.main new_package in
       let old_name = Package_json.name old_package in
       let new_name = Package_json.name new_package in
+      let old_haste_commonjs = Package_json.haste_commonjs old_package in
+      let new_haste_commonjs = Package_json.haste_commonjs new_package in
       if old_name <> new_name then
         Incompatible (Name_changed (old_name, new_name))
       else if old_main <> new_main then
         Incompatible (Main_changed (old_main, new_main))
+      else if old_haste_commonjs <> new_haste_commonjs then
+        Incompatible (Haste_commonjs_changed new_haste_commonjs)
       else
         (* This shouldn't happen -- if it does, it probably means we need to add cases above *)
         Incompatible Unknown
 
-type resolution_acc = {
-  mutable paths: SSet.t;
-  mutable errors: Error_message.t list;
-}
+type phantom_acc = Modulename.Set.t ref
 
 (* Specification of a module system. Currently this signature is sufficient to
    model both Haste and Node, but should be further generalized. *)
 module type MODULE_SYSTEM = sig
   (* Given a file and docblock info, make the name of the module it exports. *)
-  val exported_module : Options.t -> File_key.t -> Docblock.t -> string option
+  val exported_module :
+    Options.t ->
+    File_key.t ->
+    [ `Module of Docblock.t | `Package of Package_json.t ] ->
+    string option
 
   (* Given a file and a reference in it to an imported module, make the name of
      the module it refers to. If given an optional reference to an accumulator,
@@ -167,201 +179,116 @@ module type MODULE_SYSTEM = sig
     reader:Abstract_state_reader.t ->
     SSet.t SMap.t ->
     File_key.t ->
-    ALoc.t ->
-    ?resolution_acc:resolution_acc ->
+    ?phantom_acc:phantom_acc ->
     string ->
-    Modulename.t
+    Parsing_heaps.resolved_module
 
   (* for a given module name, choose a provider from among a set of
      files with that exported name. also check for duplicates and
      generate warnings, as dictated by module system rules. *)
   val choose_provider :
-    string ->
     (* module name *)
-    FilenameSet.t ->
+    string ->
     (* set of candidate provider files *)
+    (File_key.t * Parsing_heaps.file_addr) list ->
     (* map from files to error sets (accumulator) *)
-    error list FilenameMap.t ->
+    (File_key.t * File_key.t Nel.t) SMap.t ->
     (* file, error map (accumulator) *)
-    File_key.t * error list FilenameMap.t
+    Parsing_heaps.file_addr option * (File_key.t * File_key.t Nel.t) SMap.t
 end
 
-(****************** Node module system *********************)
-
-(* TODO this exists only until we start resolving files using
-   NameHeap. unfortunately that will require more refactoring
-   than it should, since imported_module is currently called
-   during local inference, and simply storing raw module names
-   in cx.required et al and looking them up at merge time appears
-   to violate some well-hidden private agreements. TODO *)
-
-(* only purpose here is to guarantee a case-sensitive file exists
-   and try to keep it from being too horrendously expensive *)
-
-let case_sensitive = not (Sys.file_exists (String.uppercase_ascii (Sys.getcwd ())))
-
-(* map of dirs to file lists *)
-
-(** TODO [perf]: investigate whether this takes too much memory **)
-let files_in_dir = ref SMap.empty
-
-(* called from Types_js.typecheck, so we rebuild every time *)
-let clear_filename_cache () = files_in_dir := SMap.empty
-
-(* case-sensitive dir_exists  *)
-let rec dir_exists dir =
-  try Sys.is_directory dir && (case_sensitive || file_exists dir) with
-  | _ -> false
-
-(* when system is case-insensitive, do our own file exists check *)
-and file_exists path =
-  (* case doesn't matter for "/", ".", "..." and these serve as a base-case for
-   * case-insensitive filesystems *)
-  let dir = Filename.dirname path in
-  if
-    case_sensitive
-    || path = Filename.current_dir_name
-    || path = Filename.parent_dir_name
-    || path = dir
-  then
-    Sys.file_exists path
-  else
-    let files =
-      match SMap.find_opt dir !files_in_dir with
-      | Some files -> files
-      | None ->
-        let files =
-          if dir_exists dir then
-            SSet.of_list (Array.to_list (Sys.readdir dir))
-          else
-            SSet.empty
-        in
-        files_in_dir := SMap.add dir files !files_in_dir;
-        files
-    in
-    SSet.mem (Filename.basename path) files
+let is_relative_or_absolute r =
+  Str.string_match Files.current_dir_name r 0
+  || Str.string_match Files.parent_dir_name r 0
+  || Str.string_match Files.absolute_path_regexp r 0
 
 let resolve_symlinks path = Path.to_string (Path.make path)
 
-(* Every <file>.js can be imported by its path, so it effectively exports a
-   module by the name <file>.js. Every <file>.js.flow shadows the corresponding
-   <file>.js, so it effectively exports a module by the name <file>.js. *)
-let eponymous_module file = Modulename.Filename (Files.chop_flow_ext file)
+let record_phantom_dependency mname = function
+  | None -> ()
+  | Some phantom_acc -> phantom_acc := Modulename.Set.add mname !phantom_acc
 
-(*******************************)
+(****************** Node module system *********************)
 
 module Node = struct
   let exported_module _ _ _ = None
 
-  let record_path path = function
-    | None -> ()
-    | Some resolution_acc -> resolution_acc.paths <- SSet.add path resolution_acc.paths
-
-  let path_if_exists =
-    let path_exists ~file_options path =
-      file_exists path && (not (Files.is_ignored file_options path)) && not (dir_exists path)
-    in
-    fun ~file_options resolution_acc path ->
-      let path = resolve_symlinks path in
-      let declaration_path = path ^ Files.flow_ext in
-      if
-        Files.is_flow_file ~options:file_options path
-        && (path_exists ~file_options declaration_path || path_exists ~file_options path)
-      then
-        Some path
-      else (
-        record_path path resolution_acc;
-        None
-      )
-
-  let path_if_exists_with_file_exts ~file_options resolution_acc path file_exts =
-    lazy_seq
-      (file_exts
-      |> Base.List.map ~f:(fun ext ->
-             lazy (path_if_exists ~file_options resolution_acc (path ^ ext))
-         )
-      )
-
-  let parse_main
-      ~reader ~root ~file_options (loc : ALoc.t) resolution_acc package_filename file_exts =
-    let package_filename = resolve_symlinks package_filename in
-    if (not (file_exists package_filename)) || Files.is_ignored file_options package_filename then
+  let path_if_exists ~reader ~file_options phantom_acc path =
+    let path = resolve_symlinks path in
+    let mname = Files.eponymous_module (Files.filename_from_string ~options:file_options path) in
+    match Parsing_heaps.Reader_dispatcher.get_provider ~reader mname with
+    | Some _ -> Some mname
+    | None ->
+      record_phantom_dependency mname phantom_acc;
       None
-    else
-      let package =
-        match Package_heaps.Reader_dispatcher.get_package ~reader package_filename with
-        | Some (Ok package) -> package
-        | Some (Error ()) ->
-          (* invalid, but we already raised an error when building PackageHeap *)
-          Package_json.empty
-        | None ->
-          begin
-            match resolution_acc with
-            | Some resolution_acc ->
-              let msg =
-                let is_included = Files.is_included file_options package_filename in
-                let project_root_str = Path.to_string root in
-                let is_contained_in_root = Files.is_prefix project_root_str package_filename in
-                let package_relative_to_root =
-                  spf
-                    "<<PROJECT_ROOT>>%s%s"
-                    Filename.dir_sep
-                    (Files.relative_path project_root_str package_filename)
-                in
-                if is_included || is_contained_in_root then
-                  Error_message.(EInternal (loc, PackageHeapNotFound package_relative_to_root))
-                else
-                  Error_message.EModuleOutsideRoot (loc, package_relative_to_root)
-              in
-              resolution_acc.errors <- msg :: resolution_acc.errors
-            | None -> ()
-          end;
-          Package_json.empty
-      in
-      match Package_json.main package with
-      | None -> None
-      | Some file ->
-        let dir = Filename.dirname package_filename in
-        let path = Files.normalize_path dir file in
-        let path_w_index = Filename.concat path "index" in
-        lazy_seq
-          [
-            lazy (path_if_exists ~file_options resolution_acc path);
-            lazy (path_if_exists_with_file_exts ~file_options resolution_acc path file_exts);
-            lazy (path_if_exists_with_file_exts ~file_options resolution_acc path_w_index file_exts);
-          ]
 
-  let resolve_relative ~options ~reader (loc : ALoc.t) ?resolution_acc root_path rel_path =
+  let path_if_exists_with_file_exts ~reader ~file_options phantom_acc path file_exts =
+    let f ext = path_if_exists ~reader ~file_options phantom_acc (path ^ ext) in
+    List.find_map f file_exts
+
+  let parse_main ~reader ~file_options phantom_acc package_filename file_exts =
+    let package_filename = resolve_symlinks package_filename in
+    let package =
+      let file_key = File_key.JsonFile package_filename in
+      match Parsing_heaps.Reader_dispatcher.get_package_info ~reader file_key with
+      | Some (Ok package) -> package
+      | Some (Error ()) ->
+        (* invalid, but we already raised an error when building PackageHeap *)
+        Package_json.empty
+      | None -> Package_json.empty
+    in
+    match Package_json.main package with
+    | None -> None
+    | Some file ->
+      let dir = Filename.dirname package_filename in
+      let path = Files.normalize_path dir file in
+      let path_w_index = Filename.concat path "index" in
+      lazy_seq
+        [
+          lazy (path_if_exists ~reader ~file_options phantom_acc path);
+          lazy (path_if_exists_with_file_exts ~reader ~file_options phantom_acc path file_exts);
+          lazy
+            (path_if_exists_with_file_exts ~reader ~file_options phantom_acc path_w_index file_exts);
+        ]
+
+  let resolve_package ~options ~reader ?phantom_acc package_dir =
+    let file_options = Options.file_options options in
+    let file_exts = Files.module_file_exts file_options in
+    lazy_seq
+      [
+        lazy
+          (parse_main
+             ~reader
+             ~file_options
+             phantom_acc
+             (Filename.concat package_dir "package.json")
+             file_exts
+          );
+        lazy
+          (path_if_exists_with_file_exts
+             ~reader
+             ~file_options
+             phantom_acc
+             (Filename.concat package_dir "index")
+             file_exts
+          );
+      ]
+
+  let resolve_relative ~options ~reader ?phantom_acc root_path rel_path =
     let file_options = Options.file_options options in
     let path = Files.normalize_path root_path rel_path in
     (* We do not try resource file extensions here. So while you can write
      * require('foo') to require foo.js, it should never resolve to foo.css
      *)
-    let file_exts = SSet.elements (Files.module_file_exts file_options) in
+    let file_exts = Files.module_file_exts file_options in
     lazy_seq
       [
-        lazy (path_if_exists ~file_options resolution_acc path);
-        lazy (path_if_exists_with_file_exts ~file_options resolution_acc path file_exts);
-        lazy
-          (parse_main
-             ~reader
-             ~root:(Options.root options)
-             ~file_options
-             loc
-             resolution_acc
-             (Filename.concat path "package.json")
-             file_exts
-          );
-        lazy
-          (path_if_exists_with_file_exts
-             ~file_options
-             resolution_acc
-             (Filename.concat path "index")
-             file_exts
-          );
+        lazy (path_if_exists ~reader ~file_options phantom_acc path);
+        lazy (path_if_exists_with_file_exts ~reader ~file_options phantom_acc path file_exts);
+        lazy (resolve_package ~options ~reader ?phantom_acc path);
       ]
 
-  let rec node_module ~options ~reader node_modules_containers file loc resolution_acc dir r =
+  let rec node_module ~options ~reader node_modules_containers file ?phantom_acc dir r =
     let file_options = Options.file_options options in
     lazy_seq
       [
@@ -376,8 +303,7 @@ module Node = struct
                          resolve_relative
                            ~options
                            ~reader
-                           loc
-                           ?resolution_acc
+                           ?phantom_acc
                            dir
                            (spf "%s%s%s" dirname Filename.dir_sep r)
                        else
@@ -396,84 +322,67 @@ module Node = struct
                ~reader
                node_modules_containers
                file
-               loc
-               resolution_acc
+               ?phantom_acc
                (Filename.dirname dir)
                r
           );
       ]
 
-  let absolute r = Str.string_match Files.absolute_path_regexp r 0
+  (* The flowconfig option `module.system.node.allow_root_relative` tells Flow
+   * to resolve requires like `require('foo/bar.js')` relative to the project
+   * root directory. This is something bundlers like Webpack can be configured
+   * to do. *)
+  let resolve_root_relative ~options ~reader ?phantom_acc import_str =
+    if Options.node_resolver_allow_root_relative options then
+      let dirnames = Options.node_resolver_root_relative_dirnames options in
+      let root = Options.root options |> Path.to_string in
+      let f dirname =
+        let root =
+          if dirname = "" then
+            root
+          else
+            Filename.concat root dirname
+        in
+        lazy (resolve_relative ~options ~reader ?phantom_acc root import_str)
+      in
+      lazy_seq (Base.List.map ~f dirnames)
+    else
+      None
 
-  let explicitly_relative r =
-    Str.string_match Files.current_dir_name r 0 || Str.string_match Files.parent_dir_name r 0
-
-  let resolve_import
-      ~options ~reader node_modules_containers f (loc : ALoc.t) ?resolution_acc import_str =
+  let resolve_import ~options ~reader node_modules_containers f ?phantom_acc import_str =
     let file = File_key.to_string f in
     let dir = Filename.dirname file in
-    let root_str = Options.root options |> Path.to_string in
-    if explicitly_relative import_str || absolute import_str then
-      resolve_relative ~options ~reader loc ?resolution_acc dir import_str
+    if is_relative_or_absolute import_str then
+      resolve_relative ~options ~reader ?phantom_acc dir import_str
     else
       lazy_seq
         [
-          lazy
-            ( if Options.node_resolver_allow_root_relative options then
-              lazy_seq
-                (Options.node_resolver_root_relative_dirnames options
-                |> Base.List.map ~f:(fun root_relative_dirname ->
-                       lazy
-                         (let root_str =
-                            if root_relative_dirname = "" then
-                              root_str
-                            else
-                              Filename.concat root_str root_relative_dirname
-                          in
-                          resolve_relative ~options ~reader loc ?resolution_acc root_str import_str
-                         )
-                   )
-                )
-            else
-              None
-            );
-          lazy
-            (node_module
-               ~options
-               ~reader
-               node_modules_containers
-               f
-               loc
-               resolution_acc
-               dir
-               import_str
-            );
+          lazy (resolve_root_relative ~options ~reader ?phantom_acc import_str);
+          lazy (node_module ~options ~reader node_modules_containers f ?phantom_acc dir import_str);
         ]
 
-  let imported_module ~options ~reader node_modules_containers file loc ?resolution_acc import_str =
-    let candidates = module_name_candidates ~options import_str in
-    let rec choose_candidate = function
-      | [] -> None
-      | candidate :: candidates ->
-        let resolved =
-          resolve_import ~options ~reader node_modules_containers file loc ?resolution_acc candidate
-        in
-        (match resolved with
-        | None -> choose_candidate candidates
-        | Some _ as result -> result)
-    in
-    match choose_candidate candidates with
-    | Some str ->
-      let options = Options.file_options options in
-      eponymous_module (Files.filename_from_string ~options str)
-    | None -> Modulename.String import_str
+  let imported_module ~options ~reader node_modules_containers file ?phantom_acc r =
+    let candidates = module_name_candidates ~options r in
+    match
+      List.find_map
+        (resolve_import ~options ~reader node_modules_containers file ?phantom_acc)
+        (Nel.to_list candidates)
+    with
+    | Some m -> Ok m
+    | None ->
+      (* For the Node module system, we always use the original unmapped name in
+       * error messages, so we never need to store a mapped name.
+       *
+       * TODO: This means that name mappers can not force a mapped module name
+       * to resolve to a libdef, since we try to resolve to libdef modules
+       * during check in the `Error _` case. *)
+      Error None
 
   (* in node, file names are module names, as guaranteed by
      our implementation of exported_name, so anything but a
      singleton provider set is craziness. *)
   let choose_provider m files errmap =
-    let files = FilenameSet.elements files in
-    let fallback () = failwith (spf "internal error: empty provider set for module %S" m) in
+    let fallback () = None in
     choose_provider_and_warn_about_duplicates m errmap files fallback
 end
 
@@ -481,7 +390,6 @@ end
 
 module Haste : MODULE_SYSTEM = struct
   let short_module_name_of = function
-    | File_key.Builtins -> assert false
     | File_key.LibFile file
     | File_key.SourceFile file
     | File_key.JsonFile file
@@ -491,7 +399,6 @@ module Haste : MODULE_SYSTEM = struct
   let is_mock =
     let mock_path = Str.regexp ".*/__mocks__/.*" in
     function
-    | File_key.Builtins -> false
     | File_key.LibFile file
     | File_key.SourceFile file
     | File_key.JsonFile file
@@ -515,11 +422,17 @@ module Haste : MODULE_SYSTEM = struct
     let reduce_name name (regexp, template) = Str.global_replace regexp template name in
     (fun options name -> List.fold_left reduce_name name (Options.haste_name_reducers options))
 
+  let is_within_node_modules options =
+    let root = Options.root options in
+    let options = Options.file_options options in
+    Files.is_within_node_modules ~root ~options
+
   let exported_module options =
     let is_haste_file = is_haste_file options in
+    let is_within_node_modules = is_within_node_modules options in
     fun file info ->
-      match file with
-      | File_key.SourceFile _ ->
+      match (file, info) with
+      | (File_key.SourceFile _, `Module info) ->
         if is_mock file then
           Some (short_module_name_of file)
         else if Options.haste_use_name_reducers options then
@@ -533,59 +446,88 @@ module Haste : MODULE_SYSTEM = struct
             None
         else
           Docblock.providesModule info
+      | (File_key.JsonFile path, `Package pkg) ->
+        if Package_json.haste_commonjs pkg || not (is_within_node_modules path) then
+          Package_json.name pkg
+        else
+          None
       | _ ->
         (* Lib files, resource files, etc don't have any fancy haste name *)
         None
 
-  let expanded_name ~reader r =
-    match Str.split_delim (Str.regexp_string "/") r with
-    | [] -> None
-    | package_name :: rest ->
-      Package_heaps.Reader_dispatcher.get_package_directory ~reader package_name
-      |> Base.Option.map ~f:(fun package -> Files.construct_path package rest)
+  let package_dir_opt ~reader addr =
+    if Parsing_heaps.Reader_dispatcher.is_package_file ~reader addr then
+      Some (Parsing_heaps.read_file_name addr |> Filename.dirname)
+    else
+      None
 
-  (* similar to Node resolution, with possible special cases *)
-  let resolve_import ~options ~reader node_modules_containers f loc ?resolution_acc r =
-    let file = File_key.to_string f in
-    lazy_seq
-      [
-        lazy (Node.resolve_import ~options ~reader node_modules_containers f loc ?resolution_acc r);
-        lazy
-          (match expanded_name ~reader r with
-          | Some r ->
-            Node.resolve_relative ~options ~reader loc ?resolution_acc (Filename.dirname file) r
-          | None -> None);
-      ]
-
-  let imported_module
-      ~options ~reader node_modules_containers file loc ?resolution_acc imported_name =
-    let candidates = module_name_candidates ~options imported_name in
-    (*
-     * In Haste, we don't have an autoritative list of all valid module names
-     * until after all modules have been sweeped (because the module name is
-     * specified in the contents of the file). So, unlike the node module
-     * system, we can't run through the list of mapped module names and only
-     * choose the first one that is valid.
-     *
-     * Therefore, for the Haste module system, we simply always pick the first
-     * matching candidate (rather than the first *valid* matching candidate).
-     *)
-    let chosen_candidate = List.hd candidates in
-    let resolved =
-      resolve_import
-        ~options
-        ~reader
-        node_modules_containers
-        file
-        loc
-        ?resolution_acc
-        chosen_candidate
+  let resolve_haste_module ~options ~reader ?phantom_acc ~dir r =
+    let (name, subpath) =
+      match String.split_on_char '/' r with
+      | [] -> (r, [])
+      | scope :: package :: rest when String.starts_with ~prefix:"@" scope ->
+        (scope ^ "/" ^ package, rest)
+      | package :: rest -> (package, rest)
     in
-    match resolved with
-    | Some name ->
-      let options = Options.file_options options in
-      eponymous_module (Files.filename_from_string ~options name)
-    | None -> Modulename.String chosen_candidate
+    let mname = Modulename.String name in
+    match Parsing_heaps.Reader_dispatcher.get_provider ~reader mname with
+    | Some addr ->
+      (match (package_dir_opt ~reader addr, subpath) with
+      | (Some package_dir, []) -> Node.resolve_package ~options ~reader ?phantom_acc package_dir
+      | (Some package_dir, subpath) ->
+        (* add a phantom dep on the package name, so we re-resolve the subpath
+           if the package gets a new provider *)
+        record_phantom_dependency mname phantom_acc;
+
+        let path = Files.construct_path package_dir subpath in
+        Node.resolve_relative ~options ~reader ?phantom_acc dir path
+      | (None, []) -> Some mname
+      | (None, _ :: _) ->
+        (* if r = foo/bar and foo is a regular module, don't resolve.
+           TODO: could we provide a better error than just failing to resolve?
+
+           we do need to add a phantom dep on the module, so we re-resolve
+           if the provider changes to a package. *)
+        record_phantom_dependency mname phantom_acc;
+        None)
+    | None ->
+      record_phantom_dependency mname phantom_acc;
+      None
+
+  let resolve_import ~options ~reader node_modules_containers f ?phantom_acc r =
+    let file = File_key.to_string f in
+    let dir = Filename.dirname file in
+    if is_relative_or_absolute r then
+      Node.resolve_relative ~options ~reader ?phantom_acc dir r
+    else
+      lazy_seq
+        [
+          lazy (resolve_haste_module ~options ~reader ?phantom_acc ~dir r);
+          lazy (Node.resolve_root_relative ~options ~reader ?phantom_acc r);
+          lazy (Node.node_module ~options ~reader node_modules_containers file ?phantom_acc dir r);
+        ]
+
+  let imported_module ~options ~reader node_modules_containers file ?phantom_acc r =
+    (* For historical reasons, the Haste module system always picks the first
+     * matching candidate, unlike the Node module system which picks the first
+     * "valid" matching candidate. *)
+    let candidates = module_name_candidates ~options r in
+    let r = Nel.hd candidates in
+    match resolve_import ~options ~reader node_modules_containers file ?phantom_acc r with
+    | exception exn ->
+      let exn = Exception.wrap exn in
+      raise (Failed_to_resolve_module { name = r; file; exn })
+    | Some m -> Ok m
+    | None ->
+      (* If the candidates list is a singleton, then no name mappers applied,
+       * and we failed to resolve the unmapped name. Otherwise, `r` is the
+       * chosen mapped name and we store it for error reporting. *)
+      let mapped_name =
+        match Nel.tl candidates with
+        | [] -> None
+        | _ -> Some r
+      in
+      Error mapped_name
 
   (* in haste, many files may provide the same module. here we're also
      supporting the notion of mock modules - allowed duplicates used as
@@ -594,12 +536,15 @@ module Haste : MODULE_SYSTEM = struct
      we pick one arbitrarily and issue duplicate module warnings for the
      rest. *)
   let choose_provider m files errmap =
-    match FilenameSet.elements files with
-    | [] -> failwith (spf "internal error: empty provider set for module %S" m)
-    | [f] -> (f, errmap)
+    match files with
+    | [] -> (None, errmap)
+    | [(_, p)] -> (Some p, errmap)
     | files ->
-      let (mocks, non_mocks) = List.partition is_mock files in
-      let fallback () = List.hd mocks in
+      let (mocks, non_mocks) =
+        let f (key, _) = is_mock key in
+        List.partition f files
+      in
+      let fallback () = Some (snd (List.hd mocks)) in
       choose_provider_and_warn_about_duplicates m errmap non_mocks fallback
 end
 
@@ -617,10 +562,10 @@ let get_module_system opts =
   | Some system -> system
   | None ->
     let module M =
-    ( val match Options.module_system opts with
-          | Options.Node -> (module Node : MODULE_SYSTEM)
-          | Options.Haste -> (module Haste : MODULE_SYSTEM)
-      )
+      ( val match Options.module_system opts with
+            | Options.Node -> (module Node : MODULE_SYSTEM)
+            | Options.Haste -> (module Haste : MODULE_SYSTEM)
+        )
     in
     let system = (module M : MODULE_SYSTEM) in
     module_system := Some system;
@@ -630,9 +575,9 @@ let exported_module ~options =
   let module M = (val get_module_system options) in
   M.exported_module options
 
-let imported_module ~options ~reader ~node_modules_containers file loc ?resolution_acc r =
+let imported_module ~options ~reader ~node_modules_containers file ?phantom_acc r =
   let module M = (val get_module_system options) in
-  M.imported_module ~options ~reader node_modules_containers file loc ?resolution_acc r
+  M.imported_module ~options ~reader node_modules_containers file ?phantom_acc r
 
 let choose_provider ~options m files errmap =
   let module M = (val get_module_system options) in
@@ -642,51 +587,22 @@ let choose_provider ~options m files errmap =
 (***** public *****)
 (******************)
 
-let checked_file ~reader ~audit f =
-  let info = f |> Module_heaps.Reader_dispatcher.get_info_unsafe ~reader ~audit in
-  info.Module_heaps.checked
-
-(** Resolve references to required modules in a file, and record the results.
-
-    TODO [perf]: measure size and possibly optimize *)
-let resolved_requires_of ~options ~reader node_modules_containers file require_loc =
-  let resolution_acc = { paths = SSet.empty; errors = [] } in
-  let resolved_modules =
-    SMap.fold
-      (fun mref locs acc ->
-        let m =
-          let loc = Nel.hd locs in
-          imported_module file loc mref ~options ~reader ~node_modules_containers ~resolution_acc
-        in
-        SMap.add mref m acc)
-      require_loc
-      SMap.empty
-  in
-  let { paths = phantom_dependents; errors } = resolution_acc in
-  (errors, Module_heaps.mk_resolved_requires file ~resolved_modules ~phantom_dependents)
-
 let add_parsed_resolved_requires ~mutator ~reader ~options ~node_modules_containers file =
-  let file_sig =
-    Parsing_heaps.Mutator_reader.get_file_sig_unsafe ~reader file |> File_sig.abstractify_locs
-  in
-  let require_loc = File_sig.With_ALoc.(require_loc_map file_sig.module_sig) in
-  let (errors, resolved_requires) =
+  let file_addr = Parsing_heaps.get_file_addr_unsafe file in
+  let parse = Parsing_heaps.Mutator_reader.get_typed_parse_unsafe ~reader file file_addr in
+  let requires = Parsing_heaps.read_requires parse in
+  let phantom_acc = ref Modulename.Set.empty in
+  let resolved_modules =
     let reader = Abstract_state_reader.Mutator_state_reader reader in
-    resolved_requires_of ~options ~reader node_modules_containers file require_loc
+    Array.map
+      (fun mref -> imported_module file mref ~options ~reader ~node_modules_containers ~phantom_acc)
+      requires
   in
-  let resolved_requires_changed =
-    Module_heaps.Resolved_requires_mutator.add_resolved_requires mutator file resolved_requires
-  in
-  let errorset =
-    List.fold_left
-      (fun acc msg ->
-        Flow_error.ErrorSet.add
-          (Flow_error.error_of_msg ~trace_reasons:[] ~source_file:file msg)
-          acc)
-      Flow_error.ErrorSet.empty
-      errors
-  in
-  (resolved_requires_changed, errorset)
+  Parsing_heaps.Resolved_requires_mutator.add_resolved_requires
+    mutator
+    file_addr
+    parse
+    (resolved_modules, !phantom_acc)
 
 (* Repick providers for modules that are exported by new and changed files, or
    were provided by changed and deleted files.
@@ -747,316 +663,130 @@ let add_parsed_resolved_requires ~mutator ~reader ~options ~node_modules_contain
    (b) remove the unregistered modules from NameHeap
    (c) register the new providers in NameHeap
 *)
-let commit_modules ~transaction ~workers ~options ~reader ~is_init new_or_changed dirty_modules =
+let commit_modules ~workers ~options dirty_modules =
+  let module Heap = SharedMem.NewAPI in
   let debug = Options.is_debug_mode options in
-  let mutator = Module_heaps.Commit_modules_mutator.create transaction is_init in
-  (* prep for registering new mappings in NameHeap *)
-  let (to_remove, providers, to_replace, errmap, changed_modules) =
-    List.fold_left
-      (fun (rem, prov, rep, errmap, diff) (m, f_opt) ->
-        match Module_hashtables.Mutator_reader.find_in_all_providers_unsafe ~reader m with
-        | ps when FilenameSet.is_empty ps ->
-          if debug then prerr_endlinef "no remaining providers: %S" (Modulename.to_string m);
-          (Modulename.Set.add m rem, prov, rep, errmap, Modulename.Set.add m diff)
-        | ps ->
-          (* incremental: install empty error sets here for provider candidates.
-             this will have the effect of resetting downstream errors for these
-             files, when the returned error map is used by our caller.
-             IMPORTANT: since each file may (does) provide more than one module,
-             files may already have acquired errors earlier in this fold, so we
-             must only add an empty entry if no entry is already present
-          *)
-          let errmap =
-            FilenameSet.fold
-              (fun f acc ->
-                match FilenameMap.find_opt f acc with
-                | Some _ -> acc
-                | None -> FilenameMap.add f [] acc)
-              ps
-              errmap
-          in
-          (* now choose provider for m *)
-          let (p, errmap) = choose_provider ~options (Modulename.to_string m) ps errmap in
-          (* register chosen provider in NameHeap *)
-          (match f_opt with
-          | Some f ->
-            if f = p then (
-              (* When can this happen? Say m pointed to f before, a different file
-                 f' that provides m changed (so m is not in old_modules), but f
-                 continues to be the chosen provider = p (winning over f'). *)
-              if debug then
-                prerr_endlinef
-                  "unchanged provider: %S -> %s"
-                  (Modulename.to_string m)
-                  (File_key.to_string p);
-              let diff =
-                if FilenameSet.mem p new_or_changed then
-                  Modulename.Set.add m diff
-                else
-                  diff
-              in
-              (rem, prov, rep, errmap, diff)
-            ) else (
-              (* When can this happen? Say m pointed to f before, a different file
-                 f' that provides m changed (so m is not in old_modules), and
-                 now f' becomes the chosen provider = p (winning over f). *)
-              if debug then
-                prerr_endlinef
-                  "new provider: %S -> %s replaces %s"
-                  (Modulename.to_string m)
-                  (File_key.to_string p)
-                  (File_key.to_string f);
-              let diff = Modulename.Set.add m diff in
-              (rem, p :: prov, (m, p) :: rep, errmap, diff)
-            )
-          | None ->
-            (* When can this happen? Either m pointed to a file that used to
-               provide m and changed or got deleted (causing m to be in
-               old_modules), or m didn't have a provider before. *)
-            if debug then
-              prerr_endlinef
-                "initial provider %S -> %s"
-                (Modulename.to_string m)
-                (File_key.to_string p);
-            let diff = Modulename.Set.add m diff in
-            (rem, p :: prov, (m, p) :: rep, errmap, diff)))
-      (Modulename.Set.empty, [], [], FilenameMap.empty, Modulename.Set.empty)
-      dirty_modules
-  in
-  let%lwt () =
-    Module_heaps.Commit_modules_mutator.remove_and_replace mutator ~workers ~to_remove ~to_replace
-  in
-  if debug then prerr_endlinef "*** done committing modules ***";
-  Lwt.return (providers, changed_modules, errmap)
-
-let get_files ~reader ~audit file info =
-  let get_file = Module_heaps.Reader_dispatcher.get_file ~reader ~audit in
-  let eponymous_module_provider =
-    let m = eponymous_module file in
-    (m, get_file m)
-  in
-  match info.Module_heaps.module_name with
-  | None -> [eponymous_module_provider]
-  | Some name ->
-    let m = Modulename.String name in
-    [(m, get_file m); eponymous_module_provider]
-
-let get_files_unsafe ~reader ~audit file info =
-  let get_file = Module_heaps.Mutator_reader.get_file_unsafe ~reader ~audit in
-  let eponymous_module_provider =
-    let m = eponymous_module file in
-    (m, get_file m)
-  in
-  match info.Module_heaps.module_name with
-  | None -> [eponymous_module_provider]
-  | Some name ->
-    let m = Modulename.String name in
-    [(m, get_file m); eponymous_module_provider]
-
-let calc_modules_helper ~reader workers files =
-  MultiWorkerLwt.call
-    workers
-    ~job:
-      (List.fold_left (fun acc file ->
-           match Module_heaps.Mutator_reader.get_info ~reader ~audit:Expensive.ok file with
-           | Some info -> (file, get_files_unsafe ~reader ~audit:Expensive.ok file info) :: acc
-           | None -> acc
-       )
+  let commit_haste (unchanged, errmap) mname name =
+    let m = Parsing_heaps.get_haste_module_unsafe name in
+    let provider_ent = Heap.get_haste_provider m in
+    let all_providers =
+      let f acc f =
+        let key = Parsing_heaps.read_file_key f in
+        FilenameMap.add key f acc
+      in
+      Heap.get_haste_all_providers_exclusive m
+      |> List.fold_left f FilenameMap.empty
+      |> FilenameMap.bindings
+    in
+    let old_provider = Heap.entity_read_latest provider_ent in
+    let (new_provider, errmap) = choose_provider ~options name all_providers errmap in
+    match (old_provider, new_provider) with
+    | (_, None) ->
+      (* TODO: Clean up modules which have no providers and no dependents. At
+       * this point we don't have enough information to remove a module because
+       * we might gain new dependents in the resolve require step after commit
+       * modules.
+       *
+       * X-ref update revdeps in parsing heaps, where a module can lose its last
+       * dependent. *)
+      if debug then prerr_endlinef "no remaining providers: %s" name;
+      Heap.entity_advance provider_ent None;
+      (unchanged, errmap)
+    | (None, Some p) ->
+      (* When can this happen? Either m pointed to a file that used to
+         provide m and changed or got deleted (causing m to be in
+         old_modules), or m didn't have a provider before. *)
+      if debug then prerr_endlinef "initial provider %s -> %s" name (Parsing_heaps.read_file_name p);
+      Heap.entity_advance provider_ent (Some p);
+      (unchanged, errmap)
+    | (Some old_p, Some new_p) ->
+      if Heap.files_equal old_p new_p then (
+        (* When can this happen? Say m pointed to f before, a different file
+           f' that provides m changed (so m is not in old_modules), but f
+           continues to be the chosen provider = p (winning over f'). *)
+        if debug then
+          prerr_endlinef "unchanged provider: %s -> %s" name (Parsing_heaps.read_file_name new_p);
+        let unchanged =
+          (* Even if the module has the same provider file, we might need to
+           * treat this module as changed. Remember that we use changed modules
+           * to get the set of dirty direct dependents -- dependents which can
+           * not be found through the server env's dependency graph.
+           *
+           * Specifically, we care about parsed<->unparsed transitions.
+           * 1. Providers which were unparsed, now parsed, which had dependents
+           * 2. Providers which were parsed, now unparsed, which have dependents
+           *
+           * These dependents are not included in the server env dep graph. *)
+          let parse_ent = Heap.get_parse new_p in
+          let old_typed = Option.bind (Heap.entity_read_committed parse_ent) Heap.coerce_typed in
+          let new_typed = Option.bind (Heap.entity_read_latest parse_ent) Heap.coerce_typed in
+          match (old_typed, new_typed) with
+          | (Some _, None)
+          | (None, Some _) ->
+            unchanged
+          | _ -> Modulename.Set.add mname unchanged
+        in
+        (unchanged, errmap)
+      ) else (
+        (* When can this happen? Say m pointed to f before, a different file
+           f' that provides m changed (so m is not in old_modules), and
+           now f' becomes the chosen provider = p (winning over f). *)
+        if debug then
+          prerr_endlinef
+            "new provider: %s -> %s replaces %s"
+            name
+            (Parsing_heaps.read_file_name new_p)
+            (Parsing_heaps.read_file_name old_p);
+        Heap.entity_advance provider_ent (Some new_p);
+        (unchanged, errmap)
       )
-    ~neutral:[]
-    ~merge:List.rev_append
-    ~next:(MultiWorkerLwt.next workers (FilenameSet.elements files))
-
-(* Calculate the set of modules whose current providers are changed or deleted files.
-
-   Possibilities:
-   1. file is current registered module provider for a given module name
-   2. file is not current provider, but record is still registered
-   3. file isn't in the map at all. This means file is new.
-   We return the set of module names whose current providers are the same as the
-   given files (#1). This is the set commit_modules expects as its second
-   argument.
-
-   NOTE: The notion of "current provider" is murky, since every file at least
-   provides its eponymous module. So we also include it in the returned set.
-
-   TODO: Does a .flow file also provide its eponymous module? Or does it provide
-   the eponymous module of the file it shadows?
-*)
-let calc_old_modules =
-  let calc_from_module_assocs ~all_providers_mutator ~options old_file_module_assoc =
-    (* files may or may not be registered as module providers.
-       when they are, we need to clear their registrations *)
-    let old_modules =
-      List.fold_left
-        (fun old_modules (file, module_provider_assoc) ->
-          List.fold_left
-            (fun old_modules (module_name, provider) ->
-              Module_hashtables.All_providers_mutator.remove_provider
-                all_providers_mutator
-                file
-                module_name;
-              if provider = file then
-                (module_name, Some provider) :: old_modules
-              else
-                old_modules)
-            old_modules
-            module_provider_assoc)
-        []
-        old_file_module_assoc
-    in
-    let debug = Options.is_debug_mode options in
-    if debug then
-      prerr_endlinef "*** old modules (changed and deleted files) %d ***" (List.length old_modules);
-
-    (* return *)
-    old_modules
   in
-  fun workers ~all_providers_mutator ~options ~reader new_or_changed_or_deleted ->
-    let%lwt old_file_module_assoc = calc_modules_helper ~reader workers new_or_changed_or_deleted in
-    Lwt.return (calc_from_module_assocs ~all_providers_mutator ~options old_file_module_assoc)
-
-module IntroduceFiles : sig
-  val introduce_files :
-    mutator:Module_heaps.Introduce_files_mutator.t ->
-    reader:Mutator_state_reader.t ->
-    all_providers_mutator:Module_hashtables.All_providers_mutator.t ->
-    workers:MultiWorkerLwt.worker list option ->
-    options:Options.t ->
-    parsed:File_key.t list ->
-    unparsed:(File_key.t * Docblock.t) list ->
-    (Modulename.t * File_key.t option) list Lwt.t
-
-  val introduce_files_from_saved_state :
-    mutator:Module_heaps.Introduce_files_mutator.t ->
-    all_providers_mutator:Module_hashtables.All_providers_mutator.t ->
-    workers:MultiWorkerLwt.worker list option ->
-    options:Options.t ->
-    parsed:(File_key.t * Module_heaps.info) list ->
-    unparsed:(File_key.t * Module_heaps.info) list ->
-    (Modulename.t * File_key.t option) list Lwt.t
-end = struct
-  (* Before and after inference, we add per-file module info to the shared heap
-     from worker processes. Note that we wait to choose providers until inference
-     is complete. *)
-  let add_parsed_info ~options =
-    let exported_module = exported_module ~options in
-    let force_check = Options.all options in
-    fun ~mutator ~reader file ->
-      let docblock = Parsing_heaps.Reader_dispatcher.get_docblock_unsafe ~reader file in
-      let module_name = exported_module file docblock in
-      let checked = force_check || Docblock.is_flow docblock in
-      let info = { Module_heaps.module_name; checked; parsed = true } in
-      Module_heaps.Introduce_files_mutator.add_info mutator file info;
-      (file, info)
-
-  (* We need to track files that have failed to parse. This begins with
-     adding tracking records for unparsed files to InfoHeap. They never
-     become providers - the process of committing modules happens after
-     parsed files are finished with local inference. But since we guess
-     the module names of unparsed files, we're able to tell whether an
-     unparsed file has been required/imported.
-  *)
-  let add_unparsed_info ~options =
-    let exported_module = exported_module ~options in
-    let force_check = Options.all options in
-    fun ~mutator ~reader:_ (file, docblock) ->
-      let module_name = exported_module file docblock in
-      let checked = force_check || File_key.is_lib_file file || Docblock.is_flow docblock in
-      let info = { Module_heaps.module_name; checked; parsed = false } in
-      Module_heaps.Introduce_files_mutator.add_info mutator file info;
-      (file, info)
-
-  let calc_new_modules ~all_providers_mutator ~options file_module_assoc =
-    (* all modules provided by newly parsed / unparsed files must be repicked *)
-    let new_modules =
-      List.fold_left
-        (fun new_modules (file, module_opt_provider_assoc) ->
-          List.fold_left
-            (fun new_modules (module_, opt_provider) ->
-              Module_hashtables.All_providers_mutator.add_provider
-                all_providers_mutator
-                file
-                module_;
-              (module_, opt_provider) :: new_modules)
-            new_modules
-            module_opt_provider_assoc)
-        []
-        file_module_assoc
+  let commit_file unchanged mname file_key =
+    let get_parses key =
+      match Parsing_heaps.get_file_addr key with
+      | None -> (None, None)
+      | Some file ->
+        let ent = Heap.get_parse file in
+        (Heap.entity_read_committed ent, Heap.entity_read_latest ent)
     in
-    let debug = Options.is_debug_mode options in
-    if debug then
-      prerr_endlinef "*** new modules (new and changed files) %d ***" (List.length new_modules);
-
-    new_modules
-
-  let introduce_files_generic
-      ~add_parsed_info
-      ~add_unparsed_info
-      ~mutator
-      ~reader
-      ~all_providers_mutator
-      ~workers
-      ~options
-      ~parsed
-      ~unparsed =
-    (* add tracking modules for unparsed files *)
-    let%lwt unparsed_file_module_assoc =
-      MultiWorkerLwt.call
-        workers
-        ~job:(fun acc files ->
-          let add_unparsed_info = add_unparsed_info ~options in
-          List.fold_left
-            (fun acc unparsed ->
-              let (file, info) = add_unparsed_info ~mutator ~reader unparsed in
-              let providers = get_files ~reader ~audit:Expensive.ok file info in
-              (file, providers) :: acc)
-            acc
-            files)
-        ~neutral:[]
-        ~merge:List.rev_append
-        ~next:(MultiWorkerLwt.next workers unparsed)
-    in
-    (* create info for parsed files *)
-    let%lwt parsed_file_module_assoc =
-      MultiWorkerLwt.call
-        workers
-        ~job:(fun acc files ->
-          let add_parsed_info = add_parsed_info ~options in
-          List.fold_left
-            (fun acc parsed ->
-              let (file, info) = add_parsed_info ~mutator ~reader parsed in
-              let providers = get_files ~reader ~audit:Expensive.ok file info in
-              (file, providers) :: acc)
-            acc
-            files)
-        ~neutral:[]
-        ~merge:List.rev_append
-        ~next:(MultiWorkerLwt.next workers parsed)
-    in
-    let new_file_module_assoc =
-      List.rev_append parsed_file_module_assoc unparsed_file_module_assoc
-    in
-    Lwt.return (calc_new_modules ~all_providers_mutator ~options new_file_module_assoc)
-
-  let introduce_files ~mutator ~reader =
-    let reader = Abstract_state_reader.Mutator_state_reader reader in
-    introduce_files_generic ~add_parsed_info ~add_unparsed_info ~mutator ~reader
-
-  let introduce_files_from_saved_state =
-    let add_info_from_saved_state ~options:_ ~mutator ~reader:_ (file, info) =
-      Module_heaps.Introduce_files_mutator.add_info mutator file info;
-      (file, info)
-    in
-    fun ~mutator ->
-      let reader = Abstract_state_reader.State_reader (State_reader.create ()) in
-      introduce_files_generic
-        ~add_parsed_info:add_info_from_saved_state
-        ~add_unparsed_info:add_info_from_saved_state
-        ~mutator
-        ~reader
-end
-
-let introduce_files = IntroduceFiles.introduce_files
-
-let introduce_files_from_saved_state = IntroduceFiles.introduce_files_from_saved_state
+    let decl_key = File_key.with_suffix file_key Files.flow_ext in
+    let (old_decl_parse, new_decl_parse) = get_parses decl_key in
+    let (old_impl_parse, new_impl_parse) = get_parses file_key in
+    match (old_decl_parse, new_decl_parse, old_impl_parse, new_impl_parse) with
+    | (None, None, None, None) -> Modulename.Set.add mname unchanged
+    | (None, Some _, _, _)
+    | (Some _, None, _, _)
+    | (None, None, Some _, None)
+    | (None, None, None, Some _) ->
+      (* If the provider file was created or deleted, then we need to track any
+       * dependents, because phantom edges are not in the server env dependency
+       * graph, but any phantom dependents need to be rechecked. *)
+      unchanged
+    | (Some old_parse, Some new_parse, _, _)
+    | (None, None, Some old_parse, Some new_parse) ->
+      (* If the provider file did a parse<->unparsed transition, we need to
+       * track any dependents, because edges involving unparsed files are not in
+       * the server env dependency graph, but any dependents need to be
+       * rechecked. *)
+      (match (Heap.coerce_typed old_parse, Heap.coerce_typed new_parse) with
+      | (Some _, None)
+      | (None, Some _) ->
+        unchanged
+      | _ -> Modulename.Set.add mname unchanged)
+  in
+  let f ((unchanged, errmap) as acc) mname =
+    match mname with
+    | Modulename.String name -> commit_haste acc mname name
+    | Modulename.Filename key -> (commit_file unchanged mname key, errmap)
+  in
+  let%lwt (unchanged, duplicate_providers) =
+    MultiWorkerLwt.call
+      workers
+      ~job:(List.fold_left f)
+      ~neutral:(Modulename.Set.empty, SMap.empty)
+      ~merge:(fun (a1, a2) (b1, b2) -> (Modulename.Set.union a1 b1, SMap.union a2 b2))
+      ~next:(MultiWorkerLwt.next workers (Modulename.Set.elements dirty_modules))
+  in
+  let changed_modules = Modulename.Set.diff dirty_modules unchanged in
+  if debug then prerr_endlinef "*** done committing modules ***";
+  Lwt.return (changed_modules, duplicate_providers)

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -19,10 +19,10 @@ type trigger =
   | DocumentSymbol of Lsp.lsp_id
   | FindReferences of Lsp.lsp_id
   | Hover of Lsp.lsp_id
-  | PushedErrorsEndOfRecheck of LspProt.recheck_reason
+  | PushedErrorsEndOfRecheck
   | PushedErrorsEnvChange
   | PushedErrorsNewSubscription
-  | PushedErrorsRecheckStreaming of LspProt.recheck_reason
+  | PushedErrorsRecheckStreaming
   | Rage of Lsp.lsp_id
   | Rename of Lsp.lsp_id
   | ServerConnected

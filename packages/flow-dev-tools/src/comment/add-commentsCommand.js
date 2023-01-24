@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -17,7 +17,6 @@ const {commonFlags, default: Base} = require('../command/Base');
 const findFlowBin = require('../command/findFlowBin').default;
 
 export type Args = {
-  all: boolean,
   bin: string,
   flowconfigName: string,
   comment: ?string,
@@ -32,7 +31,6 @@ class AddCommentsCommand extends Base<Args> {
       this.showUsage(this.BAD_ARGS);
     }
     return {
-      all: argv.all,
       bin: findFlowBin(argv.bin),
       flowconfigName: argv.flowconfigName,
       errorCheckCommand: argv.check,
@@ -72,7 +70,7 @@ Queries Flow for the errors for ROOT. Then opens a curses interface to let you s
       {
         type: 'boolean',
         name: 'all',
-        description: 'Select all errors',
+        description: 'DEPRECATED',
       },
       {
         type: 'string',

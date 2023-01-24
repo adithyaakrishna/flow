@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -23,17 +23,10 @@ type warning = int * string
 
 type error = int * string
 
-let default_explicit_values =
-  LintMap.singleton Lints.DeprecatedUtility (Severity.Err, None)
-  |> LintMap.add Lints.UntypedTypeImport (Severity.Err, None)
+let default_explicit_values = LintMap.singleton Lints.UntypedTypeImport (Severity.Err, None)
 
 let ignored_by_all =
-  [
-    Lints.DeprecatedUtility;
-    Lints.ImplicitInexactObject;
-    Lints.AmbiguousObjectType;
-    Lints.UninitializedInstanceProperty;
-  ]
+  [Lints.ImplicitInexactObject; Lints.AmbiguousObjectType; Lints.UninitializedInstanceProperty]
 
 let config_default kind =
   LintMap.find_opt kind default_explicit_values |> Base.Option.value ~default:(Severity.Off, None)
@@ -84,8 +77,6 @@ let is_enabled lint_kind settings =
     true
   | Off -> false
 
-let is_suppressed lint_kind settings = is_enabled lint_kind settings |> not
-
 type parse_result =
   | AllSetting of severity t
   | EntryList of lint_kind list * (severity * Loc.t option)
@@ -111,12 +102,11 @@ let of_lines base_settings =
       begin
         match left with
         | "all" -> Ok (AllSetting (of_default value))
-        | _ ->
-          begin
-            match kinds_of_string left with
-            | Some kinds -> Ok (EntryList (kinds, (value, Some loc)))
-            | None -> Error (label, Printf.sprintf "Invalid lint rule \"%s\" encountered." left)
-          end
+        | _ -> begin
+          match kinds_of_string left with
+          | Some kinds -> Ok (EntryList (kinds, (value, Some loc)))
+          | None -> Error (label, Printf.sprintf "Invalid lint rule \"%s\" encountered." left)
+        end
       end
     | _ ->
       Error (label, "Malformed lint rule. Properly formed rules contain a single '=' character.")

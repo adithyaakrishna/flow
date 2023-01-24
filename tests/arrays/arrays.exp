@@ -1,20 +1,3 @@
-Error --------------------------------------------------------------------------------------------------- Arrays.js:10:5
-
-Cannot call `foo` with `a[1]` bound to `x` because number [1] is incompatible with string [2]. [incompatible-call]
-
-   Arrays.js:10:5
-   10| foo(a[1]);
-           ^^^^
-
-References:
-   Arrays.js:7:8
-    7| a[0] = 1;
-              ^ [1]
-   Arrays.js:4:16
-    4| function foo(x:string) { }
-                      ^^^^^^ [2]
-
-
 Error -------------------------------------------------------------------------------------------------- isarray.js:4:31
 
 Cannot assign `array` to `problem` because read-only array type [1] is incompatible with array type [2].
@@ -111,20 +94,23 @@ References:
                 ^^^^^^^^ [1]
 
 
-Error -------------------------------------------------------------------------------------------------- spread.js:64:22
+Error --------------------------------------------------------------------------------------------------- spread.js:69:2
 
-Cannot assign array literal to `t2s` because array literal [1] has an arity of 3 but tuple type [2] has an arity of 4.
-[invalid-tuple-arity]
+Cannot cast array literal to array type because number [1] is incompatible with string [2] in array element.
+[incompatible-cast]
 
-   spread.js:64:22
-   64| let t2s: [1,2,3,4] = [...[t, t, t]]; // error tuple is only 3 long
-                            ^^^^^^^^^^^^^^ [1]
+   spread.js:69:2
+   69| ([...emp]: Array<string>); // error
+        ^^^^^^^^
 
 References:
-   spread.js:64:10
-   64| let t2s: [1,2,3,4] = [...[t, t, t]]; // error tuple is only 3 long
-                ^^^^^^^^^ [2]
+   spread.js:68:10
+   68| emp.push(42);
+                ^^ [1]
+   spread.js:69:18
+   69| ([...emp]: Array<string>); // error
+                        ^^^^^^ [2]
 
 
 
-Found 8 errors
+Found 7 errors

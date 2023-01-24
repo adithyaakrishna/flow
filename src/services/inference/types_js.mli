@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -11,15 +11,14 @@ val init :
   profiling:Profiling_js.running ->
   workers:MultiWorkerLwt.worker list option ->
   Options.t ->
-  (bool (* libs_ok *) * ServerEnv.env * Recheck_stats.estimates option) Lwt.t
+  (bool (* libs_ok *) * ServerEnv.env) Lwt.t
 
 val calc_deps :
   options:Options.t ->
   profiling:Profiling_js.running ->
-  sig_dependency_graph:FilenameGraph.t ->
   components:File_key.t Nel.t list ->
   FilenameSet.t ->
-  (FilenameSet.t FilenameMap.t * File_key.t Nel.t FilenameMap.t) Lwt.t
+  File_key.t Nel.t list Lwt.t
 
 (* incremental typecheck entry point *)
 val recheck :
@@ -27,13 +26,12 @@ val recheck :
   options:Options.t ->
   workers:MultiWorkerLwt.worker list option ->
   updates:CheckedSet.t ->
-  ServerEnv.env ->
   files_to_force:CheckedSet.t ->
-  file_watcher_metadata:MonitorProt.file_watcher_metadata ->
-  recheck_reasons:LspProt.recheck_reason list ->
+  changed_mergebase:bool option ->
+  missed_changes:bool ->
   will_be_checked_files:CheckedSet.t ref ->
-  ((profiling:Profiling_js.finished -> unit Lwt.t) * ServerStatus.summary_info * ServerEnv.env)
-  Lwt.t
+  ServerEnv.env ->
+  ((profiling:Profiling_js.finished -> unit Lwt.t) * LspProt.recheck_stats * ServerEnv.env) Lwt.t
 
 (* initial (full) check *)
 val full_check :
@@ -66,7 +64,7 @@ val debug_determine_what_to_recheck :
   freshparsed:CheckedSet.t ->
   unchanged_checked:CheckedSet.t ->
   unchanged_files_to_force:CheckedSet.t ->
-  direct_dependent_files:FilenameSet.t ->
+  dirty_direct_dependents:FilenameSet.t ->
   determine_what_to_recheck_result Lwt.t
 
 val debug_include_dependencies_and_dependents :

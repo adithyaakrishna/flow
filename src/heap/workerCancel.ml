@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -38,8 +38,8 @@ let with_no_cancellations f =
       ~f:
         begin
           fun () ->
-          set_can_worker_stop false;
-          f ()
+            set_can_worker_stop false;
+            f ()
         end
       ~finally:(fun () ->
         set_can_worker_stop true;

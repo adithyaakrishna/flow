@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -33,7 +33,8 @@ let object_like_op = function
   | Annot_MixinT _
   | Annot_ObjKitT _
   | Annot_ObjTestProtoT _
-  | Annot_UnaryMinusT _
+  | Annot_ArithT _
+  | Annot_UnaryArithT _
   | Annot_NotT _
   | Annot_ObjKeyMirror _
   | Annot_ObjMapConst _
@@ -44,7 +45,8 @@ let object_like_op = function
   | Annot_GetPropT _
   | Annot_GetElemT _
   | Annot_LookupT _
-  | Annot_ObjRestT _ ->
+  | Annot_ObjRestT _
+  | Annot_GetValuesT _ ->
     true
 
 let primitive_promoting_op = function
@@ -59,7 +61,7 @@ let function_like_op op = object_like_op op
 
 let get_fully_resolved_type cx id =
   let (_, node) = Context.find_root cx id in
-  match Lazy.force node.Constraint.constraints with
+  match node.Constraint.constraints with
   | Constraint.FullyResolved (_, (lazy t)) -> t
   | Constraint.Resolved _
   | Constraint.Unresolved _ ->
@@ -69,13 +71,101 @@ let get_builtin_typeapp cx reason x targs =
   let t = Flow_js_utils.lookup_builtin_strict cx x reason in
   TypeUtil.typeapp reason t targs
 
-module type Annotation_inference_sig = sig
-  include Type_sig_merge.CONS_GEN
+module type S = sig
+  val unresolved_tvar : Context.t -> Reason.t -> int
+
+  val mk_typeof_annotation : Context.t -> ?trace:Type.trace -> Reason.t -> Type.t -> Type.t
+
+  val mk_type_reference : Context.t -> Reason.t -> Type.t -> Type.t
+
+  val mk_instance : Context.t -> ?trace:Type.trace -> reason -> ?use_desc:bool -> Type.t -> Type.t
+
+  val reposition : Context.t -> ALoc.t -> ?annot_loc:ALoc.t -> Type.t -> Type.t
+
+  val get_prop :
+    Context.t -> Type.use_op -> Reason.t -> ?op_reason:Reason.t -> Reason.name -> Type.t -> Type.t
+
+  val get_elem : Context.t -> Type.use_op -> Reason.t -> key:Type.t -> Type.t -> Type.t
+
+  val get_builtin : Context.t -> ?trace:Type.trace -> name -> reason -> Type.t
+
+  val qualify_type :
+    Context.t -> Type.use_op -> Reason.t -> Reason.t * Reason.name -> Type.t -> Type.t
+
+  val assert_export_is_type : Context.t -> Reason.t -> string -> Type.t -> Type.t
+
+  val resolve_id : Context.t -> Type.ident -> Type.t -> unit
+
+  val mk_sig_tvar : Context.t -> Reason.t -> Type.t Lazy.t -> Type.t
+
+  val cjs_require : Context.t -> Type.t -> Reason.t -> bool -> Type.t
+
+  val export_named :
+    Context.t ->
+    Reason.reason ->
+    Type.export_kind ->
+    (ALoc.t option * Type.t) NameUtils.Map.t ->
+    Type.t ->
+    Type.t
+
+  val cjs_extract_named_exports :
+    Context.t -> Reason.reason -> Reason.reason * Type.exporttypes * bool -> Type.t -> Type.t
+
+  val import_default :
+    Context.t -> Reason.t -> Type.import_kind -> string -> string -> bool -> Type.t -> Type.t
+
+  val import_named :
+    Context.t -> Reason.t -> Type.import_kind -> string -> string -> bool -> Type.t -> Type.t
+
+  val import_ns : Context.t -> Reason.t -> bool -> Type.t -> Type.t
+
+  val import_typeof : Context.t -> Reason.t -> string -> Type.t -> Type.t
+
+  val specialize :
+    Context.t ->
+    Type.t ->
+    Type.use_op ->
+    Reason.t ->
+    Reason.t ->
+    Type.t list Base.Option.t ->
+    Type.t
+
+  val copy_named_exports : Context.t -> from_ns:Type.t -> Reason.t -> module_t:Type.t -> Type.t
+
+  val copy_type_exports : Context.t -> from_ns:Type.t -> Reason.t -> module_t:Type.t -> Type.t
+
+  val arith : Context.t -> Reason.t -> Type.t -> Type.t -> Type.ArithKind.t -> Type.t
+
+  val unary_arith : Context.t -> Reason.t -> Type.t -> Type.UnaryArithKind.t -> Type.t
+
+  val unary_not : Context.t -> Reason.t -> Type.t -> Type.t
+
+  val mixin : Context.t -> Reason.t -> Type.t -> Type.t
+
+  val object_spread :
+    Context.t ->
+    Type.use_op ->
+    Reason.reason ->
+    Type.Object.Spread.target ->
+    Type.Object.Spread.state ->
+    Type.t ->
+    Type.t
+
+  val widen_obj_type :
+    Context.t -> ?trace:Type.trace -> use_op:Type.use_op -> Reason.reason -> Type.t -> Type.t
+
+  val obj_test_proto : Context.t -> Reason.t -> Type.t -> Type.t
+
+  val obj_rest : Context.t -> Reason.t -> string list -> Type.t -> Type.t
+
+  val arr_rest : Context.t -> Type.use_op -> Reason.t -> int -> Type.t -> Type.t
+
+  val set_dst_cx : Context.t -> unit
 
   val elab_t : Context.t -> ?seen:ISet.t -> Type.t -> Type.AConstraint.op -> Type.t
 end
 
-module rec ConsGen : Annotation_inference_sig = struct
+module rec ConsGen : S = struct
   (* Annotation inference is performed in the context of the definition module (this
    * is what the input `cx` in elab_t etc. represents). However, in order to be
    * able to raise errors during annotation inference, we need to have access to the
@@ -94,14 +184,19 @@ module rec ConsGen : Annotation_inference_sig = struct
    * The only kind of errors that are reported here are "unsupported" cases. These
    * are mostly cases that rely on subtyping, which is not implemented here; most
    * commonly evaluating call-like EvalTs and speculation. *)
-  let error_unsupported cx t op =
-    let reason_op = AConstraint.display_reason_of_op op in
+  let error_unsupported_reason ?suggestion cx t reason_op =
     let loc = Reason.aloc_of_reason reason_op in
-    let msg = Error_message.EAnnotationInference (loc, reason_op, TypeUtil.reason_of_t t) in
+    let msg =
+      Error_message.EAnnotationInference (loc, reason_op, TypeUtil.reason_of_t t, suggestion)
+    in
     (match !dst_cx_ref with
     | None -> assert false
     | Some dst_cx -> Flow_js_utils.add_annot_inference_error ~src_cx:cx ~dst_cx msg);
     AnyT.error reason_op
+
+  let error_unsupported ?suggestion cx t op =
+    let reason_op = AConstraint.display_reason_of_op op in
+    error_unsupported_reason ?suggestion cx t reason_op
 
   let error_recursive cx reason =
     let loc = Reason.aloc_of_reason reason in
@@ -128,7 +223,7 @@ module rec ConsGen : Annotation_inference_sig = struct
   (* Repositioning does not seem to have any perceptible impact in annotation
    * inference. Instead of replicating the convoluted implementation of Flow_js
    * here, we just return the same type intact. *)
-  let reposition _cx _loc t = t
+  let reposition _cx _loc ?annot_loc:_ t = t
 
   (*****************)
   (* Instantiation *)
@@ -143,6 +238,8 @@ module rec ConsGen : Annotation_inference_sig = struct
     let mk_targ _cx typeparam _reason_op _reason_tapp = typeparam.Type.bound
 
     let is_subtype _cx _trace ~use_op:_ (_t1, _t2) = ()
+
+    let unify _cx _trace ~use_op:_ (_t1, _t2) = ()
 
     let reposition cx ?trace:_ loc ?desc:_ ?annot_loc:_ t = reposition cx loc t
 
@@ -187,7 +284,7 @@ module rec ConsGen : Annotation_inference_sig = struct
     (* This check is bypassed in annotation inference *)
     let assert_import_is_value _cx _trace _reason _name _export_t = ()
 
-    let error_type = AnyT.error
+    let error_type _ _ = AnyT.error
 
     let fix_this_class = InstantiationKit.fix_this_class
 
@@ -246,7 +343,7 @@ module rec ConsGen : Annotation_inference_sig = struct
         in
         cg_lookup_ cx use_op l reason_op propref
 
-    let error_type = AnyT.error
+    let error_type _ _ = AnyT.error
 
     (* We could have just returned `t` here. The OpenT indirection is for compatibility
      * with Flow_js. Specifically, without the OpenT the transformation in
@@ -270,7 +367,7 @@ module rec ConsGen : Annotation_inference_sig = struct
     let cg_lookup cx _trace ~obj_t:_ t (reason_op, _kind, propref, use_op, _ids) =
       cg_lookup_ cx use_op t reason_op propref
 
-    let cg_get_prop cx _trace t (use_op, access_reason, (prop_reason, name)) =
+    let cg_get_prop cx _trace t (use_op, access_reason, _, (prop_reason, name)) =
       ConsGen.elab_t cx t (Annot_GetPropT (access_reason, use_op, Named (prop_reason, name)))
   end
 
@@ -288,11 +385,13 @@ module rec ConsGen : Annotation_inference_sig = struct
   let rec ensure_annot_resolved cx reason id =
     let module A = Type.AConstraint in
     match Context.find_avar cx id with
-    | (_, { A.constraints = (lazy A.Annot_resolved); _ }) -> ()
-    | (_, { A.constraints = (lazy (A.Annot_unresolved _)); _ }) ->
-      resolve_id cx id (error_recursive cx reason)
-    | (root_id, { A.constraints = (lazy (A.Annot_op { id = dep_id; _ })); _ }) ->
-      let (_, { A.constraints = (lazy dep_constraint); _ }) = Context.find_avar cx dep_id in
+    | (_, { A.constraints = A.Annot_resolved; _ }) -> get_fully_resolved_type cx id
+    | (_, { A.constraints = A.Annot_unresolved _; _ }) ->
+      let t = error_recursive cx reason in
+      resolve_id cx id t;
+      t
+    | (root_id, { A.constraints = A.Annot_op { id = dep_id; _ }; _ }) ->
+      let (_, { A.constraints = dep_constraint; _ }) = Context.find_avar cx dep_id in
       A.update_deps_of_constraint dep_constraint ~f:(fun deps ->
           ISet.filter
             (fun id2 ->
@@ -300,22 +399,24 @@ module rec ConsGen : Annotation_inference_sig = struct
               root_id <> root_id2)
             deps
       );
-      resolve_id cx id (error_recursive cx reason)
+      let t = error_recursive cx reason in
+      resolve_id cx id t;
+      t
 
   and mk_lazy_tvar cx reason f =
     let id = Reason.mk_id () in
     let tvar = OpenT (reason, id) in
-    let constraints =
+    let t =
       lazy
         ( Avar.unresolved_with_id cx id reason;
           f id;
           (* Before forcing the type constraint of [id] we need to make sure the
            * respective annotation constraint has been processed. If not we infer
            * the empty type. *)
-          ensure_annot_resolved cx reason id;
-          Lazy.force (Context.find_graph cx id)
+          ensure_annot_resolved cx reason id
         )
     in
+    let constraints = Constraint.FullyResolved (unknown_use, t) in
     Context.add_tvar cx id (Constraint.Root { Constraint.rank = 0; constraints });
     tvar
 
@@ -340,7 +441,7 @@ module rec ConsGen : Annotation_inference_sig = struct
       let (root_id1, root1) = Context.find_avar cx id in
       Context.add_avar cx root_id1 A.fully_resolved_node;
       Context.add_tvar cx root_id1 (C.fully_resolved_node t);
-      let dependents1 = deps_of_constraint (Lazy.force root1.A.constraints) in
+      let dependents1 = deps_of_constraint root1.A.constraints in
       resolve_dependent_set cx dependents1 t
 
   (** Makes id1 a goto node to id2. It also appends depndents of id1 to those of id2.
@@ -351,7 +452,7 @@ module rec ConsGen : Annotation_inference_sig = struct
     let module T = Type.Constraint in
     Context.add_tvar cx id1 (T.Goto id2);
     Context.add_avar cx id1 (A.Goto id2);
-    match Lazy.force root2.A.constraints with
+    match root2.A.constraints with
     | (A.Annot_op _ | A.Annot_unresolved _) as constraint_ ->
       update_deps_of_constraint ~f:(ISet.union dependents1) constraint_
     | A.Annot_resolved ->
@@ -366,14 +467,14 @@ module rec ConsGen : Annotation_inference_sig = struct
     if id1 = id2 then
       ()
     else if root1.A.rank < root2.A.rank then
-      let deps1 = deps_of_constraint (Lazy.force root1.A.constraints) in
+      let deps1 = deps_of_constraint root1.A.constraints in
       goto cx id1 deps1 (id2, root2)
     else if root2.A.rank < root1.A.rank then
-      let deps2 = deps_of_constraint (Lazy.force root2.A.constraints) in
+      let deps2 = deps_of_constraint root2.A.constraints in
       goto cx id2 deps2 (id1, root1)
     else (
       Context.add_avar cx id2 (A.Root { root2 with A.rank = root1.A.rank + 1 });
-      let deps1 = deps_of_constraint (Lazy.force root1.A.constraints) in
+      let deps1 = deps_of_constraint root1.A.constraints in
       goto cx id1 deps1 (id2, root2)
     )
 
@@ -386,7 +487,7 @@ module rec ConsGen : Annotation_inference_sig = struct
     else
       let module A = Type.AConstraint in
       let (_, { A.constraints; _ }) = Context.find_avar cx id in
-      match Lazy.force constraints with
+      match constraints with
       | A.Annot_resolved ->
         (* [id] may refer to a lazily resolved constraint (e.g. created through
          * [mk_lazy_tvar]). To protect against trying to force recursive lazy
@@ -421,18 +522,16 @@ module rec ConsGen : Annotation_inference_sig = struct
     | (EvalT (t, TypeDestructorT (use_op, reason, SpreadType (target, todo_rev, head_slice)), _), _)
       ->
       let state =
-        Object.(
-          Spread.
-            {
-              todo_rev;
-              acc = Base.Option.value_map ~f:(fun x -> [InlineSlice x]) ~default:[] head_slice;
-              spread_id = Reason.mk_id ();
-              union_reason = None;
-              curr_resolve_idx = 0;
-            }
-          
-        )
+        {
+          Object.Spread.todo_rev;
+          acc =
+            Base.Option.value_map ~f:(fun x -> [Object.Spread.InlineSlice x]) ~default:[] head_slice;
+          spread_id = Reason.mk_id ();
+          union_reason = None;
+          curr_resolve_idx = 0;
+        }
       in
+
       let t = object_spread cx use_op reason target state t in
       elab_t cx t op
     | (EvalT (t, TypeDestructorT (use_op, reason, RestType (options, r)), _), _) ->
@@ -445,6 +544,13 @@ module rec ConsGen : Annotation_inference_sig = struct
     | (EvalT (t, TypeDestructorT (_, reason, TypeMap (ObjectMapConst t')), _), _) ->
       let t = elab_t cx t (Annot_ObjMapConst (reason, t')) in
       elab_t cx t op
+    | (EvalT (t, TypeDestructorT (_, reason, ValuesType), _), _) ->
+      let t = elab_t cx t (Annot_GetValuesT reason) in
+      elab_t cx t op
+    | (EvalT (_, TypeDestructorT (_, _, TypeMap (ObjectMap _)), _), _) ->
+      error_unsupported ~suggestion:"$ObjMapConst" cx t op
+    | (EvalT (_, TypeDestructorT (_, _, TypeMap (ObjectMapi _)), _), _) ->
+      error_unsupported ~suggestion:"$KeyMirror" cx t op
     | (EvalT _, _) -> error_unsupported cx t op
     | (OpenT (reason, id), _) -> elab_open cx ~seen reason id op
     | (TypeDestructorTriggerT _, _)
@@ -481,8 +587,8 @@ module rec ConsGen : Annotation_inference_sig = struct
            }
         );
       AnyT.error reason
-    | (ThisClassT (r, i, is_this), Annot_UseT_TypeT reason) ->
-      let c = fix_this_class cx reason (r, i, is_this) in
+    | (ThisClassT (r, i, is_this, this_name), Annot_UseT_TypeT reason) ->
+      let c = fix_this_class cx reason (r, i, is_this, this_name) in
       elab_t cx c op
     | (DefT (_, _, ClassT it), Annot_UseT_TypeT reason) ->
       (* a class value annotation becomes the instance type *)
@@ -497,7 +603,7 @@ module rec ConsGen : Annotation_inference_sig = struct
     | (l, Annot_UseT_TypeT reason_use) ->
       (match l with
       (* Short-circut as we already error on the unresolved name. *)
-      | AnyT (_, AnyError (Some UnresolvedName)) -> ()
+      | AnyT (_, AnyError _) -> ()
       | AnyT _ -> Flow_js_utils.add_output cx Error_message.(EAnyValueUsedAsType { reason_use })
       | _ -> Flow_js_utils.add_output cx Error_message.(EValueUsedAsType { reason_use }));
       AnyT.error reason_use
@@ -590,30 +696,32 @@ module rec ConsGen : Annotation_inference_sig = struct
       let t = elab_t cx t (Annot_GetKeysT reason) in
       elab_t cx t op
     | (DefT (_, _, ObjT { flags; props_tmap; _ }), Annot_GetKeysT reason_op) ->
-      begin
-        match flags.obj_kind with
-        | UnsealedInFile _ -> with_trust bogus_trust (StrT.why reason_op)
-        | _ ->
-          let dict_t = Obj_type.get_dict_opt flags.obj_kind in
-          (* flow the union of keys of l to keys *)
-          let keylist =
-            Flow_js_utils.keylist_of_props (Context.find_props cx props_tmap) reason_op
-          in
-          let keylist =
-            match dict_t with
-            | None -> keylist
-            | Some { key; _ } ->
-              let key = elab_t cx key (Annot_ToStringT reason_op) in
-              key :: keylist
-          in
-          union_of_ts reason_op keylist
-      end
+      let dict_t = Obj_type.get_dict_opt flags.obj_kind in
+      (* flow the union of keys of l to keys *)
+      let keylist = Flow_js_utils.keylist_of_props (Context.find_props cx props_tmap) reason_op in
+      let keylist =
+        match dict_t with
+        | None -> keylist
+        | Some { key; _ } ->
+          let key = elab_t cx key (Annot_ToStringT reason_op) in
+          key :: keylist
+      in
+      union_of_ts reason_op keylist
     | (DefT (_, _, InstanceT (_, _, _, instance)), Annot_GetKeysT reason_op) ->
       (* methods are not enumerable, so only walk fields *)
       let own_props = Context.find_props cx instance.own_props in
       let keylist = Flow_js_utils.keylist_of_props own_props reason_op in
       union_of_ts reason_op keylist
     | (AnyT _, Annot_GetKeysT reason_op) -> with_trust literal_trust (StrT.why reason_op)
+    (***********)
+    (* $Values *)
+    (***********)
+    | (DefT (_, _, ObjT o), Annot_GetValuesT reason) ->
+      Flow_js_utils.get_values_type_of_obj_t cx o reason
+    | (DefT (_, _, InstanceT (_, _, _, { own_props; _ })), Annot_GetValuesT reason) ->
+      Flow_js_utils.get_values_type_of_instance_t cx own_props reason
+    (* Any will always be ok *)
+    | (AnyT (_, src), Annot_GetValuesT reason) -> AnyT.why src reason
     (********************************)
     (* Union and intersection types *)
     (********************************)
@@ -690,12 +798,14 @@ module rec ConsGen : Annotation_inference_sig = struct
     (**********)
     (* Mixins *)
     (**********)
-    | (ThisClassT (_, DefT (_, trust, InstanceT (_, _, _, instance)), is_this), Annot_MixinT r) ->
+    | ( ThisClassT (_, DefT (_, trust, InstanceT (_, _, _, instance)), is_this, this_name),
+        Annot_MixinT r
+      ) ->
       (* A class can be viewed as a mixin by extracting its immediate properties,
        * and "erasing" its static and super *)
       let static = ObjProtoT r in
       let super = ObjProtoT r in
-      this_class_type (DefT (r, trust, InstanceT (static, super, [], instance))) is_this
+      this_class_type (DefT (r, trust, InstanceT (static, super, [], instance))) is_this this_name
     | ( DefT
           ( _,
             _,
@@ -703,7 +813,8 @@ module rec ConsGen : Annotation_inference_sig = struct
               {
                 tparams_loc;
                 tparams = xs;
-                t_out = ThisClassT (_, DefT (_, trust, InstanceT (_, _, _, insttype)), is_this);
+                t_out =
+                  ThisClassT (_, DefT (_, trust, InstanceT (_, _, _, insttype)), is_this, this_name);
                 _;
               }
           ),
@@ -712,7 +823,11 @@ module rec ConsGen : Annotation_inference_sig = struct
       let static = ObjProtoT r in
       let super = ObjProtoT r in
       let instance = DefT (r, trust, InstanceT (static, super, [], insttype)) in
-      poly_type (Context.generate_poly_id cx) tparams_loc xs (this_class_type instance is_this)
+      poly_type
+        (Type.Poly.generate_id ())
+        tparams_loc
+        xs
+        (this_class_type instance is_this this_name)
     | (AnyT (_, src), Annot_MixinT r) -> AnyT.why src r
     (***********************)
     (* Type specialization *)
@@ -724,8 +839,8 @@ module rec ConsGen : Annotation_inference_sig = struct
       mk_typeapp_of_poly cx ~use_op ~reason_op ~reason_tapp id tparams_loc xs t ts
     | ((DefT (_, _, ClassT _) | ThisClassT _), Annot_SpecializeT (_, _, _, None)) -> t
     | (AnyT _, Annot_SpecializeT _) -> t
-    | (ThisClassT (_, i, _), Annot_ThisSpecializeT (reason, this)) ->
-      let i = subst cx (SMap.singleton "this" this) i in
+    | (ThisClassT (_, i, _, this_name), Annot_ThisSpecializeT (reason, this)) ->
+      let i = subst cx (Subst_name.Map.singleton this_name this) i in
       reposition cx (aloc_of_reason reason) i
     (* this-specialization of non-this-abstracted classes is a no-op *)
     | (DefT (_, _, ClassT i), Annot_ThisSpecializeT (reason, _this)) ->
@@ -737,11 +852,11 @@ module rec ConsGen : Annotation_inference_sig = struct
     | (DefT (reason_tapp, _, PolyT { tparams_loc; tparams = ids; t_out = t; _ }), _) ->
       let use_op = unknown_use in
       let reason_op = Type.AConstraint.reason_of_op op in
-      let t = instantiate_poly cx ~use_op ~reason_op ~reason_tapp (tparams_loc, ids, t) in
+      let (t, _) = instantiate_poly cx ~use_op ~reason_op ~reason_tapp (tparams_loc, ids, t) in
       elab_t cx t op
-    | (ThisClassT (r, i, is_this), _) ->
+    | (ThisClassT (r, i, is_this, this_name), _) ->
       let reason = Type.AConstraint.reason_of_op op in
-      let t = fix_this_class cx reason (r, i, is_this) in
+      let t = fix_this_class cx reason (r, i, is_this, this_name) in
       elab_t cx t op
     (*****************************)
     (* React Abstract Components *)
@@ -838,22 +953,31 @@ module rec ConsGen : Annotation_inference_sig = struct
        * hard to implement in annotation inference. *)
       error_unsupported cx t op
     | (AnyT (_, src), Annot_ObjRestT (reason, _)) -> AnyT.why src reason
-    | (ObjProtoT _, Annot_ObjRestT (reason, _)) -> Obj_type.mk_unsealed cx reason ~proto:t
+    | (ObjProtoT _, Annot_ObjRestT (reason, _)) ->
+      Obj_type.mk_with_proto cx reason ~obj_kind:Exact t
     | (DefT (_, _, (NullT | VoidT)), Annot_ObjRestT (reason, _)) ->
-      (* mirroring Object.assign semantics, treat null/void as empty objects *)
-      Obj_type.mk_unsealed cx reason
+      Obj_type.mk ~obj_kind:Exact cx reason
     (************)
     (* GetPropT *)
     (************)
     | (DefT (r, _, InstanceT (_, super, _, insttype)), Annot_GetPropT (reason_op, use_op, propref))
       ->
-      GetPropTKit.on_InstanceT cx dummy_trace ~l:t r super insttype use_op reason_op propref
+      GetPropTKit.on_InstanceT
+        cx
+        dummy_trace
+        ~l:t
+        ~id:None
+        r
+        super
+        insttype
+        use_op
+        reason_op
+        propref
     | (DefT (_, _, ObjT _), Annot_GetPropT (reason_op, _, Named (_, OrdinaryName "constructor"))) ->
       Unsoundness.why Constructor reason_op
     | (DefT (reason_obj, _, ObjT o), Annot_GetPropT (reason_op, use_op, propref)) ->
-      GetPropTKit.read_obj_prop cx dummy_trace ~use_op o propref reason_obj reason_op
+      GetPropTKit.read_obj_prop cx dummy_trace ~use_op o propref reason_obj reason_op None
     | (AnyT _, Annot_GetPropT (reason_op, _, _)) -> AnyT (reason_op, Untyped)
-    | (DefT (_, _, FunT (_, t, _)), Annot_GetPropT (_, _, Named (_, OrdinaryName "prototype"))) -> t
     | (DefT (reason, _, ClassT instance), Annot_GetPropT (_, _, Named (_, OrdinaryName "prototype")))
       ->
       reposition cx (aloc_of_reason reason) instance
@@ -883,7 +1007,7 @@ module rec ConsGen : Annotation_inference_sig = struct
       let value = elemt_of_arrtype arrtype in
       reposition cx (aloc_of_reason reason_op) value
     | (l, Annot_ElemT (reason_op, use_op, DefT (reason_tup, _, ArrT arrtype)))
-      when Flow_js_utils.numeric l ->
+      when Flow_js_utils.is_number l ->
       let (value, _) =
         Flow_js_utils.array_elem_check
           ~write_action:false
@@ -904,25 +1028,29 @@ module rec ConsGen : Annotation_inference_sig = struct
     (* Opaque types (pt 2) *)
     (***********************)
     | (OpaqueT (_, { super_t = Some t; _ }), _) -> elab_t cx t op
-    (************************)
-    (* Unary minus operator *)
-    (************************)
-    | (DefT (_, trust, NumT lit), Annot_UnaryMinusT reason_op) ->
-      let num =
-        match lit with
-        | Literal (_, (value, raw)) ->
-          let (value, raw) = Flow_ast_utils.negate_number_literal (value, raw) in
-          DefT (replace_desc_reason RNumber reason_op, trust, NumT (Literal (None, (value, raw))))
-        | AnyLiteral
-        | Truthy ->
-          t
-      in
-      num
-    | (AnyT _, Annot_UnaryMinusT reason_op) -> AnyT.untyped reason_op
+    (**************************)
+    (* Binary arith operators *)
+    (**************************)
+    | (lhs_t, Annot_ArithT { reason; flip; rhs_t; kind }) ->
+      if Flow_js_utils.needs_resolution rhs_t || Flow_js_utils.is_generic rhs_t then
+        elab_t cx rhs_t (Annot_ArithT { reason; flip = not flip; rhs_t = lhs_t; kind })
+      else
+        let (lhs_t, rhs_t) =
+          if flip then
+            (rhs_t, lhs_t)
+          else
+            (lhs_t, rhs_t)
+        in
+        Flow_js_utils.flow_arith reason lhs_t rhs_t kind (Flow_js_utils.add_output cx)
+    (*************************)
+    (* Unary arith operators *)
+    (*************************)
+    | (l, Annot_UnaryArithT (reason, kind)) ->
+      Flow_js_utils.flow_unary_arith l reason kind (Flow_js_utils.add_output cx)
     (********************)
     (* Function Statics *)
     (********************)
-    | (DefT (reason, _, FunT (static, _, _)), _) when object_like_op op ->
+    | (DefT (reason, _, FunT (static, _)), _) when object_like_op op ->
       let static = reposition cx (aloc_of_reason reason) static in
       elab_t cx static op
     (*****************)
@@ -937,7 +1065,7 @@ module rec ConsGen : Annotation_inference_sig = struct
     | ( DefT (enum_reason, trust, EnumObjectT enum),
         Annot_GetPropT (access_reason, use_op, Named (prop_reason, member_name))
       ) ->
-      let access = (use_op, access_reason, (prop_reason, member_name)) in
+      let access = (use_op, access_reason, None, (prop_reason, member_name)) in
       GetPropTKit.on_EnumObjectT cx dummy_trace enum_reason trust enum access
     | (DefT (enum_reason, _, EnumObjectT _), Annot_GetElemT (reason_op, _, elem)) ->
       let reason = reason_of_t elem in
@@ -956,16 +1084,18 @@ module rec ConsGen : Annotation_inference_sig = struct
     | (FunProtoT _, Annot_LookupT (reason_op, _, Named (_, x)))
       when Flow_js_utils.is_function_prototype x ->
       Flow_js_utils.lookup_builtin_strict cx (OrdinaryName "Function") reason_op
-    | ( (DefT (reason, _, NullT) | ObjProtoT reason | FunProtoT reason),
+    | ( (DefT (_, _, NullT) | ObjProtoT _ | FunProtoT _),
         Annot_LookupT (reason_op, use_op, (Named (reason_prop, x) as propref))
       ) ->
       let error_message =
-        if Reason.is_builtin_reason ALoc.source reason then
-          Error_message.EBuiltinLookupFailed { reason = reason_prop; name = Some x }
-        else
-          let suggestion = None in
-          Error_message.EStrictLookupFailed
-            { reason_prop; reason_obj = reason_op; name = Some x; use_op = Some use_op; suggestion }
+        Error_message.EStrictLookupFailed
+          {
+            reason_prop;
+            reason_obj = reason_op;
+            name = Some x;
+            use_op = Some use_op;
+            suggestion = None;
+          }
       in
       Flow_js_utils.add_output cx error_message;
       let p = Field (None, AnyT.error_of_kind UnresolvedName reason_op, Polarity.Neutral) in
@@ -992,10 +1122,10 @@ module rec ConsGen : Annotation_inference_sig = struct
     | (DefT (reason, _, ArrT (ArrayAT (t, _))), (Annot_GetPropT _ | Annot_LookupT _)) ->
       let arr = get_builtin_typeapp cx reason (OrdinaryName "Array") [t] in
       elab_t cx arr op
-    | ( DefT (reason, trust, ArrT (TupleAT (_, ts))),
+    | ( DefT (reason, trust, ArrT (TupleAT { elements; _ })),
         Annot_GetPropT (reason_op, _, Named (_, OrdinaryName "length"))
       ) ->
-      GetPropTKit.on_array_length cx dummy_trace reason trust ts reason_op
+      GetPropTKit.on_array_length cx dummy_trace reason trust elements reason_op
     | ( DefT (reason, _, ArrT ((TupleAT _ | ROArrayAT _) as arrtype)),
         (Annot_GetPropT _ | Annot_LookupT _)
       ) ->
@@ -1029,7 +1159,7 @@ module rec ConsGen : Annotation_inference_sig = struct
 
   and get_builtin_type cx reason ?(use_desc = false) x =
     let t = Flow_js_utils.lookup_builtin_strict cx x reason in
-    mk_instance cx reason ~use_desc ~reason_type:(reason_of_t t) t
+    mk_instance_raw cx reason ~use_desc ~reason_type:(reason_of_t t) t
 
   and get_builtin_prop_type cx reason tool =
     let x =
@@ -1044,6 +1174,11 @@ module rec ConsGen : Annotation_inference_sig = struct
       )
     in
     get_builtin_type cx reason (OrdinaryName x)
+
+  and get_builtin cx ?trace:_ x reason =
+    let builtin = Flow_js_utils.lookup_builtin_strict cx x reason in
+    let f id = resolve_id cx id builtin in
+    mk_lazy_tvar cx reason f
 
   and specialize cx t use_op reason_op reason_tapp ts =
     elab_t cx t (Annot_SpecializeT (use_op, reason_op, reason_tapp, ts))
@@ -1060,18 +1195,21 @@ module rec ConsGen : Annotation_inference_sig = struct
     let tvar = mk_lazy_tvar cx reason f in
     AnnotT (reason, tvar, false)
 
-  and mk_instance cx instance_reason ?(use_desc = false) ~reason_type c =
+  and mk_instance cx ?trace:_ instance_reason ?use_desc c =
+    mk_instance_raw cx instance_reason ?use_desc ~reason_type:instance_reason c
+
+  and mk_instance_raw cx instance_reason ?(use_desc = false) ~reason_type c =
     let source = elab_t cx c (Annot_UseT_TypeT reason_type) in
     AnnotT (instance_reason, source, use_desc)
 
   and mk_typeapp_instance cx ~use_op ~reason_op ~reason_tapp c ts =
     let t = specialize cx c use_op reason_op reason_tapp (Some ts) in
-    mk_instance cx reason_tapp ~reason_type:(reason_of_t c) t
+    mk_instance_raw cx reason_tapp ~reason_type:(reason_of_t c) t
 
   and get_statics cx reason t = elab_t cx t (Annot_GetStaticsT reason)
 
-  and get_prop cx use_op reason name t =
-    elab_t cx t (Annot_GetPropT (reason, use_op, Named (reason, name)))
+  and get_prop cx use_op reason ?(op_reason = reason) name t =
+    elab_t cx t (Annot_GetPropT (op_reason, use_op, Named (reason, name)))
 
   and get_elem cx use_op reason ~key t = elab_t cx t (Annot_GetElemT (reason, use_op, key))
 
@@ -1120,7 +1258,10 @@ module rec ConsGen : Annotation_inference_sig = struct
   and copy_type_exports cx ~from_ns reason ~module_t =
     elab_t cx from_ns (Annot_CopyTypeExportsT (reason, module_t))
 
-  and unary_minus cx reason_op t = elab_t cx t (Annot_UnaryMinusT reason_op)
+  and arith cx reason lhs_t rhs_t kind =
+    elab_t cx lhs_t (Annot_ArithT { reason; flip = false; rhs_t; kind })
+
+  and unary_arith cx reason_op t kind = elab_t cx t (Annot_UnaryArithT (reason_op, kind))
 
   and unary_not cx reason_op t = elab_t cx t (Annot_NotT reason_op)
 
@@ -1128,35 +1269,34 @@ module rec ConsGen : Annotation_inference_sig = struct
 
   and obj_rest cx reason xs t = elab_t cx t (Annot_ObjRestT (reason, xs))
 
-  and arr_rest _cx _use_op _reason _i _t = failwith "TODO Annotation_inference.arr_rest"
+  and arr_rest cx _use_op reason_op _i t = error_unsupported_reason cx t reason_op
+
+  and widen_obj_type cx ?trace:_ ~use_op reason t =
+    match t with
+    | OpenT (_, id) ->
+      let open Constraint in
+      begin
+        match Context.find_graph cx id with
+        | exception Union_find.Tvar_not_found _ -> error_internal_reason cx "widen_obj_type" reason
+        | Unresolved _
+        | Resolved _ ->
+          failwith "widen_obj_type unexpected non-FullyResolved tvar"
+        | FullyResolved (_, (lazy t)) -> widen_obj_type cx ~use_op reason t
+      end
+    | UnionT (r, rep) ->
+      UnionT
+        ( r,
+          UnionRep.ident_map
+            (fun t ->
+              if is_proper_def t then
+                widen_obj_type cx ~use_op reason t
+              else
+                t)
+            rep
+        )
+    | t -> t
 
   and object_kit_concrete =
-    let rec widen_obj_type cx ~use_op reason t =
-      match t with
-      | OpenT (_, id) ->
-        let open Constraint in
-        begin
-          match Lazy.force (Context.find_graph cx id) with
-          | exception Union_find.Tvar_not_found _ ->
-            error_internal_reason cx "widen_obj_type" reason
-          | Unresolved _
-          | Resolved _ ->
-            failwith "widen_obj_type unexpected non-FullyResolved tvar"
-          | FullyResolved (_, (lazy t)) -> widen_obj_type cx ~use_op reason t
-        end
-      | UnionT (r, rep) ->
-        UnionT
-          ( r,
-            UnionRep.ident_map
-              (fun t ->
-                if is_proper_def t then
-                  widen_obj_type cx ~use_op reason t
-                else
-                  t)
-              rep
-          )
-      | t -> t
-    in
     let add_output cx msg : unit = Flow_js_utils.add_output cx msg in
     let return _cx _use_op t = t in
     let recurse cx use_op reason resolve_tool tool x =
@@ -1166,7 +1306,7 @@ module rec ConsGen : Annotation_inference_sig = struct
       let dict_check _cx _use_op _d1 _d2 = () in
       Slice_utils.object_spread
         ~dict_check
-        ~widen_obj_type
+        ~widen_obj_type:(widen_obj_type ?trace:None)
         ~add_output
         ~return
         ~recurse

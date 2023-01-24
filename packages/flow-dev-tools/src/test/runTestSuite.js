@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,13 +8,14 @@
  * @format
  */
 
-const colors = require('colors/safe');
+const chalk = require('chalk');
 const {format} = require('util');
+const {writeFile} = require('fs').promises;
 
 const {noErrors} = require('../flowResult');
 const {TestStep, TestStepFirstStage} = require('./TestStep');
 const {newEnv} = require('./stepEnv');
-const {withTimeout, writeFile} = require('../utils/async');
+const {withTimeout} = require('../utils/async');
 
 import type {Builder, TestBuilder} from './builder';
 import type {Suite} from './Suite';
@@ -51,18 +52,18 @@ async function runTestSuite(
   let totalTests = 0;
 
   function printStatus(status: 'RUN' | 'PASS' | 'FAIL' | 'ERROR'): void {
-    let statusText = colors.grey.bold('[ ] RUN') + ':  ';
+    let statusText = chalk.grey.bold('[ ] RUN') + ':  ';
     if (status === 'PASS') {
-      statusText = colors.green.bold('[\u2713] PASS') + ': '; // checkmark unicode
+      statusText = chalk.green.bold('[\u2713] PASS') + ': '; // checkmark unicode
     } else if (status === 'FAIL') {
-      statusText = colors.red.bold('[\u2717] FAIL') + ': '; // x unicode
+      statusText = chalk.red.bold('[\u2717] FAIL') + ': '; // x unicode
     } else if (status === 'ERROR') {
-      statusText = colors.bgRed(colors.white.bold('[!] ERROR')) + ':';
+      statusText = chalk.bgRed(chalk.white.bold('[!] ERROR')) + ':';
     }
     reportStatus(
       statusText,
       format(
-        colors.grey('(%d/%d tests. %d steps passed. %d steps failed)'),
+        chalk.grey('(%d/%d tests. %d steps passed. %d steps failed)'),
         testsRun,
         totalTests,
         stepsPassed,
@@ -151,6 +152,10 @@ async function runTestSuite(
         printStatus('RUN');
         await testBuilder.log('\nSTEP %d', i + 1);
 
+        testBuilder.clearLSPMessages();
+        testBuilder.clearLSPStderr();
+        await testBuilder.clearMockInvocations();
+
         if (step.needsFlowServer()) {
           // No-op if one is already running
           await testBuilder.startFlowServer();
@@ -161,9 +166,6 @@ async function runTestSuite(
         if (flowErrors == null && step.needsFlowCheck()) {
           flowErrors = await testBuilder.getFlowErrors();
         }
-        testBuilder.clearLSPMessages();
-        testBuilder.clearLSPStderr();
-        await testBuilder.clearMockInvocations();
         let {envRead, envWrite} = newEnv(flowErrors || noErrors);
 
         testBuilder.setAllowFlowServerToDie(step.allowFlowServerToDie());

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -12,20 +12,7 @@ open Utils_js
 open OUnit2
 
 let parse_options =
-  Some
-    Parser_env.
-      {
-        enums = true;
-        esproposal_class_instance_fields = true;
-        esproposal_class_static_fields = true;
-        esproposal_decorators = true;
-        esproposal_export_star_as = true;
-        esproposal_optional_chaining = true;
-        esproposal_nullish_coalescing = true;
-        types = true;
-        use_strict = false;
-      }
-    
+  Some { Parser_env.enums = true; esproposal_decorators = true; types = true; use_strict = false }
 
 class useless_mapper =
   object (this)
@@ -281,13 +268,11 @@ class useless_mapper =
               ( loc',
                 Ast_builder.number_literal
                   ~comments:
-                    Ast.Syntax.
-                      {
-                        leading = [];
-                        trailing = [Ast_builder.Comments.line " a comment"];
-                        internal = ();
-                      }
-                    
+                    {
+                      Ast.Syntax.leading = [];
+                      trailing = [Ast_builder.Comments.line " a comment"];
+                      internal = ();
+                    }
                   1.0
                   raw
               );
@@ -378,7 +363,7 @@ class first_last_dup_mapper =
   object
     inherit [Loc.t] Flow_ast_mapper.mapper
 
-    method! statement_list stmts = List.hd stmts :: stmts @ [List.hd (List.rev stmts)]
+    method! statement_list stmts = (List.hd stmts :: stmts) @ [List.hd (List.rev stmts)]
   end
 
 class insert_import_mapper =
@@ -676,29 +661,28 @@ class insert_import_and_annot_mapper =
       let (loc, { Ast.Program.statements = stmts; comments; all_comments }) = super#program prog in
       let import num =
         let imp = Printf.sprintf "new_import%d" num in
-        Ast.Statement.
-          ( Loc.none,
-            ImportDeclaration
-              {
-                ImportDeclaration.import_kind = ImportDeclaration.ImportType;
-                source = (Loc.none, { Ast.StringLiteral.value = imp; raw = imp; comments = None });
-                default = None;
-                specifiers =
-                  Some
-                    ImportDeclaration.(
-                      ImportNamedSpecifiers
-                        [
-                          {
-                            kind = None;
-                            local = Some (Flow_ast_utils.ident_of_source (Loc.none, "here"));
-                            remote = Flow_ast_utils.ident_of_source (Loc.none, "there");
-                          };
-                        ]
-                    );
-                comments = None;
-              }
-          )
-        
+        let open Ast.Statement in
+        ( Loc.none,
+          ImportDeclaration
+            {
+              ImportDeclaration.import_kind = ImportDeclaration.ImportType;
+              source = (Loc.none, { Ast.StringLiteral.value = imp; raw = imp; comments = None });
+              default = None;
+              specifiers =
+                Some
+                  ImportDeclaration.(
+                    ImportNamedSpecifiers
+                      [
+                        {
+                          kind = None;
+                          local = Some (Flow_ast_utils.ident_of_source (Loc.none, "here"));
+                          remote = Flow_ast_utils.ident_of_source (Loc.none, "there");
+                        };
+                      ]
+                  );
+              comments = None;
+            }
+        )
       in
 
       ( loc,
@@ -724,6 +708,20 @@ class prop_annot_mapper =
         | Type.Missing _ -> Type.Available (Loc.none, (Loc.none, Type.Number None))
       in
       { prop with annot = annot' }
+  end
+
+class func_return_annot_mapper =
+  object
+    inherit [Loc.t] Flow_ast_mapper.mapper
+
+    method! function_ _ f =
+      let open Ast.Function in
+      let return' =
+        match f.return with
+        | Type.Available _ -> f.return
+        | Type.Missing _ -> Type.Available (Loc.none, (Loc.none, Type.Number None))
+      in
+      { f with return = return' }
   end
 
 class insert_typecast_mapper =
@@ -761,20 +759,18 @@ class add_comment_mapper =
     inherit [Loc.t] Flow_ast_mapper.mapper
 
     method! identifier (loc, i) =
-      Flow_ast.Syntax.
-        ( loc,
-          {
-            i with
-            Flow_ast.Identifier.comments =
-              Some
-                {
-                  leading = [Ast_builder.Comments.block "hello"];
-                  trailing = [Ast_builder.Comments.block "bye"];
-                  internal = ();
-                };
-          }
-        )
-      
+      ( loc,
+        {
+          i with
+          Flow_ast.Identifier.comments =
+            Some
+              {
+                Flow_ast.Syntax.leading = [Ast_builder.Comments.block "hello"];
+                trailing = [Ast_builder.Comments.block "bye"];
+                internal = ();
+              };
+        }
+      )
   end
 
 class true_to_false_mapper =
@@ -830,17 +826,16 @@ let debug_string_of_edit ((start, end_), text) = Printf.sprintf "((%d, %d), %s)"
 
 let debug_string_of_edits = Base.List.map ~f:debug_string_of_edit %> String.concat ", "
 
-let debug_print_string_script script =
-  let print_string_result (i, chg) =
-    match chg with
-    | Replace (ol, ne) -> print_endline (Utils_js.spf "Replace %s with %s at %d" ol ne i)
-    | Insert { items = ins; _ } ->
-      print_endline (Utils_js.spf "Insert %s at %d" (String.concat ", " ins) i)
-    | Delete d -> print_endline (Utils_js.spf "Delete %s at %d" d i)
-  in
+let debug_string_of_change (i, chg) =
+  match chg with
+  | Replace (ol, ne) -> Printf.sprintf "Replace %s with %s at %d" ol ne i
+  | Insert { items = ins; _ } -> Printf.sprintf "Insert %s at %d" (String.concat ", " ins) i
+  | Delete d -> Printf.sprintf "Delete %s at %d" d i
+
+let debug_string_of_script script =
   match script with
-  | None -> print_endline "no script"
-  | Some sc -> List.iter print_string_result sc
+  | None -> "no script"
+  | Some sc -> Base.List.map ~f:debug_string_of_change sc |> String.concat "\n"
 
 let mk_insert ~sep ?(leading_sep = false) items =
   Insert { items; separator = sep; leading_separator = leading_sep }
@@ -853,34 +848,62 @@ let apply_edits source edits =
   in
   List.fold_left apply_edit source (List.rev edits)
 
-let print_debug_info source edits_trivial edits_standard =
-  print_endline (spf "Trivial edits: %s" (debug_string_of_edits edits_trivial));
-  print_endline (spf "Standard edits: %s" (debug_string_of_edits edits_standard));
-  print_endline (spf "Trivial applied: %s" (apply_edits source edits_trivial));
-  print_endline (spf "Standard applied: %s" (apply_edits source edits_standard))
-
 let assert_edits_equal ctxt ~edits ~source ~expected ~mapper =
   let edits_trivial = edits_of_source Trivial source mapper in
   let edits_standard = edits_of_source Standard source mapper in
-  print_debug_info source edits_trivial edits_standard;
-  assert_equal ~ctxt edits edits_trivial;
-  assert_equal ~ctxt edits edits_standard;
-  assert_equal ~ctxt expected (apply_edits source edits_trivial);
-  assert_equal ~ctxt expected (apply_edits source edits_standard)
+  assert_equal ~ctxt ~printer:debug_string_of_edits ~msg:"Trivial edits" edits edits_trivial;
+  assert_equal ~ctxt ~printer:debug_string_of_edits ~msg:"Standard edits" edits edits_standard;
+  assert_equal
+    ~ctxt
+    ~printer:(fun s -> s)
+    ~msg:"Trivial applied"
+    expected
+    (apply_edits source edits_trivial);
+  assert_equal
+    ~ctxt
+    ~printer:(fun s -> s)
+    ~msg:"Standard applied"
+    expected
+    (apply_edits source edits_standard)
 
 let assert_edits_differ
     ctxt ~edits_trivial ~edits_standard ~source ~trivial_expected ~standard_expected ~mapper =
   let edits_trivial' = edits_of_source Trivial source mapper in
   let edits_standard' = edits_of_source Standard source mapper in
-  assert_equal ~ctxt edits_trivial edits_trivial';
-  assert_equal ~ctxt edits_standard edits_standard';
-  assert_equal ~ctxt trivial_expected (apply_edits source edits_trivial');
-  assert_equal ~ctxt standard_expected (apply_edits source edits_standard')
+  assert_equal
+    ~ctxt
+    ~printer:debug_string_of_edits
+    ~msg:"Trivial edits"
+    edits_trivial
+    edits_trivial';
+  assert_equal
+    ~ctxt
+    ~printer:debug_string_of_edits
+    ~msg:"Standard edits"
+    edits_standard
+    edits_standard';
+  assert_equal
+    ~ctxt
+    ~printer:(fun s -> s)
+    ~msg:"Trivial applied"
+    trivial_expected
+    (apply_edits source edits_trivial');
+  assert_equal
+    ~ctxt
+    ~printer:(fun s -> s)
+    ~msg:"Standard applied"
+    standard_expected
+    (apply_edits source edits_standard')
 
 let assert_edits_equal_standard_only ctxt ~edits ~source ~expected ~mapper =
   let edits_standard = edits_of_source Standard source mapper in
-  assert_equal ~ctxt edits edits_standard;
-  assert_equal ~ctxt expected (apply_edits source edits_standard)
+  assert_equal ~ctxt ~printer:debug_string_of_edits ~msg:"Standard edits" edits edits_standard;
+  assert_equal
+    ~ctxt
+    ~printer:(fun s -> s)
+    ~msg:"Standard applied"
+    expected
+    (apply_edits source edits_standard)
 
 let tests =
   "ast_differ"
@@ -2053,8 +2076,7 @@ let tests =
              ]
            in
            let script = list_diff Standard old_list new_list in
-           debug_print_string_script script;
-           assert_equal ~ctxt (Some edits) script
+           assert_equal ~ctxt ~printer:debug_string_of_script (Some edits) script
          );
          ( "list_diff_simple5" >:: fun ctxt ->
            let a = "a" in
@@ -2953,6 +2975,15 @@ let tests =
              ~source
              ~expected:"++gotRenamed"
              ~mapper:(new useless_mapper)
+         );
+         ( "update_arrow_function_add_return_annot" >:: fun ctxt ->
+           let source = "const x = bla => { return 0; };" in
+           assert_edits_equal
+             ctxt
+             ~edits:[((10, 13), "(bla)"); ((13, 13), ": number")]
+             ~source
+             ~expected:"const x = (bla): number => { return 0; };"
+             ~mapper:(new func_return_annot_mapper)
          );
          ( "update_arrow_function_single_param" >:: fun ctxt ->
            let source = "const x = bla => { return 0; };" in

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -32,17 +32,3 @@ let fork () =
     Base.List.iter !post_fork_child_callbacks ~f:(fun f -> f ());
     0
   | i -> i
-
-(* should only be called from hh_server, which initializes the PidLog *)
-let fork_and_log ?reason () =
-  let result = fork () in
-  (match result with
-  | -1 -> ()
-  | 0 -> PidLog.close ()
-  | pid -> PidLog.log ?reason pid);
-  result
-
-let fork_and_may_log ?reason () =
-  match reason with
-  | None -> fork ()
-  | Some _ -> fork_and_log ?reason ()

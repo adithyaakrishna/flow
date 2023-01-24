@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -37,9 +37,7 @@ let with_outfd ~on_disabled ~f = with_channel snd ~on_disabled ~f
 
 (* The main server process will initialize this with the channels to the monitor process *)
 let init ~channels:(ic, oc) =
-  let infd =
-    Lwt_unix.of_unix_file_descr ~blocking:false ~set_flags:true (Daemon.descr_of_in_channel ic)
-  in
+  let infd = Lwt_unix.of_unix_file_descr (Daemon.descr_of_in_channel ic) in
   let outfd = Daemon.descr_of_out_channel oc in
   state := Initialized { infd; outfd }
 
@@ -76,6 +74,8 @@ let request_failed ~request_id ~exn_str = send ~msg:(RequestFailed (request_id, 
 (* Send a message to a persistent client *)
 let respond_to_persistent_connection ~client_id ~response =
   send ~msg:(PersistentConnectionResponse (client_id, response))
+
+let send_telemetry t = send ~msg:(Telemetry t)
 
 (* Send a status update to the monitor *)
 let status_update =

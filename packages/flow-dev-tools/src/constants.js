@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -24,7 +24,7 @@ function getTestsDir(relative_to?: string): string {
 }
 
 const binOptions: Array<string> = [
-  resolve(FLOW_ROOT, '../buck-out/gen/flow/flow/flow'), // Buck
+  resolve(FLOW_ROOT, '../../buck-out/v2/gen/fbcode/flow/out/flow'), // Buck
   resolve(FLOW_ROOT, 'bin/flow'), // Open source build
   resolve(FLOW_ROOT, 'bin/flow.exe'), // Open source windows build
 ];

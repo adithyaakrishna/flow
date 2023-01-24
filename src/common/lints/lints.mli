@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -9,10 +9,12 @@ type sketchy_null_kind =
   | SketchyNullBool
   | SketchyNullString
   | SketchyNullNumber
+  | SketchyNullBigInt
   | SketchyNullMixed
   | SketchyNullEnumBool
   | SketchyNullEnumString
   | SketchyNullEnumNumber
+  | SketchyNullEnumBigInt
 
 type sketchy_number_kind = SketchyNumberAnd
 
@@ -23,6 +25,10 @@ type property_assignment_kind =
   | ThisBeforeEverythingInitialized
   | PropertyFunctionCallBeforeEverythingInitialized
 
+type deprecated_type_kind =
+  | DeprecatedBool
+  | DeprecatedStar
+
 type lint_kind =
   | SketchyNull of sketchy_null_kind
   | SketchyNumber of sketchy_number_kind
@@ -30,12 +36,10 @@ type lint_kind =
   | UntypedImport
   | NonstrictImport
   | UnclearType
-  | DeprecatedType
-  | DeprecatedUtility
+  | DeprecatedType of deprecated_type_kind
   | UnsafeGettersSetters
   | UnnecessaryOptionalChain
   | UnnecessaryInvariant
-  | SignatureVerificationFailure
   | ImplicitInexactObject
   | UninitializedInstanceProperty
   | AmbiguousObjectType
@@ -46,6 +50,7 @@ type lint_kind =
   | ThisInExportedFunction
   | MixedImportAndRequire
   | ExportRenamedDefault
+  | UnusedPromiseInAsyncScope
 
 val string_of_kind : lint_kind -> string
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -16,6 +16,6 @@ printf "dependents.\\n"
 sed -i -e 's/string/number/' foo.js
 assert_ok "$FLOW" force-recheck foo.js
 assert_errors "$FLOW" status --strip-root
-show_skipping_stats_types_first "$FLOW_LOG_FILE"
+show_skipping_stats "$FLOW_LOG_FILE"
 
 assert_ok "$FLOW" stop

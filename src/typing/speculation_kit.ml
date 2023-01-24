@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -11,6 +11,7 @@ open Reason
 open Type
 open TypeUtil
 open Utils_js
+module ALocFuzzyMap = Loc_collections.ALocFuzzyMap
 
 module type INPUT = sig
   include Flow_common.BASE
@@ -22,6 +23,15 @@ module type OUTPUT = sig
 
   val try_intersection :
     Context.t -> Type.trace -> Type.use_t -> Reason.reason -> Type.InterRep.t -> unit
+
+  val try_singleton_throw_on_failure :
+    Context.t ->
+    Type.trace ->
+    Reason.reason ->
+    upper_unresolved:bool ->
+    Type.t ->
+    Type.use_t ->
+    unit
 
   val prep_try_intersection :
     Context.t ->
@@ -52,15 +62,15 @@ module Make (Flow : INPUT) : OUTPUT = struct
         let rdesc = string_of_desc (desc_of_reason ~unwrap:false reason) in
         let tdesc = string_of_desc (desc_of_reason ~unwrap:false (reason_of_t t)) in
         let udesc =
-          if not (String_utils.string_starts_with rdesc "union:") then
+          if not (String.starts_with ~prefix:"union:" rdesc) then
             spf "union: %s" tdesc
-          else if String_utils.string_ends_with rdesc "..." then
+          else if String.ends_with ~suffix:"..." rdesc then
             rdesc
-          else if String_utils.string_ends_with rdesc (tdesc ^ "(s)") then
+          else if String.ends_with ~suffix:(tdesc ^ "(s)") rdesc then
             rdesc
           else if String.length rdesc >= 256 then
             spf "%s | ..." rdesc
-          else if String_utils.string_ends_with rdesc tdesc then
+          else if String.ends_with ~suffix:tdesc rdesc then
             spf "%s(s)" rdesc
           else
             spf "%s | %s" rdesc tdesc
@@ -70,6 +80,35 @@ module Make (Flow : INPUT) : OUTPUT = struct
       us
 
   let mk_intersection_reason r _ls = replace_desc_reason RIntersection r
+
+  let log_synthesis_result cx _trace case speculation_id =
+    let open Speculation_state in
+    let { lhs_t; use_t; _ } = case in
+    match use_t with
+    | CallT
+        {
+          call_action = Funcalltype { call_speculation_hint_state = Some call_callee_hint_ref; _ };
+          _;
+        } ->
+      let old_callee_hint = !call_callee_hint_ref in
+      let new_callee_hint =
+        match old_callee_hint with
+        | Speculation_hint_unset ->
+          let spec_id_path =
+            speculation_id
+            :: List.map (fun branch -> branch.speculation_id) !(Context.speculation_state cx)
+          in
+          Speculation_hint_set (spec_id_path, lhs_t)
+        | Speculation_hint_invalid -> Speculation_hint_invalid
+        | Speculation_hint_set (old_spec_id_path, _) ->
+          if List.mem speculation_id old_spec_id_path then
+            (* We are moving back a successful speculation path. *)
+            old_callee_hint
+          else
+            Speculation_hint_invalid
+      in
+      call_callee_hint_ref := new_callee_hint
+    | _ -> ()
 
   (** Entry points into the process of trying different branches of union and
       intersection types.
@@ -193,32 +232,53 @@ module Make (Flow : INPUT) : OUTPUT = struct
     resolve_bindings_init cx trace reason (bindings_of_jobs cx trace imap)
     @@ (* ...and then begin the choice-making process *)
     try_flow_continuation cx trace reason speculation_id (IntersectionCases (ts, u))
-    (* Preprocessing for intersection types.
 
-       Before feeding into the choice-making machinery described above, we
-       preprocess upper bounds of intersection types. This preprocessing seems
-       asymmetric, but paradoxically, it is not: the purpose of the preprocessing is
-       to bring choice-making on intersections to parity with choice-making on
-       unions.
+  and try_singleton_throw_on_failure cx trace reason ~upper_unresolved t u =
+    let speculation_id = mk_id () in
+    Speculation.init_speculation cx speculation_id;
 
-       Consider what happens when a lower bound is checked against a union type. The
-       lower bound is always concretized before a choice is made! In other words,
-       even if we emit a flow from an unresolved tvar to a union type, the
-       constraint fires only when the unresolved tvar has been concretized.
+    let imap =
+      if upper_unresolved then
+        (* collect parts of the intersection type to be fully resolved *)
+        let imap = ResolvableTypeJob.collect_of_types cx IMap.empty [t] in
+        (* collect parts of the upper bound to be fully resolved, while logging
+           unresolved tvars *)
+        ResolvableTypeJob.collect_of_use ~log_unresolved:speculation_id cx imap u
+      else
+        let imap = ResolvableTypeJob.collect_of_use cx IMap.empty u in
+        ResolvableTypeJob.collect_of_type ~log_unresolved:speculation_id cx imap t
+    in
+    (* fully resolve the collected types *)
+    resolve_bindings_init cx trace reason (bindings_of_jobs cx trace imap)
+    @@ (* ...and then begin the choice-making process *)
+    try_flow_continuation cx trace reason speculation_id (SingletonCase (t, u))
 
-       Now, consider checking an intersection type with an upper bound. As an
-       artifact of how tvars and concrete types are processed, the upper bound would
-       appear to be concrete even though the actual parts of the upper bound that
-       are involved in the choice-making may be unresolved! (These parts are the
-       top-level input positions in the upper bound, which end up choosing between
-       the top-level input positions in the members of the intersection type.) If we
-       did not concretize the parts of the upper bound involved in choice-making, we
-       would start the choice-making process at a disadvantage (compared to
-       choice-making with a union type and an already concretized lower
-       bound). Thus, we do an extra preprocessing step where we collect the parts of
-       the upper bound to be concretized, and for each combination of concrete types
-       for those parts, call the choice-making process.
-    *)
+  (** Preprocessing for intersection types.
+
+    Before feeding into the choice-making machinery described above, we
+    preprocess upper bounds of intersection types. This preprocessing seems
+    asymmetric, but paradoxically, it is not: the purpose of the preprocessing is
+    to bring choice-making on intersections to parity with choice-making on
+    unions.
+
+    Consider what happens when a lower bound is checked against a union type. The
+    lower bound is always concretized before a choice is made! In other words,
+    even if we emit a flow from an unresolved tvar to a union type, the
+    constraint fires only when the unresolved tvar has been concretized.
+
+    Now, consider checking an intersection type with an upper bound. As an
+    artifact of how tvars and concrete types are processed, the upper bound would
+    appear to be concrete even though the actual parts of the upper bound that
+    are involved in the choice-making may be unresolved! (These parts are the
+    top-level input positions in the upper bound, which end up choosing between
+    the top-level input positions in the members of the intersection type.) If we
+    did not concretize the parts of the upper bound involved in choice-making, we
+    would start the choice-making process at a disadvantage (compared to
+    choice-making with a union type and an already concretized lower
+    bound). Thus, we do an extra preprocessing step where we collect the parts of
+    the upper bound to be concretized, and for each combination of concrete types
+    for those parts, call the choice-making process.
+  *)
 
   (** The following function concretizes each tvar in unresolved in turn,
       recording their corresponding concrete lower bounds in resolved as it
@@ -229,14 +289,8 @@ module Make (Flow : INPUT) : OUTPUT = struct
     match unresolved with
     | [] -> try_intersection cx trace (replace_parts cx resolved u) r rep
     | tvar :: unresolved ->
-      rec_flow
-        cx
-        trace
-        ( tvar,
-          intersection_preprocess_kit
-            reason
-            (ConcretizeTypes (unresolved, resolved, IntersectionT (r, rep), u))
-        )
+      let tgt = ConcretizeIntersectionT (unresolved, resolved, r, rep, u) in
+      rec_flow cx trace (tvar, intersection_preprocess_kit reason (ConcretizeTypes tgt))
 
   (************************)
   (* Full type resolution *)
@@ -379,7 +433,7 @@ module Make (Flow : INPUT) : OUTPUT = struct
 
   and choice_kit_use reason k = ChoiceKitUseT (reason, k)
 
-  and intersection_preprocess_kit reason k = IntersectionPreprocessKitT (reason, k)
+  and intersection_preprocess_kit reason k = PreprocessKitT (reason, k)
 
   (** utils for emitting toolkit constraints **)
 
@@ -493,56 +547,64 @@ module Make (Flow : INPUT) : OUTPUT = struct
     let rec loop match_state = function
       | [] -> return match_state
       | (case_id, case_r, l, u) :: trials ->
-        let case = { case_id; unresolved = ISet.empty; actions = [] } in
+        let case =
+          {
+            case_id;
+            unresolved = ISet.empty;
+            actions = [];
+            implicit_instantiation_post_inference_checks = [];
+            implicit_instantiation_results = ALocFuzzyMap.empty;
+            lhs_t = l;
+            use_t = u;
+          }
+        in
         (* speculatively match the pair of types in this trial *)
         let error = speculative_match cx trace { ignore; speculation_id; case } l u in
         (match error with
-        | None ->
+        | None -> begin
           (* no error, looking great so far... *)
-          begin
-            match match_state with
-            | NoMatch _ ->
-              (* everything had failed up to this point. so no ambiguity yet... *)
-              if
-                ISet.is_empty case.unresolved
-                (* ...and no unresolved tvars encountered during the speculative
-                 * match! This is great news. It means that this alternative will
-                 * definitely succeed. Fire any deferred actions and short-cut. *)
-              then
-                fire_actions cx trace spec case.actions
-              (* Otherwise, record that we've found a promising alternative. *)
-              else
-                loop (ConditionalMatch case) trials
-            | ConditionalMatch prev_case ->
-              (* umm, there's another previously found promising alternative *)
-              (* so compute the difference in side effects between that alternative
-               * and this *)
-              let ts = Speculation.case_diff cx prev_case case in
-              (* if the side effects of the previously found promising alternative
-               * are fewer, then keep holding on to that alternative *)
-              if ts = [] then
-                loop match_state trials
-              (* otherwise, we have an ambiguity; blame the unresolved tvars and
-               * short-cut *)
-              else
-                let prev_case_id = prev_case.case_id in
-                let cases : Type.t list = choices_of_spec spec in
-                blame_unresolved cx trace prev_case_id case_id cases case_r ts
-          end
-        | Some err ->
+          match match_state with
+          | NoMatch _ ->
+            (* everything had failed up to this point. so no ambiguity yet... *)
+            if
+              ISet.is_empty case.unresolved
+              (* ...and no unresolved tvars encountered during the speculative
+               * match! This is great news. It means that this alternative will
+               * definitely succeed. Fire any deferred actions and short-cut. *)
+            then
+              fire_actions cx trace spec case speculation_id
+            (* Otherwise, record that we've found a promising alternative. *)
+            else
+              loop (ConditionalMatch case) trials
+          | ConditionalMatch prev_case ->
+            (* umm, there's another previously found promising alternative *)
+            (* so compute the difference in side effects between that alternative
+             * and this *)
+            let ts = Speculation.case_diff cx prev_case case in
+            (* if the side effects of the previously found promising alternative
+             * are fewer, then keep holding on to that alternative *)
+            if ts = [] then
+              loop match_state trials
+            (* otherwise, we have an ambiguity; blame the unresolved tvars and
+             * short-cut *)
+            else
+              let prev_case_id = prev_case.case_id in
+              let cases : Type.t list = choices_of_spec spec in
+              blame_unresolved cx trace prev_case_id case_id cases case_r ts
+        end
+        | Some err -> begin
           (* if an error is found, then throw away this alternative... *)
-          begin
-            match match_state with
-            | NoMatch errs ->
-              (* ...adding to the error list if no promising alternative has been
-               * found yet *)
-              loop (NoMatch (err :: errs)) trials
-            | _ -> loop match_state trials
-          end)
+          match match_state with
+          | NoMatch errs ->
+            (* ...adding to the error list if no promising alternative has been
+             * found yet *)
+            loop (NoMatch (err :: errs)) trials
+          | _ -> loop match_state trials
+        end)
     and return = function
       | ConditionalMatch case ->
         (* best choice that survived, congrats! fire deferred actions  *)
-        fire_actions cx trace spec case.actions
+        fire_actions cx trace spec case speculation_id
       | NoMatch msgs ->
         (* everything failed; make a really detailed error message listing out the
          * error found for each alternative *)
@@ -565,9 +627,15 @@ module Make (Flow : INPUT) : OUTPUT = struct
               cx
               ~trace
               (Error_message.EUnionSpeculationFailed { use_op; reason; reason_op; branches })
+          | SingletonCase _ -> raise SpeculationSingletonError
           | IntersectionCases (ls, upper) ->
             let err =
               let reason_lower = mk_intersection_reason r ls in
+              Default_resolve.default_resolve_touts
+                ~flow:(flow_t cx)
+                cx
+                (aloc_of_reason reason_lower)
+                upper;
               match upper with
               | UseT (use_op, t) ->
                 Error_message.EIncompatibleDefs
@@ -622,15 +690,40 @@ module Make (Flow : INPUT) : OUTPUT = struct
         ~f:(fun i l ->
           (i, reason_of_use_t u, l, mod_use_op_of_use_t (fun use_op -> Op (Speculation use_op)) u))
         ls
+    | SingletonCase (l, u) ->
+      [(0, reason_of_use_t u, l, mod_use_op_of_use_t (fun use_op -> Op (Speculation use_op)) u)]
 
   and choices_of_spec = function
     | UnionCases (_, _, _, ts)
     | IntersectionCases (ts, _) ->
       ts
+    | SingletonCase (t, _) -> [t]
 
   and ignore_of_spec = function
-    | IntersectionCases (_, CallT (_, _, { call_tout = (_, id); _ })) -> Some id
-    | IntersectionCases (_, GetPropT (_, _, _, (_, id))) -> Some id
+    | IntersectionCases
+        ( _,
+          CallT
+            {
+              use_op = _;
+              reason = _;
+              call_action = Funcalltype { call_tout = (_, id); _ };
+              return_hint = _;
+            }
+        )
+    | SingletonCase
+        ( _,
+          CallT
+            {
+              use_op = _;
+              reason = _;
+              call_action = Funcalltype { call_tout = (_, id); _ };
+              return_hint = _;
+            }
+        ) ->
+      Some id
+    | IntersectionCases (_, GetPropT (_, _, _, _, (_, id)))
+    | SingletonCase (_, GetPropT (_, _, _, _, (_, id))) ->
+      Some id
     | _ -> None
 
   (* spec optimization *)
@@ -662,16 +755,18 @@ module Make (Flow : INPUT) : OUTPUT = struct
               ( StrT (Literal _)
               | NumT (Literal _)
               | BoolT (Some _)
-              | SingletonStrT _ | SingletonNumT _ | SingletonBoolT _ | VoidT | NullT )
+              | SingletonStrT _ | SingletonNumT _ | SingletonBoolT _ | SingletonBigIntT _
+              | BigIntT (Literal _)
+              | VoidT | NullT )
             ) ->
           shortcut_enum cx trace reason_op use_op l rep
         (* Types that are definitely incompatible with enums, after the above case. *)
         | DefT
             ( _,
               _,
-              ( NumT _ | StrT _ | MixedT _ | SymbolT | FunT _ | ObjT _ | ArrT _ | ClassT _
-              | InstanceT _ | CharSetT _ | TypeT _ | PolyT _ | ReactAbstractComponentT _ | EnumT _
-              | EnumObjectT _ )
+              ( NumT _ | BigIntT _ | StrT _ | MixedT _ | SymbolT | FunT _ | ObjT _ | ArrT _
+              | ClassT _ | InstanceT _ | CharSetT _ | TypeT _ | PolyT _ | ReactAbstractComponentT _
+              | EnumT _ | EnumObjectT _ )
             )
           when Base.Option.is_some (UnionRep.check_enum rep) ->
           add_output
@@ -692,6 +787,7 @@ module Make (Flow : INPUT) : OUTPUT = struct
         | _ -> false
       end
     | IntersectionCases _ -> false
+    | SingletonCase _ -> false
 
   and shortcut_enum cx trace reason_op use_op l rep =
     let quick_subtype = TypeUtil.quick_subtype (Context.trust_errors cx) in
@@ -729,30 +825,42 @@ module Make (Flow : INPUT) : OUTPUT = struct
   (* When we fire_actions we also need to reconstruct the use_op for each action
    * since before beginning speculation we replaced each use_op with
    * an UnknownUse. *)
-  and fire_actions cx trace spec =
-    List.iter (function
-        | (_, Speculation_state.FlowAction (l, u)) ->
-          (match spec with
-          | IntersectionCases (_, u') ->
-            let use_op = use_op_of_use_t u' in
-            (match use_op with
-            | None -> rec_flow cx trace (l, u)
-            | Some use_op ->
-              rec_flow cx trace (l, mod_use_op_of_use_t (replace_speculation_root_use_op use_op) u))
-          | UnionCases (use_op, _, _, _) ->
-            rec_flow cx trace (l, mod_use_op_of_use_t (replace_speculation_root_use_op use_op) u))
-        | (_, Speculation_state.UnifyAction (use_op, t1, t2)) ->
-          (match spec with
-          | IntersectionCases (_, u') ->
-            let use_op' = use_op_of_use_t u' in
-            (match use_op' with
-            | None -> rec_unify cx trace t1 t2 ~use_op
-            | Some use_op' ->
-              rec_unify cx trace t1 t2 ~use_op:(replace_speculation_root_use_op use_op' use_op))
-          | UnionCases (use_op', _, _, _) ->
-            rec_unify cx trace t1 t2 ~use_op:(replace_speculation_root_use_op use_op' use_op))
-        | (_, Speculation_state.ErrorAction msg) -> add_output cx ~trace msg
-        | (_, Speculation_state.UnsealedObjectProperty (flds, s, up)) ->
-          Context.set_prop cx flds s up
-        )
+  and fire_actions cx trace spec case speculation_id =
+    List.iter
+      (fun check -> Context.add_implicit_instantiation_check cx check)
+      case.Speculation_state.implicit_instantiation_post_inference_checks;
+    ALocFuzzyMap.iter
+      (fun loc targs -> Context.add_implicit_instantiation_result cx loc targs)
+      case.Speculation_state.implicit_instantiation_results;
+    log_synthesis_result cx trace case speculation_id;
+
+    case.Speculation_state.actions
+    |> List.iter (function
+           | (_, Speculation_state.FlowAction (l, u)) ->
+             (match spec with
+             | IntersectionCases (_, u')
+             | SingletonCase (_, u') ->
+               let use_op = use_op_of_use_t u' in
+               (match use_op with
+               | None -> rec_flow cx trace (l, u)
+               | Some use_op ->
+                 rec_flow
+                   cx
+                   trace
+                   (l, mod_use_op_of_use_t (replace_speculation_root_use_op use_op) u))
+             | UnionCases (use_op, _, _, _) ->
+               rec_flow cx trace (l, mod_use_op_of_use_t (replace_speculation_root_use_op use_op) u))
+           | (_, Speculation_state.UnifyAction (use_op, t1, t2)) ->
+             (match spec with
+             | IntersectionCases (_, u')
+             | SingletonCase (_, u') ->
+               let use_op' = use_op_of_use_t u' in
+               (match use_op' with
+               | None -> rec_unify cx trace t1 t2 ~use_op
+               | Some use_op' ->
+                 rec_unify cx trace t1 t2 ~use_op:(replace_speculation_root_use_op use_op' use_op))
+             | UnionCases (use_op', _, _, _) ->
+               rec_unify cx trace t1 t2 ~use_op:(replace_speculation_root_use_op use_op' use_op))
+           | (_, Speculation_state.ErrorAction msg) -> add_output cx ~trace msg
+           )
 end

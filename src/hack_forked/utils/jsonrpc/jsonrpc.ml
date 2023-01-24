@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -90,7 +90,7 @@ let parse_message ~(json : Hh_json.json) ~(timestamp : float) : message =
 (***************************************************************)
 
 type queue = {
-  daemon_in_fd: Unix.file_descr;
+  daemon_in_fd: Lwt_unix.file_descr;
   (* fd used by main process to read messages from queue *)
   messages: queue_message Queue.t;
 }
@@ -153,26 +153,25 @@ let internal_run_daemon' (oc : queue_message Daemon.out_channel) : unit =
     in
     let should_continue =
       match operation with
-      | Read ->
-        begin
-          try
-            let timestamped_json = internal_read_message reader in
-            Queue.push timestamped_json messages_to_send;
-            true
-          with
-          | exn ->
-            let e = Exception.wrap exn in
-            let message = Exception.get_ctor_string e in
-            let stack = Exception.get_full_backtrace_string 500 e in
-            let edata = { Marshal_tools.message; stack } in
-            let (should_continue, marshal) =
-              match exn with
-              | Hh_json.Syntax_error _ -> (true, Recoverable_exception edata)
-              | _ -> (false, Fatal_exception edata)
-            in
-            Marshal_tools.to_fd_with_preamble out_fd marshal |> ignore;
-            should_continue
-        end
+      | Read -> begin
+        try
+          let timestamped_json = internal_read_message reader in
+          Queue.push timestamped_json messages_to_send;
+          true
+        with
+        | exn ->
+          let e = Exception.wrap exn in
+          let message = Exception.get_ctor_string e in
+          let stack = Exception.get_full_backtrace_string 500 e in
+          let edata = { Marshal_tools.message; stack } in
+          let (should_continue, marshal) =
+            match exn with
+            | Hh_json.Syntax_error _ -> (true, Recoverable_exception edata)
+            | _ -> (false, Fatal_exception edata)
+          in
+          Marshal_tools.to_fd_with_preamble out_fd marshal |> ignore;
+          should_continue
+      end
       | Write ->
         assert (not (Queue.is_empty messages_to_send));
         let timestamped_json = Queue.pop messages_to_send in
@@ -224,18 +223,16 @@ let make_queue () : queue =
       ()
   in
   let (ic, _) = handle.Daemon.channels in
-  { daemon_in_fd = Daemon.descr_of_in_channel ic; messages = Queue.create () }
+  let daemon_in_fd = Daemon.descr_of_in_channel ic |> Lwt_unix.of_unix_file_descr in
+  { daemon_in_fd; messages = Queue.create () }
 
-let get_read_fd (queue : queue) : Unix.file_descr = queue.daemon_in_fd
+let get_read_fd (queue : queue) : Unix.file_descr = Lwt_unix.unix_file_descr queue.daemon_in_fd
 
 (* Read a message into the queue, and return the just-read message. *)
 let read_single_message_into_queue_wait (message_queue : queue) : queue_message Lwt.t =
   let%lwt message =
     try%lwt
-      let%lwt message =
-        Marshal_tools_lwt.from_fd_with_preamble
-          (Lwt_unix.of_unix_file_descr message_queue.daemon_in_fd)
-      in
+      let%lwt message = Marshal_tools_lwt.from_fd_with_preamble message_queue.daemon_in_fd in
       Lwt.return message
     with
     | End_of_file as e ->
@@ -250,7 +247,7 @@ let read_single_message_into_queue_wait (message_queue : queue) : queue_message 
   Lwt.return message
 
 let rec read_messages_into_queue_no_wait (message_queue : queue) : unit Lwt.t =
-  let is_readable = Lwt_unix.readable (Lwt_unix.of_unix_file_descr message_queue.daemon_in_fd) in
+  let is_readable = Lwt_unix.readable message_queue.daemon_in_fd in
   let%lwt () =
     if is_readable then
       (* We're expecting this not to block because we just checked
@@ -271,8 +268,7 @@ let rec read_messages_into_queue_no_wait (message_queue : queue) : unit Lwt.t =
   Lwt.return_unit
 
 let has_message (queue : queue) : bool =
-  let is_readable = Lwt_unix.readable (Lwt_unix.of_unix_file_descr queue.daemon_in_fd) in
-  is_readable || not (Queue.is_empty queue.messages)
+  (not (Queue.is_empty queue.messages)) || Lwt_unix.readable queue.daemon_in_fd
 
 let get_message (queue : queue) =
   (* Read one in a blocking manner to ensure that we have one. *)
@@ -289,7 +285,7 @@ let get_message (queue : queue) =
   let item = Queue.pop queue.messages in
   match item with
   | Timestamped_json { tj_json; tj_timestamp } ->
-    Lwt.return (`Message (parse_message tj_json tj_timestamp))
+    Lwt.return (`Message (parse_message ~json:tj_json ~timestamp:tj_timestamp))
   | Fatal_exception data -> Lwt.return (`Fatal_exception data)
   | Recoverable_exception data -> Lwt.return (`Recoverable_exception data)
 
@@ -297,60 +293,37 @@ let get_message (queue : queue) =
 (* Output functions for respond+notify          *)
 (************************************************)
 
-let last_sent_ref : Hh_json.json option ref = ref None
-
-let clear_last_sent () : unit = last_sent_ref := None
-
-let last_sent () : Hh_json.json option = !last_sent_ref
-
 (* respond: sends either a Response or an Error message, according
    to whether the json has an error-code or not. *)
-let respond
-    (writer : writer)
-    ?(powered_by : string option)
-    (in_response_to : message)
-    (result_or_error : Hh_json.json) : unit =
-  Hh_json.(
-    let is_error =
-      match result_or_error with
-      | JSON_Object _ -> J.try_get_val "code" result_or_error |> Base.Option.is_some
-      | _ -> false
-    in
-    let response =
-      JSON_Object
-        ([("jsonrpc", JSON_String "2.0")]
-        @ [("id", Base.Option.value in_response_to.id ~default:JSON_Null)]
-        @ ( if is_error then
-            [("error", result_or_error)]
-          else
-            [("result", result_or_error)]
-          )
-        @
-        match powered_by with
-        | Some powered_by -> [("powered_by", JSON_String powered_by)]
-        | None -> []
-        )
-    in
-    last_sent_ref := Some response;
-    writer response
-  )
+let respond (writer : writer) (in_response_to : message) (result_or_error : Hh_json.json) : unit =
+  let open Hh_json in
+  let is_error =
+    match result_or_error with
+    | JSON_Object _ -> J.try_get_val "code" result_or_error |> Base.Option.is_some
+    | _ -> false
+  in
+  let response =
+    JSON_Object
+      [
+        ("jsonrpc", JSON_String "2.0");
+        ("id", Base.Option.value in_response_to.id ~default:JSON_Null);
+        ( if is_error then
+          ("error", result_or_error)
+        else
+          ("result", result_or_error)
+        );
+      ]
+  in
+  writer response
 
 (* notify: sends a Notify message *)
-let notify (writer : writer) ?(powered_by : string option) (method_ : string) (params : Hh_json.json)
-    : unit =
-  Hh_json.(
-    let message =
-      JSON_Object
-        ([("jsonrpc", JSON_String "2.0"); ("method", JSON_String method_); ("params", params)]
-        @
-        match powered_by with
-        | Some powered_by -> [("powered_by", JSON_String powered_by)]
-        | None -> []
-        )
-    in
-    last_sent_ref := Some message;
-    writer message
-  )
+let notify (writer : writer) (method_ : string) (params : Hh_json.json) : unit =
+  let open Hh_json in
+  let message =
+    JSON_Object
+      [("jsonrpc", JSON_String "2.0"); ("method", JSON_String method_); ("params", params)]
+  in
+  writer message
 
 (************************************************)
 (* Output functions for request                 *)

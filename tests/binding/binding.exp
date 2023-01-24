@@ -217,6 +217,130 @@ References:
                ^^^^^^ [2]
 
 
+Error --------------------------------------------------------------------------------------------------- imports.js:4:8
+
+Cannot declare `R1` [1] because the name is already bound. [name-already-bound]
+
+   imports.js:4:8
+   4| import R1 from 'react'; // error
+             ^^
+
+References:
+   imports.js:3:8
+   3| import R1 from 'react';
+             ^^ [1]
+
+
+Error --------------------------------------------------------------------------------------------------- imports.js:5:1
+
+Cannot reassign import `R1` [1]. [reassign-import]
+
+   imports.js:5:1
+   5| R1 = (42: any); // error
+      ^^
+
+References:
+   imports.js:3:8
+   3| import R1 from 'react';
+             ^^ [1]
+
+
+Error --------------------------------------------------------------------------------------------------- imports.js:8:8
+
+Cannot declare `R2` [1] because the name is already bound. [name-already-bound]
+
+   imports.js:8:8
+   8| import R2 from 'react'; // error
+             ^^
+
+References:
+   imports.js:7:13
+   7| import * as R2 from 'react';
+                  ^^ [1]
+
+
+Error --------------------------------------------------------------------------------------------------- imports.js:9:1
+
+Cannot reassign import `R2` [1]. [reassign-import]
+
+   imports.js:9:1
+   9| R2 = (42: any); // error
+      ^^
+
+References:
+   imports.js:7:13
+   7| import * as R2 from 'react';
+                  ^^ [1]
+
+
+Error -------------------------------------------------------------------------------------------------- imports.js:12:7
+
+Cannot declare `Node` [1] because the name is already bound. [name-already-bound]
+
+   imports.js:12:7
+   12| const Node = 3; // error
+             ^^^^
+
+References:
+   imports.js:11:14
+   11| import type {Node} from 'react';
+                    ^^^^ [1]
+
+
+Error -------------------------------------------------------------------------------------------------- imports.js:13:1
+
+Cannot use type `Node` [1] as a value. Types are erased and don't exist at runtime. If the exported binding can also be
+used as a value, try importing it using `import Node` instead of `import type Node` and `import {Node}` instead of
+`import type {Node}`. [type-as-value]
+
+   imports.js:13:1
+   13| Node = 4; // error
+       ^^^^
+
+References:
+   imports.js:11:14
+   11| import type {Node} from 'react';
+                    ^^^^ [1]
+
+
+Error -------------------------------------------------------------------------------------------------- imports.js:14:6
+
+Cannot declare `Node` [1] because the name is already bound. [name-already-bound]
+
+   imports.js:14:6
+   14| type Node = number; // error
+            ^^^^
+
+References:
+   imports.js:11:14
+   11| import type {Node} from 'react';
+                    ^^^^ [1]
+
+
+Error ---------------------------------------------------------------------------------------- jsx_pragma_member1.js:2:9
+
+Cannot resolve name `Foo`. [cannot-resolve-name]
+
+   2| // @jsx Foo.baz
+              ^^^
+
+
+Error ---------------------------------------------------------------------------------------- jsx_pragma_member2.js:2:9
+
+Cannot resolve name `Foo`. [cannot-resolve-name]
+
+   2| // @jsx Foo.Bar.baz
+              ^^^
+
+
+Error ---------------------------------------------------------------------------------------- jsx_pragma_member3.js:2:9
+
+Cannot resolve name `Foo`. [cannot-resolve-name]
+
+   2| // @jsx Foo['bar']
+              ^^^
+
+
 Error ------------------------------------------------------------------------------------------------ rebinding.js:16:8
 
 Cannot declare `A` [1] because the name is already bound. [name-already-bound]
@@ -289,7 +413,7 @@ References:
 
 Error ------------------------------------------------------------------------------------------------ rebinding.js:41:3
 
-Cannot reference type `A` [1] from a value position. [type-as-value]
+Cannot use type `A` [1] as a value. Types are erased and don't exist at runtime. [type-as-value]
 
    rebinding.js:41:3
    41|   A = 42;           // error: type alias ref'd from value pos
@@ -581,6 +705,20 @@ References:
               ^ [1]
 
 
+Error ----------------------------------------------------------------------------------------------- rebinding.js:154:7
+
+Cannot declare `A` [1] because var redeclaration is not supported. [name-already-bound]
+
+   rebinding.js:154:7
+   154|   var A = 0;       // error: banned redeclaration
+              ^
+
+References:
+   rebinding.js:153:7
+   153|   var A = 0;
+              ^ [1]
+
+
 Error ---------------------------------------------------------------------------------------------- rebinding.js:161:12
 
 Cannot declare `a` [1] because the name is already bound. [name-already-bound]
@@ -665,17 +803,17 @@ References:
                 ^ [1]
 
 
-Error ---------------------------------------------------------------------------------------------- rebinding.js:203:34
+Error ---------------------------------------------------------------------------------------------- rebinding.js:203:42
 
 Cannot declare `x` [1] because the name is already bound. [name-already-bound]
 
-   rebinding.js:203:34
-   203| function fn_params_name_clash(x, x /* error: x already bound */) {}
-                                         ^
+   rebinding.js:203:42
+   203| function fn_params_name_clash(x: number, x: number /* error: x already bound */) {}
+                                                 ^
 
 References:
    rebinding.js:203:31
-   203| function fn_params_name_clash(x, x /* error: x already bound */) {}
+   203| function fn_params_name_clash(x: number, x: number /* error: x already bound */) {}
                                       ^ [1]
 
 
@@ -689,36 +827,36 @@ Cannot declare `x` [1] because the name is already bound. [name-already-bound]
 
 References:
    rebinding.js:204:37
-   204| function fn_params_clash_fn_binding(x,y) {
+   204| function fn_params_clash_fn_binding(x: number, y: number) {
                                             ^ [1]
 
 
-Error ---------------------------------------------------------------------------------------------------- scope.js:6:13
+Error ----------------------------------------------------------------------------------------------------- scope.js:6:9
 
-Cannot assign empty string to `b` because string [1] is incompatible with number [2]. [incompatible-type]
+Cannot declare `b` [1] because var redeclaration is not supported. [name-already-bound]
 
-   scope.js:6:13
-   6|     var b = ""; // error: string ~> number
-                  ^^ [1]
+   scope.js:6:9
+   6|     var b = ""; // error: banned redeclaration
+              ^
 
 References:
-   scope.js:3:10
+   scope.js:3:7
    3|   var b: number = 0;
-               ^^^^^^ [2]
+            ^ [1]
 
 
-Error --------------------------------------------------------------------------------------------------- scope.js:16:15
+Error --------------------------------------------------------------------------------------------------- scope.js:16:11
 
-Cannot assign empty string to `b` because string [1] is incompatible with number [2]. [incompatible-type]
+Cannot declare `b` [1] because var redeclaration is not supported. [name-already-bound]
 
-   scope.js:16:15
-   16|       var b = ""; // error: string ~> number
-                     ^^ [1]
+   scope.js:16:11
+   16|       var b = ""; // error: banned redeclaration
+                 ^
 
 References:
-   scope.js:12:10
+   scope.js:12:7
    12|   var b: number = 0;
-                ^^^^^^ [2]
+             ^ [1]
 
 
 Error --------------------------------------------------------------------------------------------------- scope.js:19:11
@@ -799,100 +937,51 @@ Cannot resolve name `a`. [cannot-resolve-name]
          ^
 
 
-Error --------------------------------------------------------------------------------------------------- scope.js:66:16
+Error --------------------------------------------------------------------------------------------------- scope.js:66:12
 
-Cannot assign empty string to `a` because string [1] is incompatible with number [2]. [incompatible-type]
+Cannot declare `a` [1] because var redeclaration is not supported. [name-already-bound]
 
-   scope.js:66:16
-   66|   for (var a = "" /* error: string ~> number */;;) {}
-                      ^^ [1]
-
-References:
-   scope.js:65:10
-   65|   var a: number = 0;
-                ^^^^^^ [2]
-
-
-Error --------------------------------------------------------------------------------------------------- scope.js:66:16
-
-string [1] is incompatible with number [2]. [incompatible-type]
-
-   scope.js:66:16
-   66|   for (var a = "" /* error: string ~> number */;;) {}
-                      ^^ [1]
+   scope.js:66:12
+   66|   for (var a = "" /* error: banned redeclaration */ ;;) {}
+                  ^
 
 References:
-   scope.js:65:10
+   scope.js:65:7
    65|   var a: number = 0;
-                ^^^^^^ [2]
+             ^ [1]
 
 
 Error --------------------------------------------------------------------------------------------------- scope.js:76:12
 
-Cannot assign string to `a` because string [1] is incompatible with number [2]. [incompatible-type]
+Cannot declare `a` [1] because var redeclaration is not supported. [name-already-bound]
 
    scope.js:76:12
-   76|   for (var a /* error: string ~> number */ in o) {}
-                  ^ [1]
+   76|   for (var a /* error: banned redeclaration */ in o) {}
+                  ^
 
 References:
-   scope.js:75:10
+   scope.js:75:7
    75|   var a: number = 0;
-                ^^^^^^ [2]
+             ^ [1]
 
 
-Error --------------------------------------------------------------------------------------------------- scope.js:76:12
+Error --------------------------------------------------------------------------------------------------- scope.js:86:12
 
-string [1] is incompatible with number [2]. [incompatible-type]
+Cannot declare `a` [1] because var redeclaration is not supported. [name-already-bound]
 
-   scope.js:76:12
-   76|   for (var a /* error: string ~> number */ in o) {}
-                  ^ [1]
-
-References:
-   scope.js:75:10
-   75|   var a: number = 0;
-                ^^^^^^ [2]
-
-
-Error --------------------------------------------------------------------------------------------------- scope.js:86:47
-
-Cannot assign `a` to `a` because string [1] is incompatible with number [2]. [incompatible-type]
-
-   scope.js:86:47
-   86|   for (var a /* error: string ~> number */ of xs) {}
-                                                     ^^
+   scope.js:86:12
+   86|   for (var a /* error: banned redeclaration */ of xs) {}
+                  ^
 
 References:
-   scope.js:84:31
-   84| function for_of_scope_var(xs: string[]) {
-                                     ^^^^^^ [1]
-   scope.js:85:10
+   scope.js:85:7
    85|   var a: number = 0;
-                ^^^^^^ [2]
-
-
-Error --------------------------------------------------------------------------------------------------- scope.js:86:47
-
-string [1] is incompatible with number [2]. [incompatible-type]
-
-   scope.js:86:47
-   86|   for (var a /* error: string ~> number */ of xs) {}
-                                                     ^^
-
-References:
-   scope.js:84:31
-   84| function for_of_scope_var(xs: string[]) {
-                                     ^^^^^^ [1]
-   scope.js:85:10
-   85|   var a: number = 0;
-                ^^^^^^ [2]
+             ^ [1]
 
 
 Error --------------------------------------------------------------------------------------------------- scope.js:92:23
 
-Cannot assign function to `f` because number [1] is incompatible with string [2] in the return value.
-[incompatible-type]
+Cannot assign `f` to `x` because number [1] is incompatible with string [2] in the return value. [incompatible-type]
 
    scope.js:92:23
    92|     x: () => string = f // error: number ~> string
@@ -916,20 +1005,36 @@ Cannot return `x()` because string [1] is incompatible with number [2]. [incompa
                    ^^^
 
 References:
-   scope.js:100:11
-   100|   let a = "";
-                  ^^ [1]
-   scope.js:101:29
-   101|   function f0(x = () => a): number {
-                                    ^^^^^^ [2]
+   scope.js:101:24
+   101|   function f0(x: () => string = () => a): number {
+                               ^^^^^^ [1]
+   scope.js:101:43
+   101|   function f0(x: () => string = () => a): number {
+                                                  ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------------- scope.js:105:19
+Error -------------------------------------------------------------------------------------------------- scope.js:105:27
 
 Cannot resolve name `b`. [cannot-resolve-name]
 
-   105|   function f1(x = b /* error: cannot resolve b */): number {
-                          ^
+   105|   function f1(x: number = b /* error: cannot resolve b */): number {
+                                  ^
+
+
+Error -------------------------------------------------------------------------------------------------- scope.js:129:21
+
+Cannot resolve name `selfRef`. [cannot-resolve-name]
+
+   129|     selfRef: typeof selfRef // Error: cannot resolve selfRef
+                            ^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- scope.js:133:15
+
+Cannot resolve name `forwardRef`. [cannot-resolve-name]
+
+   133|     x: typeof forwardRef, // Error: cannot resolve forwardRef
+                      ^^^^^^^^^^
 
 
 Error ----------------------------------------------------------------------------------------------------- tdz.js:25:11
@@ -1016,6 +1121,20 @@ References:
                ^ [1]
 
 
+Error ----------------------------------------------------------------------------------------------------- tdz.js:79:16
+
+Cannot use variable `C` [1] because the declaration either comes later or was skipped. [reference-before-declaration]
+
+   tdz.js:79:16
+   79| var x2: typeof C // error
+                      ^
+
+References:
+   tdz.js:82:7
+   82| class C {}
+             ^ [1]
+
+
 Error ----------------------------------------------------------------------------------------------------- tdz.js:80:13
 
 Cannot use variable `C` [1] because the declaration either comes later or was skipped. [reference-before-declaration]
@@ -1048,5 +1167,129 @@ References:
                      ^^^^^^ [2]
 
 
+Error ---------------------------------------------------------------------------------------------------- tdz.js:103:17
 
-Found 74 errors
+Cannot use variable `A` [1] because the declaration either comes later or was skipped. [reference-before-declaration]
+
+   tdz.js:103:17
+   103| class A extends A {} // error
+                        ^
+
+References:
+   tdz.js:103:7
+   103| class A extends A {} // error
+              ^ [1]
+
+
+Error ----------------------------------------------------------------------------------------- tdz_class_fields.js:5:24
+
+Cannot use variable `forwardReferenced` [1] because the declaration either comes later or was skipped.
+[reference-before-declaration]
+
+   tdz_class_fields.js:5:24
+    5|     static b: number = forwardReferenced; // Should error
+                              ^^^^^^^^^^^^^^^^^
+
+References:
+   tdz_class_fields.js:10:7
+   10| const forwardReferenced = 0;
+             ^^^^^^^^^^^^^^^^^ [1]
+
+
+Error ----------------------------------------------------------------------------------------- tdz_class_fields.js:7:25
+
+Cannot use variable `forwardReferenced` [1] because the declaration either comes later or was skipped.
+[reference-before-declaration]
+
+   tdz_class_fields.js:7:25
+    7|     static #d: number = forwardReferenced; // Should error
+                               ^^^^^^^^^^^^^^^^^
+
+References:
+   tdz_class_fields.js:10:7
+   10| const forwardReferenced = 0;
+             ^^^^^^^^^^^^^^^^^ [1]
+
+
+Error --------------------------------------------------------------------------------------------------- unbound.js:3:1
+
+Cannot resolve name `unbound`. [cannot-resolve-name]
+
+   3| unbound = 1; // Error
+      ^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------- unbound.js:10:11
+
+Cannot resolve name `UnboundType`. [cannot-resolve-name]
+
+   10| (unbound: UnboundType); // Error
+                 ^^^^^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------- unbound.js:11:11
+
+Cannot resolve name `UnboundType`. [cannot-resolve-name]
+
+   11| (unbound: UnboundType); // Error
+                 ^^^^^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------- unbound.js:12:11
+
+Cannot resolve name `UnboundType`. [cannot-resolve-name]
+
+   12| (unbound: UnboundType); // Error
+                 ^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unbound.js:14:1
+
+Cannot resolve name `unboundFunction`. [cannot-resolve-name]
+
+   14| unboundFunction(); // Error
+       ^^^^^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unbound.js:15:1
+
+Cannot resolve name `unboundFunction`. [cannot-resolve-name]
+
+   15| unboundFunction(); // No error, only error once
+       ^^^^^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unbound.js:16:1
+
+Cannot resolve name `unboundFunction`. [cannot-resolve-name]
+
+   16| unboundFunction(); // No error, only error once
+       ^^^^^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unbound.js:19:5
+
+Cannot resolve name `unboundFunction2`. [cannot-resolve-name]
+
+   19|     unboundFunction2(); // Error
+           ^^^^^^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unbound.js:22:5
+
+Cannot resolve name `unboundFunction2`. [cannot-resolve-name]
+
+   22|     unboundFunction2(); // Error
+           ^^^^^^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unbound.js:25:5
+
+Cannot resolve name `unboundFunction2`. [cannot-resolve-name]
+
+   25|     unboundFunction2(); // Error
+           ^^^^^^^^^^^^^^^^
+
+
+
+Found 98 errors

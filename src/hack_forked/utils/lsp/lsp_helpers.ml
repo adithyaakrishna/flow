@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -286,10 +286,20 @@ let supports_snippets (p : Lsp.Initialize.params) : bool =
   let open Lsp.CompletionClientCapabilities in
   p.client_capabilities.textDocument.completion.completionItem.snippetSupport
 
+let supports_tags (p : Lsp.Initialize.params) (tag : Lsp.CompletionItemTag.t) =
+  let open Lsp.Initialize in
+  let open Lsp.CompletionClientCapabilities in
+  List.mem tag p.client_capabilities.textDocument.completion.completionItem.tagSupport.valueSet
+
 let supports_preselect (p : Lsp.Initialize.params) : bool =
   let open Lsp.Initialize in
   let open Lsp.CompletionClientCapabilities in
   p.client_capabilities.textDocument.completion.completionItem.preselectSupport
+
+let supports_completion_item_insert_replace (p : Lsp.Initialize.params) : bool =
+  let open Lsp.Initialize in
+  let open Lsp.CompletionClientCapabilities in
+  p.client_capabilities.textDocument.completion.completionItem.insertReplaceSupport
 
 let supports_completion_item_label_details (p : Lsp.Initialize.params) : bool =
   let open Lsp.Initialize in

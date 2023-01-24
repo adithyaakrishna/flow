@@ -6,7 +6,7 @@ class Foo {
   m() {
     let x = this.f;
     if (x === '') {
-      x = { x : "" };
+      let x1 = { x : "" };
     }
   }
 }
@@ -17,7 +17,7 @@ declare class Bar<T> {
 }
 
 class Baz extends Bar<any> {
-  state = {
+  state: {z:{x:number,y:number}} = {
     z: {
       x: 0,
       y: 0,

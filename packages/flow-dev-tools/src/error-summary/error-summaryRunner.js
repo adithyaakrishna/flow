@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -20,7 +20,7 @@ async function runner(args: Args): Promise<void> {
     args.flowconfigName,
   );
 
-  var error_summary = {};
+  var error_summary: {[string]: number} = {};
   var files = new Set();
   flow_result.errors.forEach(error =>
     error.message.forEach(err => {

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -58,16 +58,33 @@ module Types = struct
       Ast.Type.Object.Property prop
   end
 
-  let mixed = (Loc.none, Ast.Type.Mixed None)
+  let mixed ?(loc = Loc.none) ?comments () = (loc, Ast.Type.Mixed comments)
+
+  let empty ?(loc = Loc.none) ?comments () = (loc, Ast.Type.Empty comments)
+
+  let void ?(loc = Loc.none) ?comments () = (loc, Ast.Type.Void comments)
 
   let annotation t = (Loc.none, t)
 
   let object_ ?(loc = Loc.none) ?exact ?inexact properties =
     (loc, Ast.Type.Object (Objects.make ?exact ?inexact properties))
 
-  let type_param ?(loc = Loc.none) ?(bound = Flow_ast.Type.Missing Loc.none) ?variance ?default name
-      =
-    (loc, { Ast.Type.TypeParam.name = Identifiers.identifier name; bound; variance; default })
+  let type_param
+      ?(loc = Loc.none)
+      ?(bound = Flow_ast.Type.Missing Loc.none)
+      ?(bound_kind = Ast.Type.TypeParam.Colon)
+      ?variance
+      ?default
+      name =
+    ( loc,
+      {
+        Ast.Type.TypeParam.name = Identifiers.identifier name;
+        bound;
+        bound_kind;
+        variance;
+        default;
+      }
+    )
 
   let type_params ?comments ?(loc = Loc.none) params =
     (loc, { Ast.Type.TypeParams.params; comments })
@@ -137,28 +154,27 @@ module Patterns = struct
     (Loc.none, Array { Array.elements; annot = Ast.Type.Missing Loc.none; comments = None })
 
   let object_ str =
-    Object.
-      ( Loc.none,
-        Object
-          {
-            properties =
-              [
-                Property
-                  ( Loc.none,
-                    {
-                      Property.key =
-                        Property.Identifier (Flow_ast_utils.ident_of_source (Loc.none, str));
-                      pattern = identifier str;
-                      default = None;
-                      shorthand = true;
-                    }
-                  );
-              ];
-            annot = Ast.Type.Missing Loc.none;
-            comments = None;
-          }
-      )
-    
+    let open Object in
+    ( Loc.none,
+      Object
+        {
+          properties =
+            [
+              Property
+                ( Loc.none,
+                  {
+                    Property.key =
+                      Property.Identifier (Flow_ast_utils.ident_of_source (Loc.none, str));
+                    pattern = identifier str;
+                    default = None;
+                    shorthand = true;
+                  }
+                );
+            ];
+          annot = Ast.Type.Missing Loc.none;
+          comments = None;
+        }
+    )
 end
 
 module Functions = struct
@@ -208,10 +224,98 @@ module Functions = struct
       sig_loc = Loc.none;
       comments = None;
     }
+
+  let pattern_of_param param =
+    let (_, { Ast.Type.Function.Param.name; annot; optional }) = param in
+    ( Loc.none,
+      Ast.Pattern.Identifier
+        {
+          Ast.Pattern.Identifier.name = Base.Option.value_exn name;
+          annot = Ast.Type.Available (Loc.none, annot);
+          optional;
+        }
+    )
+
+  let param_of_type param =
+    (Loc.none, { Ast.Function.Param.argument = pattern_of_param param; default = None })
+
+  let rest_param_of_type rest =
+    let (_, { Ast.Type.Function.RestParam.argument; comments }) = rest in
+    (Loc.none, { Ast.Function.RestParam.argument = pattern_of_param argument; comments })
+
+  let this_param_of_type (loc, { Ast.Type.Function.ThisParam.annot; comments }) =
+    (loc, { Ast.Function.ThisParam.annot; comments })
+
+  let params_of_type (loc, { Ast.Type.Function.Params.this_; params; rest; comments }) =
+    ( loc,
+      {
+        Ast.Function.Params.this_ = Base.Option.map ~f:this_param_of_type this_;
+        params = Base.List.map ~f:param_of_type params;
+        rest = Base.Option.map ~f:rest_param_of_type rest;
+        comments;
+      }
+    )
+
+  let of_type
+      ?id
+      ?(generator = false)
+      ?(async = false)
+      ?body:body_
+      { Ast.Type.Function.tparams; params; return; _ } =
+    let body =
+      match body_ with
+      | Some body_ -> body_
+      | None -> body []
+    in
+    {
+      id;
+      params = params_of_type params;
+      body;
+      async;
+      generator;
+      predicate = None;
+      return = Ast.Type.Available (Loc.none, return);
+      tparams;
+      sig_loc = Loc.none;
+      comments = None;
+    }
 end
 
 module Classes = struct
   open Ast.Class
+
+  module Methods = struct
+    let make ?comments ?(decorators = []) ?(static = false) ~id function_ =
+      ( Loc.none,
+        {
+          Method.kind = Method.Method;
+          key = Ast.Expression.Object.Property.Identifier (Identifiers.identifier id);
+          value = (Loc.none, function_);
+          static;
+          decorators;
+          comments;
+        }
+      )
+
+    let with_body method_ ~body =
+      let (loc, method_) = method_ in
+      let (value_loc, fun_) = method_.Flow_ast.Class.Method.value in
+      let fun_ = { fun_ with Flow_ast.Function.body } in
+      (loc, { method_ with Flow_ast.Class.Method.value = (value_loc, fun_) })
+
+    let with_docs method_ ~docs =
+      let open Flow_ast.Expression.Object.Property in
+      let (loc, method_) = method_ in
+      let key =
+        match method_.Flow_ast.Class.Method.key with
+        | Literal (t, lit) -> Literal (t, { lit with Flow_ast.Literal.comments = docs })
+        | Identifier (t, id) -> Identifier (t, { id with Flow_ast.Identifier.comments = docs })
+        | PrivateName (loc, pn) ->
+          PrivateName (loc, { pn with Flow_ast.PrivateName.comments = docs })
+        | Computed (loc, ck) -> Computed (loc, { ck with Flow_ast.ComputedKey.comments = docs })
+      in
+      (loc, { method_ with Flow_ast.Class.Method.key })
+  end
 
   let implements ?targs id = (Loc.none, { Implements.Interface.id; targs })
 
@@ -230,19 +334,8 @@ module Classes = struct
       )
 
   let method_ ?comments ?(decorators = []) ?(static = false) ~id function_ =
-    Body.Method
-      ( Loc.none,
-        {
-          Method.kind = Method.Method;
-          key = Ast.Expression.Object.Property.Identifier (Identifiers.identifier id);
-          value = (Loc.none, function_);
-          static;
-          decorators;
-          comments;
-        }
-      )
+    Body.Method (Methods.make ?comments ~decorators ~static ~id function_)
 
-  (* TODO: add property *)
   let make ?comments ?super ?(implements = []) ?id elements =
     let extends =
       match super with
@@ -367,14 +460,15 @@ module Statements = struct
 
   let if_alternate ?(loc = Loc.none) ?comments body = (loc, { If.Alternate.body; comments })
 
-  let return ?(loc = Loc.none) ?comments expr = (loc, Return { Return.argument = expr; comments })
+  let return ?(loc = Loc.none) ?comments expr =
+    (loc, Return { Return.argument = expr; comments; return_out = loc })
 
   let directive ?(loc = Loc.none) txt =
     let expr = (loc, Ast.Expression.Literal (Literals.string txt)) in
     expression ~loc ~directive:txt expr
 
   let switch ?(loc = Loc.none) ?comments discriminant cases =
-    (loc, Switch { Switch.discriminant; cases; comments })
+    (loc, Switch { Switch.discriminant; cases; comments; exhaustive_out = fst discriminant })
 
   let switch_case ?(loc = Loc.none) ?test ?comments consequent =
     (loc, { Switch.Case.test; consequent; comments })
@@ -458,7 +552,7 @@ module Expressions = struct
   let call ?(loc = Loc.none) ?args callee = (loc, Call (call_node ?args callee))
 
   let optional_call ?(loc = Loc.none) ~optional ?args callee =
-    (loc, OptionalCall { OptionalCall.call = call_node ?args callee; optional })
+    (loc, OptionalCall { OptionalCall.call = call_node ?args callee; optional; filtered_out = loc })
 
   let function_ ?(loc = Loc.none) ?(async = false) ?(generator = false) ?params ?id ?body () =
     let fn = Functions.make ~async ~generator ?params ~id ?body () in
@@ -559,7 +653,7 @@ module Expressions = struct
     member_expression (member_computed obj ~property:(literal (Literals.string str)))
 
   let optional_member_expression ?(loc = Loc.none) ~optional expr =
-    (loc, OptionalMember { OptionalMember.member = expr; optional })
+    (loc, OptionalMember { OptionalMember.member = expr; optional; filtered_out = loc })
 
   let new_ ?(loc = Loc.none) ?comments ?targs ?args callee =
     (loc, New { New.callee; targs; arguments = args; comments })
@@ -587,6 +681,11 @@ module Expressions = struct
   let typecast ?(loc = Loc.none) ?comments expression annotation =
     (loc, TypeCast { TypeCast.expression; annot = Types.annotation annotation; comments })
 
+  let yield ?(loc = Loc.none) ?comments ~delegate expr =
+    (loc, Yield { Yield.argument = expr; comments; delegate; result_out = loc })
+
+  let generator ?(loc = Loc.none) ?filter blocks = (loc, Generator { filter; Generator.blocks })
+
   module Literals = struct
     let string ?loc value = literal ?loc (Literals.string value)
 
@@ -613,20 +712,7 @@ let mk_program ?(loc = Loc.none) ?(comments = None) ?(all_comments = []) stmts =
 
 let ast_of_string ~parser str =
   let parse_options =
-    Some
-      Parser_env.
-        {
-          enums = true;
-          esproposal_class_instance_fields = true;
-          esproposal_class_static_fields = true;
-          esproposal_decorators = true;
-          esproposal_export_star_as = true;
-          esproposal_optional_chaining = true;
-          esproposal_nullish_coalescing = true;
-          types = true;
-          use_strict = false;
-        }
-      
+    Some { Parser_env.enums = true; esproposal_decorators = true; types = true; use_strict = false }
   in
 
   let env = Parser_env.init_env ~token_sink:None ~parse_options None str in

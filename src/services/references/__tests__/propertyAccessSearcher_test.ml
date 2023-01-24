@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -13,14 +13,12 @@ let run ctxt expected name content =
   let (_docblock_errors, info) = parse_docblock ~max_tokens:docblock_max_tokens file content in
   let parse_options =
     {
-      parse_fail = false;
       parse_types_mode = TypesAllowed;
       parse_use_strict = true;
       parse_prevent_munge = false;
       parse_module_ref_prefix = None;
       parse_facebook_fbt = None;
       (* following options unused in classic mode *)
-      parse_type_asserts = false;
       parse_suppress_types = SSet.empty;
       parse_max_literal_len = 0;
       parse_exact_by_default = false;
@@ -30,13 +28,15 @@ let run ctxt expected name content =
       parse_relay_integration_module_prefix = None;
       parse_relay_integration_module_prefix_includes = [];
       parse_node_main_fields = [];
+      parse_distributed = false;
     }
   in
   let result = do_parse ~parse_options ~info content file in
   let ast =
     match result with
     | Parse_ok { ast; _ } -> ast
-    | Parse_fail _ -> failwith "Parse unexpectedly failed"
+    | Parse_recovered { ast; _ } -> ast
+    | Parse_exn _ -> failwith "Parse unexpectedly failed"
     | Parse_skip _ -> failwith "Parse unexpectedly skipped"
   in
   let result = PropertyAccessSearcher.search name ast in

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -35,7 +35,7 @@ let spec =
         |> wait_for_recheck_flag
         |> flag
              "--evaluate-type-destructors"
-             no_arg
+             truthy
              ~doc:"Use the result of type destructor evaluation if available"
         |> anon "file" (optional string)
       );
@@ -52,10 +52,8 @@ let types_to_json ~file_content types ~strip_root =
         |> Base.List.map ~f:(fun (loc, t) ->
                let json_assoc =
                  ("type", JSON_String t)
-                 ::
-                 ("reasons", JSON_Array [])
-                 ::
-                 ("loc", json_of_loc ~strip_root ~offset_table loc)
+                 :: ("reasons", JSON_Array [])
+                 :: ("loc", json_of_loc ~strip_root ~offset_table loc)
                  :: Errors.deprecated_json_props_of_loc ~strip_root loc
                in
                JSON_Object json_assoc

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -65,50 +65,6 @@ let empty_metadata =
     lsp_id = None;
   }
 
-(* This is the reason why we start to do a recheck. Since rechecks can be combined together, there
- * may be multiple reasons for a single recheck *)
-type recheck_reason =
-  (* One file changed on disk. *)
-  | Single_file_changed of { filename: string }
-  (* More than one file changed on disk *)
-  | Many_files_changed of { file_count: int }
-  (* If we're using Watchman as the filewatcher, we can tell when the mergebase changed.
-   * We can differentiate that from Many_files_changed *)
-  | Rebased of { file_count: int }
-  (* If watchman restarts, it may have missed changes. We can recheck everything to
-     get back on track. *)
-  | File_watcher_missed_changes
-  (* If try to autocomplete in foo.js and it's dependencies are unchecked, then we start a recheck
-   * with a reason of Unchecked_dependencies { filename = "/path/to/foo.js"; } *)
-  | Unchecked_dependencies of { filename: string }
-  (* A lazy server started from saved state has an old dependency graph and has to update it *)
-  | Lazy_init_update_deps
-  (* A lazy server may decided to typecheck some files during init (like Watchman lazy mode will
-   * typecheck files which have changed since the mergebase) *)
-  | Lazy_init_typecheck
-  (* At init when we do a full check *)
-  | Full_init
-
-let verbose_string_of_recheck_reason = function
-  | Single_file_changed { filename } -> Printf.sprintf "1 file changed (%s)" filename
-  | Many_files_changed { file_count } -> Printf.sprintf "%d files changed" file_count
-  | Rebased { file_count } -> Printf.sprintf "Rebased (%d files changed)" file_count
-  | File_watcher_missed_changes -> "Resynchronizing file watcher"
-  | Unchecked_dependencies { filename } -> Printf.sprintf "Unchecked dependencies of %s" filename
-  | Lazy_init_update_deps -> "Lazy init update deps"
-  | Lazy_init_typecheck -> "Lazy init typecheck"
-  | Full_init -> "Full init"
-
-let normalized_string_of_recheck_reason = function
-  | Single_file_changed { filename = _ } -> "singleFileChanged"
-  | Many_files_changed { file_count = _ } -> "manyFilesChanged"
-  | Rebased { file_count = _ } -> "rebased"
-  | File_watcher_missed_changes -> "fileWatcherMissedChanges"
-  | Unchecked_dependencies { filename = _ } -> "uncheckedDependencies"
-  | Lazy_init_update_deps -> "lazyInitUpdateDeps"
-  | Lazy_init_typecheck -> "lazyInitTypecheck"
-  | Full_init -> "fullInit"
-
 type request =
   | Subscribe
   | LspToServer of Lsp.lsp_message
@@ -141,16 +97,16 @@ let json_of_request =
 
 (* Why is the server sending us a list of errors *)
 type errors_reason =
-  (* Sending all the errors at the end of the recheck *)
-  | End_of_recheck of { recheck_reasons: recheck_reason list }
-  (* Streaming errors during recheck *)
-  | Recheck_streaming of { recheck_reasons: recheck_reason list }
-  (* Sometimes the env changes, which influences which errors we send to the lsp. For example, we
-   * only send warnings for open files. When a file is opened or closed, we have to recalculate
-   * which warnings to send and send the updated set. *)
+  | End_of_recheck  (** Sending all the errors at the end of the recheck *)
+  | Recheck_streaming  (** Streaming errors during recheck *)
   | Env_change
-  (* The persistent client just subscribed to errors, so was sent the initial error list *)
+      (** Sometimes the env changes, which influences which errors we send to
+          the lsp. For example, we only send warnings for open files. When a
+          file is opened or closed, we have to recalculate which warnings to
+          send and send the updated set. *)
   | New_subscription
+      (** The persistent client just subscribed to errors, so was sent the
+          initial error list *)
 
 type error_response_kind =
   | Canceled_error_response
@@ -178,6 +134,23 @@ type response =
 
 type response_with_metadata = response * metadata
 
+type recheck_stats = {
+  dependent_file_count: int;
+  changed_file_count: int;
+  top_cycle: (File_key.t * int) option;  (** name of cycle leader, and size of cycle *)
+}
+
+type telemetry_from_server =
+  | Init_summary of { duration: float }
+  | Recheck_summary of {
+      stats: recheck_stats;
+      duration: float;
+    }
+  | Command_summary of {
+      name: string;
+      duration: float;
+    }
+
 type notification_from_server =
   | Errors of {
       diagnostics: Lsp.PublishDiagnostics.diagnostic list Lsp.UriMap.t;
@@ -187,7 +160,7 @@ type notification_from_server =
   | EndRecheck of ServerProt.Response.lazy_stats
   | ServerExit of Exit.t  (** only used for the subset of exits which client handles *)
   | Please_hold of (ServerStatus.status * FileWatcherStatus.status)
-  | EOF  (** monitor is about to close the connection *)
+  | Telemetry of telemetry_from_server
 
 type message_from_server =
   | RequestResponse of response_with_metadata
@@ -232,23 +205,6 @@ let string_of_response = function
       exception_constructor
       (string_of_request request)
       stack
-
-let string_of_message_from_server = function
-  | RequestResponse (response, _) -> string_of_response response
-  | NotificationFromServer notification ->
-    begin
-      match notification with
-      | Errors _ -> "errors"
-      | StartRecheck -> "startRecheck"
-      | EndRecheck _ -> "endRecheck"
-      | ServerExit code -> "serverExit_" ^ Exit.to_string code
-      | Please_hold (server_status, watcher_status) ->
-        Printf.sprintf
-          "pleaseHold_server=%s_watcher=%s"
-          (ServerStatus.string_of_status server_status)
-          (FileWatcherStatus.string_of_status watcher_status)
-      | EOF -> "EOF"
-    end
 
 type message_from_server_mapper = {
   of_live_errors_failure: message_from_server_mapper -> live_errors_failure -> live_errors_failure;
@@ -302,7 +258,7 @@ let default_message_from_server_mapper ~(lsp_mapper : Lsp_mapper.t) =
         | ServerExit exit_status -> ServerExit exit_status
         | Please_hold (server_status, file_watcher_status) ->
           Please_hold (server_status, file_watcher_status)
-        | EOF -> EOF);
+        | Telemetry t -> Telemetry t);
     of_response =
       (fun mapper response ->
         match response with

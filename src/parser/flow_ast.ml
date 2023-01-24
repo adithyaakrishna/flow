@@ -1,15 +1,11 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 [%%gen
-(*
- * An Ocaml implementation of the SpiderMonkey Parser API
- * https://developer.mozilla.org/en-US/docs/SpiderMonkey/Parser_API
- *)
 module rec Syntax : sig
   type ('M, 'internal) t = {
     leading: 'M Comment.t list;
@@ -63,7 +59,7 @@ and Literal : sig
     | Boolean of bool
     | Null
     | Number of float
-    | BigInt of float
+    | BigInt of int64 option
     | RegExp of RegExp.t
   [@@deriving show]
 end =
@@ -91,9 +87,9 @@ end =
 
 and BigIntLiteral : sig
   type 'M t = {
-    approx_value: float;
-    (* Warning! Might lose precision! *)
-    bigint: string;
+    (* This will be None if we couldn't parse `raw`. That could be if the number is out of range or invalid (like a float) *)
+    value: int64 option;
+    raw: string;
     comments: ('M, unit) Syntax.t option;
   }
   [@@deriving show]
@@ -115,6 +111,10 @@ and Variance : sig
   and kind =
     | Plus
     | Minus
+    | Readonly
+    | In
+    | Out
+    | InOut
 
   and 'M t' = {
     kind: kind;
@@ -360,9 +360,51 @@ and Type : sig
     [@@deriving show]
   end
 
-  module Tuple : sig
+  module Keyof : sig
     type ('M, 'T) t = {
-      types: ('M, 'T) Type.t list;
+      argument: ('M, 'T) Type.t;
+      comments: ('M, unit) Syntax.t option;
+    }
+    [@@deriving show]
+  end
+
+  module ReadOnly : sig
+    type ('M, 'T) t = {
+      argument: ('M, 'T) Type.t;
+      comments: ('M, unit) Syntax.t option;
+    }
+    [@@deriving show]
+  end
+
+  module Tuple : sig
+    module LabeledElement : sig
+      type ('M, 'T) t = {
+        name: ('M, 'T) Identifier.t;
+        annot: ('M, 'T) Type.t;
+        variance: 'M Variance.t option;
+        optional: bool;
+      }
+      [@@deriving show]
+    end
+
+    module SpreadElement : sig
+      type ('M, 'T) t = {
+        name: ('M, 'T) Identifier.t option;
+        annot: ('M, 'T) Type.t;
+      }
+      [@@deriving show]
+    end
+
+    type ('M, 'T) element = 'M * ('M, 'T) element' [@@deriving show]
+
+    and ('M, 'T) element' =
+      | UnlabeledElement of ('M, 'T) Type.t
+      | LabeledElement of ('M, 'T) LabeledElement.t
+      | SpreadElement of ('M, 'T) SpreadElement.t
+    [@@deriving show]
+
+    and ('M, 'T) t = {
+      elements: ('M, 'T) element list;
       comments: ('M, unit) Syntax.t option;
     }
     [@@deriving show]
@@ -405,7 +447,10 @@ and Type : sig
     | Number of ('M, unit) Syntax.t option
     | BigInt of ('M, unit) Syntax.t option
     | String of ('M, unit) Syntax.t option
-    | Boolean of ('M, unit) Syntax.t option
+    | Boolean of {
+        raw: [ `Boolean | `Bool ];
+        comments: ('M, unit) Syntax.t option;
+      }
     | Symbol of ('M, unit) Syntax.t option
     | Exists of ('M, unit) Syntax.t option
     | Nullable of ('M, 'T) Nullable.t
@@ -419,11 +464,16 @@ and Type : sig
     | Union of ('M, 'T) Union.t
     | Intersection of ('M, 'T) Intersection.t
     | Typeof of ('M, 'T) Typeof.t
+    | Keyof of ('M, 'T) Keyof.t
+    | ReadOnly of ('M, 'T) ReadOnly.t
     | Tuple of ('M, 'T) Tuple.t
     | StringLiteral of 'M StringLiteral.t
     | NumberLiteral of 'M NumberLiteral.t
     | BigIntLiteral of 'M BigIntLiteral.t
     | BooleanLiteral of 'M BooleanLiteral.t
+    | Unknown of ('M, unit) Syntax.t option
+    | Never of ('M, unit) Syntax.t option
+    | Undefined of ('M, unit) Syntax.t option
 
   (* Type.annotation is a concrete syntax node with a location that starts at
    * the colon and ends after the type. For example, "var a: number", the
@@ -437,11 +487,17 @@ and Type : sig
   [@@deriving show]
 
   module TypeParam : sig
+    type bound_kind =
+      | Colon
+      | Extends
+    [@@deriving show]
+
     type ('M, 'T) t = 'M * ('M, 'T) t'
 
     and ('M, 'T) t' = {
       name: ('M, 'M) Identifier.t;
       bound: ('M, 'T) Type.annotation_or_hint;
+      bound_kind: bound_kind;
       variance: 'M Variance.t option;
       default: ('M, 'T) Type.t option;
     }
@@ -588,6 +644,7 @@ and Statement : sig
       discriminant: ('M, 'T) Expression.t;
       cases: ('M, 'T) Case.t list;
       comments: ('M, unit) Syntax.t option;
+      exhaustive_out: 'T;
     }
     [@@deriving show]
   end
@@ -596,6 +653,7 @@ and Statement : sig
     type ('M, 'T) t = {
       argument: ('M, 'T) Expression.t option;
       comments: ('M, unit) Syntax.t option;
+      return_out: 'T;
     }
     [@@deriving show]
   end
@@ -776,6 +834,16 @@ and Statement : sig
       [@@deriving show]
     end
 
+    module BigIntBody : sig
+      type 'M t = {
+        members: ('M BigIntLiteral.t, 'M) InitializedMember.t list;
+        explicit_type: bool;
+        has_unknown_members: bool;
+        comments: ('M, 'M Comment.t list) Syntax.t option;
+      }
+      [@@deriving show]
+    end
+
     type ('M, 'T) t = {
       id: ('M, 'T) Identifier.t;
       body: 'M body;
@@ -789,6 +857,7 @@ and Statement : sig
       | NumberBody of 'M NumberBody.t
       | StringBody of 'M StringBody.t
       | SymbolBody of 'M SymbolBody.t
+      | BigIntBody of 'M BigIntBody.t
     [@@deriving show]
   end
 
@@ -840,14 +909,14 @@ and Statement : sig
       | Identifier of ('M, 'T) Identifier.t
       | Literal of ('T * 'M StringLiteral.t)
 
-    and 'M module_kind =
-      | CommonJS of 'M
-      | ES of 'M
+    and module_kind =
+      | CommonJS
+      | ES
 
     and ('M, 'T) t = {
       id: ('M, 'T) id;
       body: 'M * ('M, 'T) Block.t;
-      kind: 'M module_kind;
+      kind: module_kind;
       comments: ('M, unit) Syntax.t option;
     }
     [@@deriving show]
@@ -921,6 +990,8 @@ and Statement : sig
       | NamedOpaqueType of ('M * ('M, 'T) OpaqueType.t)
       (* declare export interface *)
       | Interface of ('M * ('M, 'T) Interface.t)
+      (* declare export enum *)
+      | Enum of ('M * ('M, 'T) EnumDeclaration.t)
 
     and ('M, 'T) t = {
       default: 'M option;
@@ -950,7 +1021,7 @@ and Statement : sig
 
     and ('M, 'T) t = {
       import_kind: import_kind;
-      source: 'M * 'M StringLiteral.t;
+      source: 'T * 'M StringLiteral.t;
       default: ('M, 'T) Identifier.t option;
       specifiers: ('M, 'T) specifier option;
       comments: ('M, unit) Syntax.t option;
@@ -984,6 +1055,7 @@ and Statement : sig
     | Continue of 'M Continue.t
     | Debugger of 'M Debugger.t
     | DeclareClass of ('M, 'T) DeclareClass.t
+    | DeclareEnum of ('M, 'T) EnumDeclaration.t
     | DeclareExportDeclaration of ('M, 'T) DeclareExportDeclaration.t
     | DeclareFunction of ('M, 'T) DeclareFunction.t
     | DeclareInterface of ('M, 'T) Interface.t
@@ -1229,6 +1301,9 @@ and Expression : sig
       | BitOrAssign
       | BitXorAssign
       | BitAndAssign
+      | NullishAssign
+      | AndAssign
+      | OrAssign
 
     and ('M, 'T) t = {
       operator: operator option;
@@ -1316,6 +1391,7 @@ and Expression : sig
   module OptionalCall : sig
     type ('M, 'T) t = {
       call: ('M, 'T) Call.t;
+      filtered_out: 'T;
       optional: bool;
     }
     [@@deriving show]
@@ -1338,6 +1414,7 @@ and Expression : sig
   module OptionalMember : sig
     type ('M, 'T) t = {
       member: ('M, 'T) Member.t;
+      filtered_out: 'T;
       optional: bool;
     }
     [@@deriving show]
@@ -1348,6 +1425,7 @@ and Expression : sig
       argument: ('M, 'T) Expression.t option;
       comments: ('M, unit) Syntax.t option;
       delegate: bool;
+      result_out: 'T;
     }
     [@@deriving show]
   end
@@ -1383,6 +1461,21 @@ and Expression : sig
     type ('M, 'T) t = {
       expression: ('M, 'T) Expression.t;
       annot: ('M, 'T) Type.annotation;
+      comments: ('M, unit) Syntax.t option;
+    }
+    [@@deriving show]
+  end
+
+  module TSTypeCast : sig
+    type ('M, 'T) kind =
+      | AsConst
+      | As of ('M, 'T) Type.t
+      | Satisfies of ('M, 'T) Type.t
+    [@@deriving show]
+
+    type ('M, 'T) t = {
+      expression: ('M, 'T) Expression.t;
+      kind: ('M, 'T) kind;
       comments: ('M, unit) Syntax.t option;
     }
     [@@deriving show]
@@ -1444,6 +1537,7 @@ and Expression : sig
     | TemplateLiteral of ('M, 'T) TemplateLiteral.t
     | This of 'M This.t
     | TypeCast of ('M, 'T) TypeCast.t
+    | TSTypeCast of ('M, 'T) TSTypeCast.t
     | Unary of ('M, 'T) Unary.t
     | Update of ('M, 'T) Update.t
     | Yield of ('M, 'T) Yield.t

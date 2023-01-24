@@ -1,16 +1,34 @@
+(env
+ (opt
+  (js_of_ocaml
+    (compilation_mode whole_program)
+    (flags :standard --opt 3))))
+
 (executable
-  (name flow)
-  (modes native byte_complete)
-  (modules
-    flow)
+ (name flow)
+ (public_name flow)
+ (package flowtype)
+ (modes native byte_complete)
+ (modules flow)
+ (libraries
+  flow_glean
+  flow_commands
+  flow_exit_status
+  flow_extra_commands
+  flow_logging_utils
+  flow_parser
+  lz4 ; see dune-workspace
+  ))
+
+(executable
+  (name flow_dot_js)
+  (modes js)
+  (modules flow_dot_js)
   (libraries
-    flow_glean
-    flow_commands
-    flow_exit_status
-    flow_extra_commands
-    flow_logging_utils
-    flow_parser
-    default_injector_config
-    lz4 ; see dune-workspace
-  )
-)
+    flow_file_sig
+    flow_parser_js
+    flow_parser_utils_aloc
+    flow_typing
+    flow_typing_errors
+    js_of_ocaml)
+  (js_of_ocaml (javascript_files ./js/unix.js)))

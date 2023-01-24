@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -68,7 +68,7 @@ module Impl (CommandList : COMMAND_LIST) (Config : CONFIG) = struct
             |> error_flags
             |> strip_root_flag
             |> from_flag
-            |> flag "--version" no_arg ~doc:"Print version number and exit"
+            |> flag "--version" truthy ~doc:"Print version number and exit"
             |> anon "root" (optional string)
           );
       }

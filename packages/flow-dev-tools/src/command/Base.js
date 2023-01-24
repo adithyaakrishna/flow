@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -119,8 +119,8 @@ class Base<T: Object> {
   static parse(): any {
     const boolean = [];
     const string = [];
-    const defaults = {};
-    const alias = {};
+    const defaults: {[string]: mixed} = {};
+    const alias: {[string]: string | Array<string>} = {};
 
     const flags = this.getAllFlags();
     for (const flag of flags) {
@@ -147,6 +147,7 @@ class Base<T: Object> {
           process.stderr.write(format('Unsupported flag:', flag, '\n'));
           this.showUsage(this.BAD_ARGS);
         }
+        return true;
       },
     });
     for (const flag of flags) {
@@ -175,7 +176,7 @@ class Base<T: Object> {
   }
 
   // final
-  static showUsage(exitCode: number) {
+  static showUsage(exitCode: number): void {
     throw new ShowUsageException(exitCode);
   }
 
@@ -218,7 +219,7 @@ class Base<T: Object> {
   }
 
   // final
-  static async go() {
+  static async go(): Promise<void> {
     try {
       const argv = this.parse();
       if (argv.help) {

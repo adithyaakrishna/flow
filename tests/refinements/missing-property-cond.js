@@ -24,15 +24,6 @@ function foo4(o: $Exact<{ x: number }>) {
   }
 }
 
-function foo5() {
-  const o = { };
-  _foo5();
-  if (o.p) { o.p(); } // OK, unsealed objects are lax
-  function _foo5() {
-    o.p = function() { }
-  }
-}
-
 function foo6(o: mixed) {
   if (o.bar) {} // error, any lookup on mixed is unsafe
 }
@@ -53,14 +44,26 @@ type Foo9Expected = {
   foo: string,
 }
 
-function foo9() {
-  const actual = {};
-  if (actual.foo === undefined) { // OK, unsealed objects are lax
-    actual.foo = 'foo';
-  }
-  (actual: Foo9Expected);
-}
-
 function foo10() {
   if (null.q) {} // error: property `q` on null
+}
+
+function foo11() {
+  declare function invariant(a: mixed): void;
+  declare var b: mixed;
+  invariant(b != null && b.foo != null); // ok
+}
+
+function foo12() {
+  declare var a: mixed;
+  if (a != null && a.foo instanceof Set) {
+    (a.foo: Set<mixed>);
+  }
+}
+
+function foo13() {
+  declare var a: mixed;
+  if (a != null && Array.isArray(a.foo)) {
+    (a.foo: $ReadOnlyArray<mixed>);
+  }
 }

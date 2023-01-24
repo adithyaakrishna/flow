@@ -48,10 +48,10 @@ class E {
                               //        assigned a property in the constructor
                               //        scope
     };
-    function g() {
-      this.prop = "";         // OK: this is bound to function containing object
+    function g(this: {prop: string}) {
+      this.prop = "";         // OK: this is bound to this annotation
     };
-    const t = {
+    const t: {|n(): void, prop: number|} = {
       prop: 1,
       n() { t.prop = 1; }  // OK
     };

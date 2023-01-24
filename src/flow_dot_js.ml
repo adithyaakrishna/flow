@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -17,36 +17,21 @@ let error_of_parse_error source_file (loc, err) =
   |> Flow_error.concretize_error loc_of_aloc
   |> Flow_error.make_error_printable
 
-let error_of_file_sig_error source_file e =
-  File_sig.With_Loc.(
-    match e with
-    | IndeterminateModuleType loc -> Error_message.EIndeterminateModuleType (ALoc.of_loc loc)
-  )
-  |> Flow_error.error_of_msg ~trace_reasons:[] ~source_file
-  |> Flow_error.concretize_error loc_of_aloc
-  |> Flow_error.make_error_printable
-
 let parse_content file content =
   let parse_options =
+    let open Parser_env in
     Some
-      Parser_env.
-        {
-          enums = true;
-          (*
-           * Always parse ES proposal syntax. The user-facing config option to
-           * ignore/warn/enable them is handled during inference so that a clean error
-           * can be surfaced (rather than a more cryptic parse error).
-           *)
-          esproposal_class_instance_fields = true;
-          esproposal_class_static_fields = true;
-          esproposal_decorators = true;
-          esproposal_export_star_as = true;
-          esproposal_optional_chaining = true;
-          esproposal_nullish_coalescing = true;
-          types = true;
-          use_strict = false;
-        }
-      
+      {
+        enums = true;
+        (*
+         * Always parse ES proposal syntax. The user-facing config option to
+         * ignore/warn/enable them is handled during inference so that a clean error
+         * can be surfaced (rather than a more cryptic parse error).
+         *)
+        esproposal_decorators = true;
+        types = true;
+        use_strict = false;
+      }
   in
 
   let (ast, parse_errors) =
@@ -62,10 +47,10 @@ let parse_content file content =
     in
     Error converted
   else
-    match File_sig.With_Loc.program ~ast ~opts:File_sig.With_Loc.default_opts with
-    | Error e ->
-      Error (Errors.ConcreteLocPrintableErrorSet.singleton (error_of_file_sig_error file e))
-    | Ok (fsig, _tolerable_errors) -> Ok (ast, fsig)
+    let (fsig, _tolerable_errors) =
+      File_sig.With_Loc.program ~ast ~opts:File_sig.With_Loc.default_opts
+    in
+    Ok (ast, fsig)
 
 let array_of_list f lst = Array.of_list (List.map f lst)
 
@@ -81,35 +66,20 @@ let rec js_of_json = function
   | Hh_json.JSON_Bool value -> Js.Unsafe.inject (Js.bool value)
   | Hh_json.JSON_Null -> Js.Unsafe.inject Js.null
 
-let load_lib_files
-    ~ccx
-    ~metadata
-    files
-    save_parse_errors
-    save_infer_errors
-    save_suppressions
-    save_lint_suppressions =
+let load_lib_files ~ccx ~metadata files =
   (* iterate in reverse override order *)
-  let _ =
+  let (leader, _) =
     List.rev files
     |> List.fold_left
-         (fun exclude_syms file ->
+         (fun (leader, exclude_syms) file ->
            let lib_content = Sys_utils.cat file in
            let lib_file = File_key.LibFile file in
            match parse_content lib_file lib_content with
            | Ok (ast, file_sig) ->
              (* Lib files use only concrete locations, so this is not used. *)
              let aloc_table = lazy (ALoc.empty_table lib_file) in
-             let cx =
-               Context.make
-                 ccx
-                 metadata
-                 lib_file
-                 aloc_table
-                 (Reason.OrdinaryName Files.lib_module_ref)
-                 Context.Checking
-             in
-             let syms =
+             let cx = Context.make ccx metadata lib_file aloc_table Context.Checking in
+             let (syms, _) =
                Type_inference_js.infer_lib_file
                  cx
                  ast
@@ -117,81 +87,62 @@ let load_lib_files
                  ~file_sig:(File_sig.abstractify_locs file_sig)
                  ~lint_severities:LintSettings.empty_severities
              in
-
-             let errors = Context.errors cx in
-             let suppressions = Context.error_suppressions cx in
-             let severity_cover = Context.severity_cover cx in
-
-             save_infer_errors lib_file errors;
-             save_suppressions lib_file suppressions;
-             save_lint_suppressions lib_file severity_cover;
-
              (* symbols loaded from this file are suppressed if found in later ones *)
-             NameUtils.Set.union exclude_syms (NameUtils.Set.of_list syms)
-           | Error parse_errors ->
-             save_parse_errors lib_file parse_errors;
-             exclude_syms)
-         NameUtils.Set.empty
+             (Some cx, NameUtils.Set.union exclude_syms (NameUtils.Set.of_list syms))
+           | Error _ -> (leader, exclude_syms))
+         (None, NameUtils.Set.empty)
   in
-  ()
-
-let stub_docblock =
-  {
-    Docblock.flow = None;
-    typeAssert = false;
-    preventMunge = false;
-    providesModule = None;
-    jsx = None;
-  }
+  leader
 
 let stub_metadata ~root ~checked =
   {
     Context.checked (* local *);
-    munge_underscores = false;
-    verbose = None;
+    include_suppressions = false;
     jsx = Options.Jsx_react;
+    munge_underscores = false;
     strict = false;
     strict_local = false;
-    include_suppressions = false;
+    verbose = None;
     (* global *)
     any_propagation = true;
     automatic_require_default = false;
     babel_loose_array_spread = false;
-    max_literal_length = 100;
+    conditional_type = false;
+    cycle_errors = false;
+    cycle_errors_includes = [];
     enable_const_params = false;
     enable_enums = true;
     enable_relay_integration = false;
-    env_mode = Options.ClassicEnv [];
-    env_mode_constrain_write_dirs = [];
-    enforce_local_inference_annotations = false;
-    local_inference_annotation_dirs = [];
-    enforce_this_annotations = false;
-    experimental_infer_indexers = false;
     enforce_strict_call_arity = true;
+    inference_mode = Options.ConstrainWrites;
+    inference_mode_lti_includes = [];
     exact_by_default = false;
     facebook_fbs = None;
     facebook_fbt = None;
     facebook_module_interop = false;
     haste_module_ref_prefix = None;
     ignore_non_literal_requires = false;
+    max_literal_length = 100;
     max_trace_depth = 0;
     max_workers = 0;
+    missing_module_generators = [];
+    array_literal_providers = false;
+    array_literal_providers_includes = [];
     react_runtime = Options.ReactRuntimeClassic;
     react_server_component_exts = SSet.empty;
     recursion_limit = 10000;
     relay_integration_excludes = [];
     relay_integration_module_prefix = None;
     relay_integration_module_prefix_includes = [];
-    statement_reorder_checking = Options.Lexical;
     root;
     run_post_inference_implicit_instantiation = false;
+    enable_post_inference_targ_widened_check = false;
+    save_implicit_instantiation_results = false;
     strict_es6_import_export = false;
     strict_es6_import_export_excludes = [];
     strip_root = true;
     suppress_types = SSet.empty;
     trust_mode = Options.NoTrust;
-    type_asserts = false;
-    cycle_errors = false;
   }
 
 let master_cx_ref : (Path.t * Context.master_context) option ref = ref None
@@ -206,34 +157,18 @@ let get_master_cx root =
 let init_builtins filenames =
   let root = Path.dummy_path in
   let ccx = Context.(make_ccx (empty_master_cx ())) in
-  let master_cx =
-    (* Lib files use only concrete locations, so this is not used. *)
-    let aloc_table = lazy (ALoc.empty_table File_key.Builtins) in
-    Context.make
-      ccx
-      (stub_metadata ~root ~checked:false)
-      File_key.Builtins
-      aloc_table
-      (Reason.OrdinaryName Files.lib_module_ref)
-      Context.Checking
-  in
-  let () =
+  let leader =
     let metadata = stub_metadata ~root ~checked:true in
-    load_lib_files
-      ~ccx
-      ~metadata
-      filenames
-      (fun _file _errs -> ())
-      (fun _file _errs -> ())
-      (fun _file _sups -> ())
-      (fun _file _lint -> ())
+    load_lib_files ~ccx ~metadata filenames
   in
-  Merge_js.optimize_builtins master_cx;
-  master_cx_ref :=
-    Some
-      ( root,
-        { Context.master_sig_cx = Context.sig_cx master_cx; builtins = Context.builtins master_cx }
-      )
+  let master_cx =
+    match leader with
+    | None -> Context.empty_master_cx ()
+    | Some cx ->
+      Merge_js.optimize_builtins cx;
+      { Context.master_sig_cx = Context.sig_cx cx; builtins = Context.builtins cx }
+  in
+  master_cx_ref := Some (root, master_cx)
 
 let infer_and_merge ~root filename ast file_sig =
   (* create cx *)
@@ -242,10 +177,9 @@ let infer_and_merge ~root filename ast file_sig =
   let metadata = stub_metadata ~root ~checked:true in
   (* flow.js does not use abstract locations, so this is not used *)
   let aloc_table = lazy (ALoc.empty_table filename) in
-  let module_ref = Reason.OrdinaryName (Files.module_ref filename) in
-  let cx = Context.make ccx metadata filename aloc_table module_ref Context.Checking in
+  let cx = Context.make ccx metadata filename aloc_table Context.Checking in
   (* connect requires *)
-  Type_inference_js.add_require_tvars ~unresolved_tvar:Tvar.mk_no_wrap cx file_sig;
+  Type_inference_js.add_require_tvars cx file_sig;
   let connect_requires mref =
     let module_name = Reason.internal_module_name mref in
     Nel.iter (fun loc ->
@@ -366,7 +300,7 @@ let infer_type filename content line col : Loc.t * (string, string) result =
           ~file_sig
           ~omit_targ_defaults:false
           ~typed_ast
-          ~evaluate_type_destructors:false
+          ~evaluate_type_destructors:Ty_normalizer_env.EvaluateNone
           ~verbose_normalizer:false
           ~max_depth:50
           loc
@@ -385,10 +319,8 @@ let types_to_json types ~strip_root =
         |> List.map (fun (loc, str) ->
                let json_assoc =
                  ("type", JSON_String str)
-                 ::
-                 ("reasons", JSON_Array [])
-                 ::
-                 ("loc", json_of_loc ~strip_root ~offset_table:None loc)
+                 :: ("reasons", JSON_Array [])
+                 :: ("loc", json_of_loc ~strip_root ~offset_table:None loc)
                  :: Errors.deprecated_json_props_of_loc ~strip_root loc
                in
                JSON_Object json_assoc
@@ -409,7 +341,12 @@ let dump_types js_file js_content =
     let (cx, typed_ast) = infer_and_merge ~root filename ast file_sig in
     let printer = Ty_printer.string_of_elt_single_line ~exact_by_default:true in
     let types =
-      Query_types.dump_types ~printer ~evaluate_type_destructors:false cx file_sig typed_ast
+      Query_types.dump_types
+        ~printer
+        ~evaluate_type_destructors:Ty_normalizer_env.EvaluateNone
+        cx
+        file_sig
+        typed_ast
     in
     let strip_root = None in
     let types_json = types_to_json types ~strip_root in
@@ -436,7 +373,12 @@ let () =
   Js.Unsafe.set
     exports
     "registerFile"
-    (Js.wrap_callback (fun name content -> Sys_js.create_file ~name ~content))
+    (Js.wrap_callback (fun name content ->
+         let name = Js.to_string name in
+         let content = Js.to_string content in
+         Sys_js.create_file ~name ~content
+     )
+    )
 
 let () = Js.Unsafe.set exports "initBuiltins" (Js.wrap_callback init_builtins_js)
 

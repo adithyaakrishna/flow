@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -160,12 +160,11 @@ module DeclarationInfo = struct
     key
     @@ JSON_Object
          (("declaration", Declaration.to_json ~root ~write_root declaration)
-          ::
-          ("type", Type.to_json type_)
-          ::
-          (match documentation with
-          | None -> []
-          | Some loc -> [("documentation", Documentation.to_json ~root ~write_root loc)])
+         :: ("type", Type.to_json type_)
+         ::
+         (match documentation with
+         | None -> []
+         | Some loc -> [("documentation", Documentation.to_json ~root ~write_root loc)])
          )
 end
 
@@ -220,12 +219,11 @@ module MemberDeclarationInfo = struct
     key
     @@ JSON_Object
          (("memberDeclaration", MemberDeclaration.to_json ~root ~write_root memberDeclaration)
-          ::
-          ("type", Type.to_json type_)
-          ::
-          (match documentation with
-          | None -> []
-          | Some loc -> [("documentation", Documentation.to_json ~root ~write_root loc)])
+         :: ("type", Type.to_json type_)
+         ::
+         (match documentation with
+         | None -> []
+         | Some loc -> [("documentation", Documentation.to_json ~root ~write_root loc)])
          )
 end
 
@@ -356,12 +354,11 @@ module TypeDeclarationInfo = struct
     key
     @@ JSON_Object
          (("typeDeclaration", TypeDeclaration.to_json ~root ~write_root typeDeclaration)
-          ::
-          ("type", Type.to_json type_)
-          ::
-          (match documentation with
-          | None -> []
-          | Some loc -> [("documentation", Documentation.to_json ~root ~write_root loc)])
+         :: ("type", Type.to_json type_)
+         ::
+         (match documentation with
+         | None -> []
+         | Some loc -> [("documentation", Documentation.to_json ~root ~write_root loc)])
          )
 end
 

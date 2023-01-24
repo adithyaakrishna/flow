@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -24,12 +24,7 @@ val autocomplete_get_results :
   ast:(Loc.t, Loc.t) Flow_ast.Program.t ->
   typed_ast:(ALoc.t, ALoc.t * Type.t) Flow_ast.Program.t ->
   imports:bool ->
+  imports_ranked_usage:bool ->
   string option ->
   Loc.t ->
-  string option * (string * autocomplete_service_result)
-
-val autocomplete_suffix : string
-
-val suffix_len : int
-
-val add_autocomplete_token : string -> int -> int -> string * string
+  string option * ALoc.t option * string * autocomplete_service_result

@@ -1,13 +1,11 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 module Logger = FlowServerMonitorLogger
-
-exception FileWatcherDied of Exception.t
 
 type exit_reason =
   | Watcher_stopped
@@ -130,28 +128,47 @@ class dfind (monitor_options : FlowServerMonitorOptions.t) : watcher =
       | Some dfind -> dfind
 
     method start_init =
-      let file_options =
-        Options.file_options monitor_options.FlowServerMonitorOptions.server_options
-      in
+      let server_options = monitor_options.FlowServerMonitorOptions.server_options in
+      let file_options = Options.file_options server_options in
       watch_paths <- Files.watched_paths file_options;
-      let null_fd = Daemon.null_fd () in
-      let fds = (null_fd, null_fd, null_fd) in
+      let in_fd = Daemon.null_fd () in
+      let log_file =
+        let flowconfig_name = Options.flowconfig_name server_options in
+        let tmp_dir = Options.temp_dir server_options in
+        let root = Options.root server_options in
+        Server_files_js.dfind_log_file ~flowconfig_name ~tmp_dir root
+      in
+      let log_fd = Daemon.fd_of_path log_file in
+      let fds = (in_fd, log_fd, log_fd) in
       let dfind = DfindLibLwt.init fds ("flow_server_events", watch_paths) in
       dfind_instance <- Some dfind
 
     method wait_for_init ~timeout:_ =
-      let%lwt result = DfindLibLwt.wait_until_ready self#get_dfind in
-      let%lwt () =
-        let open FlowServerMonitorOptions in
-        if Options.lazy_mode monitor_options.server_options then (
-          let mergebase_with = monitor_options.file_watcher_mergebase_with in
-          let%lwt changes = changes_since_mergebase ~mergebase_with watch_paths in
-          files <- SSet.union files changes;
-          Lwt.return_unit
-        ) else
-          Lwt.return_unit
+      let%lwt result =
+        try%lwt
+          let%lwt result = DfindLibLwt.wait_until_ready self#get_dfind in
+          Lwt.return (Ok result)
+        with
+        | Sys_error msg when msg = "Broken pipe" ->
+          Lwt.return (Error "Failed to initialize dfind: broken pipe")
+        | End_of_file
+        | Unix.Unix_error (Unix.EPIPE, _, _) ->
+          Lwt.return (Error "Failed to initialize dfind: broken pipe")
       in
-      Lwt.return (Ok result)
+      match result with
+      | Ok result ->
+        let%lwt () =
+          let open FlowServerMonitorOptions in
+          if Options.lazy_mode monitor_options.server_options then (
+            let mergebase_with = monitor_options.file_watcher_mergebase_with in
+            let%lwt changes = changes_since_mergebase ~mergebase_with watch_paths in
+            files <- SSet.union files changes;
+            Lwt.return_unit
+          ) else
+            Lwt.return_unit
+        in
+        Lwt.return (Ok result)
+      | Error msg -> Lwt.return (Error msg)
 
     (* We don't want two threads to talk to dfind at the same time. And we don't want those two
      * threads to get the same file change events *)
@@ -165,12 +182,14 @@ class dfind (monitor_options : FlowServerMonitorOptions.t) : watcher =
             files <- SSet.union files new_files;
             Lwt.return_unit
           with
-          | Sys_error msg as e when msg = "Broken pipe" ->
-            let exn = Exception.wrap e in
-            raise (FileWatcherDied exn)
-          | (End_of_file | Unix.Unix_error (Unix.EPIPE, _, _)) as e ->
-            let exn = Exception.wrap e in
-            raise (FileWatcherDied exn)
+          (* ignore the dfind server dying. use waitpid to detect this instead *)
+          | Sys_error msg when msg = "Broken pipe" ->
+            Logger.debug "Connection to dfind broke";
+            Lwt.return_unit
+          | End_of_file
+          | Unix.Unix_error (Unix.EPIPE, _, _) ->
+            Logger.debug "Connection to dfind broke";
+            Lwt.return_unit
       )
 
     method get_and_clear_changed_files =
@@ -245,25 +264,11 @@ end = struct
     mutable instance: Watchman.env;
     mutable files: SSet.t;
     mutable metadata: MonitorProt.file_watcher_metadata;
-    mutable mergebase: string option;
-    mutable finished_an_hg_update: bool;
     mutable is_initial: bool;
     listening_thread: exit_reason Lwt.t;
     changes_condition: unit Lwt_condition.t;
     init_settings: Watchman.init_settings;
-    should_track_mergebase: bool;
-    survive_restarts: bool;
   }
-
-  let get_mergebase_and_changes env =
-    if env.should_track_mergebase then
-      match%lwt Watchman.get_mergebase_and_changes env.instance with
-      | Ok _ as ok -> Lwt.return ok
-      | Error Watchman.Dead
-      | Error Watchman.Restarted ->
-        Lwt.return (Error "Failed to query mergebase from Watchman")
-    else
-      Lwt.return (Ok None)
 
   module WatchmanListenLoop = LwtLoop.Make (struct
     module J = Hh_json_helpers.AdhocJsonHelpers
@@ -288,37 +293,8 @@ end = struct
         ~data:(Base.Option.value_map ~f:Hh_json.json_to_string ~default:"" metadata)
 
     let broadcast env =
-      if not (SSet.is_empty env.files) then Lwt_condition.broadcast env.changes_condition ()
-
-    (** When watchman restarts, we miss any filesystem changes that might happen while it's
-        down. To re-synchronize, we need to recheck all of the files that could have changed
-        while it wasn't watching:
-
-        1) a file that was previously unchanged is now changed
-        2) a changed file changed again
-        3) a previously changed file was reverted
-        4) the mergebase changed, changing some committed files
-
-        Since we can ask watchman for the changes since mergebase, it can tell us about
-        (1) and (2). We handle (3) separately, by setting [missed_changes = true] which
-        triggers a recheck of all focused (i.e. previously changed) files. But we can't
-        handle (4): watchman can't tell us all the files that changed between the two
-        mergebase commits (`hg` can, but it's not worth implementing this). so if the
-        mergebase changes, we restart. *)
-    let handle_restart env =
-      StatusStream.file_watcher_deferred "Watchman restart";
-      match%lwt get_mergebase_and_changes env with
-      | Ok mergebase_and_changes ->
-        (match (mergebase_and_changes, env.mergebase) with
-        | (Some { Watchman.clock; mergebase; changes }, Some old_mergebase)
-          when mergebase = old_mergebase ->
-          Logger.info "Watchman restarted, but the mergebase didn't change.";
-          Watchman.force_update_clockspec clock env.instance;
-          env.metadata <- { env.metadata with MonitorProt.missed_changes = true };
-          StatusStream.file_watcher_ready ();
-          Lwt.return (Some (env.instance, Watchman.Files_changed changes))
-        | _ -> Lwt.return None)
-      | Error _ -> Lwt.return None
+      if (not (SSet.is_empty env.files)) || env.metadata.MonitorProt.missed_changes then
+        Lwt_condition.broadcast env.changes_condition ()
 
     let main env =
       let%lwt (instance, pushed_changes) =
@@ -326,77 +302,56 @@ end = struct
         | Ok (instance, pushed_changes) -> Lwt.return (instance, pushed_changes)
         | Error Watchman.Dead -> raise (Watchman_failure Watchman.Dead)
         | Error Watchman.Restarted ->
-          if env.survive_restarts then
-            match%lwt handle_restart env with
-            | Some (instance, pushed_changes) -> Lwt.return (instance, pushed_changes)
-            | None -> raise (Watchman_failure Watchman.Restarted)
-          else
-            raise (Watchman_failure Watchman.Restarted)
+          StatusStream.file_watcher_deferred "Watchman restart";
+          (match%lwt Watchman.recover_from_restart env.instance with
+          | Ok (instance, pushed_changes) ->
+            StatusStream.file_watcher_ready ();
+            Lwt.return (instance, pushed_changes)
+          | Error err -> raise (Watchman_failure err))
       in
       env.instance <- instance;
       match pushed_changes with
-      | Watchman.Files_changed new_files ->
-        env.files <- SSet.union env.files new_files;
-        let%lwt () =
-          (*
-           ******* GOAL *******
-           *
-           * We want to know when an N-files-changed notification is due to the user changing
-           * their mergebase with master. This could be due to pulling master & rebasing their
-           * work onto the new master, or just moving from one commit to another.
-           *
-           ******* PREVIOUS SOLUTION *******
-           *
-           * Unfortunately, Watchman's mercurial integration is racy and not to be trusted.
-           * Previously we tried this:
-           *
-           * 1. Keep a count of how many transactions are currently in progress
-           * 2. When hg.update ends, wait for the transaction count to drop to 0
-           * 3. When there are 0 in-progress transactions, then query for the mergebase
-           *
-           * This worked pretty well, but looking at some logs I would see step 3 would not
-           * always fire. Maybe we were missing some state_leave notifications. Also, the
-           * source control people aren't confident that waiting for the transactions to
-           * is a strong guarantee.
-           *
-           ******* CURRENT SOLUTION *******
-           *
-           * So this is a more simple solution. It's based around the assumption that once
-           * Watchman tells us that N files have changed, things have settled down enough
-           * that it's safe to query for the mergebase. And since querying for the mergebase
-           * is expensive, we only do so when we see an hg.update. After an hg.update it's
-           * more acceptable to delay a file-changed notification than after a user saves a
-           * file in the IDE
-           *)
-          let%lwt changed_mergebase =
-            if env.finished_an_hg_update then (
-              env.finished_an_hg_update <- false;
-              let%lwt new_mergebase =
-                match%lwt get_mergebase_and_changes env with
-                | Ok mergebase_and_changes -> Lwt.return mergebase_and_changes
-                | Error msg ->
-                  (* TODO: handle this more gracefully than `failwith` *)
-                  failwith msg
-              in
-              match (new_mergebase, env.mergebase) with
-              | (Some { Watchman.mergebase; changes = _; clock = _ }, Some old_mergebase) ->
-                let changed_mergebase = mergebase <> old_mergebase in
-                if changed_mergebase then (
-                  Logger.info
-                    "Watchman reports mergebase changed from %S to %S"
-                    old_mergebase
-                    mergebase;
-                  env.mergebase <- Some mergebase
-                );
-                Lwt.return (Some changed_mergebase)
-              | _ -> Lwt.return None
-            ) else
-              Lwt.return None
-          in
-          let metadata = { MonitorProt.changed_mergebase; missed_changes = false } in
-          env.metadata <- MonitorProt.merge_file_watcher_metadata env.metadata metadata;
-          Lwt.return_unit
+      | Watchman.Files_changed { changes; changed_mergebase } ->
+        (* this event tells us all the files that changed. if changed_mergebase,
+           then some of these changes are upstream files. we could avoid rechecking
+           them if we re-init. we signal this by setting changed_mergebase. *)
+        env.files <- SSet.union env.files changes;
+        let metadata = { MonitorProt.changed_mergebase; missed_changes = false } in
+        env.metadata <- MonitorProt.merge_file_watcher_metadata env.metadata metadata;
+        broadcast env;
+        Lwt.return env
+      | Watchman.Missed_changes { prev_mergebase; mergebase; changes_since_mergebase } ->
+        (* When watchman restarts, we miss any filesystem changes that might happen while it's
+           down. Likewise, if so many files change that Watchman's underlying file watchers
+           can't keep up, it acts like it restarted. To re-synchronize, we need to recheck
+           all of the files that could have changed while it wasn't watching:
+
+           1) a file that was previously unchanged is now changed
+           2) a changed file changed again
+           3) a previously changed file was reverted
+           4) the mergebase changed, changing some committed files
+
+           Since watchman told us the changes since mergebase, we know about (1) and (2).
+           We handle (3) by setting [missed_changes = true], which triggers a recheck of
+           all focused (i.e. previously changed) files. But we can't incrementally
+           handle (4): watchman can't tell us all the files that changed between the two
+           mergebase commits (`hg` can, but it's not worth implementing this). *)
+        let changed_mergebase = not (String.equal prev_mergebase mergebase) in
+        if changed_mergebase then
+          Logger.info
+            "Watchman missed changes, and the mergebase changed from %S to %S."
+            prev_mergebase
+            mergebase
+        else
+          Logger.info "Watchman missed changes, but the mergebase didn't change.";
+        Logger.info
+          "Watchman reports %d files have changed since the mergebase"
+          (SSet.cardinal changes_since_mergebase);
+        env.files <- SSet.union env.files changes_since_mergebase;
+        let metadata =
+          { MonitorProt.changed_mergebase = Some changed_mergebase; missed_changes = true }
         in
+        env.metadata <- MonitorProt.merge_file_watcher_metadata env.metadata metadata;
         broadcast env;
         Lwt.return env
       | Watchman.State_enter (name, metadata) ->
@@ -419,7 +374,6 @@ end = struct
         (match name with
         | "hg.update" ->
           let (distance, rev) = extract_hg_update_metadata metadata in
-          env.finished_an_hg_update <- true;
           log_state_leave name metadata;
           Logger.info
             "Watchman reports an hg.update just finished. Moved %s revs to %s"
@@ -432,8 +386,6 @@ end = struct
           StatusStream.file_watcher_ready ();
           Lwt.return env
         | _ -> Lwt.return env)
-      | Watchman.Changed_merge_base _ ->
-        failwith "We're not using an scm aware subscription, so we should never get these"
 
     let catch _ exn =
       match Exception.to_exn exn with
@@ -480,11 +432,10 @@ end = struct
         | Some env -> env
 
       method start_init =
-        let { FlowServerMonitorOptions.debug; defer_states; sync_timeout; survive_restarts = _ } =
-          watchman_options
-        in
+        let { FlowServerMonitorOptions.debug; defer_states; sync_timeout } = watchman_options in
         let file_options = Options.file_options server_options in
         let watchman_expression_terms = Watchman_expression_terms.make ~options:server_options in
+        let should_track_mergebase = Options.lazy_mode server_options in
         let settings =
           {
             Watchman.debug_logging = debug;
@@ -492,6 +443,7 @@ end = struct
             expression_terms = watchman_expression_terms;
             mergebase_with;
             roots = Files.watched_paths file_options;
+            should_track_mergebase;
             (* Defer updates during `hg.update` and defer_states *)
             subscribe_mode = Watchman.Defer_changes;
             subscription_prefix = "flow_watcher";
@@ -507,52 +459,27 @@ end = struct
           let%lwt watchman = Base.Option.value_exn init_thread in
           init_thread <- None;
 
-          let should_track_mergebase = Options.lazy_mode server_options in
-          let survive_restarts = watchman_options.FlowServerMonitorOptions.survive_restarts in
           match watchman with
-          | Some watchman ->
+          | Ok (watchman, files) ->
             let (waiter, wakener) = Lwt.task () in
             let new_env =
               {
                 instance = watchman;
-                files = SSet.empty;
+                files;
                 listening_thread =
                   (let%lwt env = waiter in
                    listen env
                   );
-                mergebase = None;
                 is_initial = true;
-                finished_an_hg_update = false;
                 changes_condition = Lwt_condition.create ();
                 metadata = MonitorProt.empty_file_watcher_metadata;
                 init_settings = Base.Option.value_exn init_settings;
-                should_track_mergebase;
-                survive_restarts;
               }
             in
-            (match%lwt get_mergebase_and_changes new_env with
-            | Ok mergebase_and_changes ->
-              let (mergebase, files) =
-                match mergebase_and_changes with
-                | Some { Watchman.mergebase; changes; clock = _ } ->
-                  Logger.info
-                    "Watchman reports the initial mergebase as %S, and %d changes"
-                    mergebase
-                    (SSet.cardinal changes);
-                  (Some mergebase, changes)
-                | None ->
-                  if should_track_mergebase then
-                    Logger.warn
-                      "Not checking changes since mergebase! SCM-aware queries are not supported for your VCS by your version of Watchman.";
-                  (None, SSet.empty)
-              in
-              let new_env = { new_env with mergebase; files } in
-              env <- Some new_env;
-              Lwt.wakeup wakener new_env;
-              Lwt.return (Ok ())
-            | Error msg ->
-              Lwt.return (Error (Printf.sprintf "Failed to initialize watchman: %s" msg)))
-          | None -> Lwt.return (Error "Failed to initialize watchman")
+            env <- Some new_env;
+            Lwt.wakeup wakener new_env;
+            Lwt.return (Ok ())
+          | Error _ as err -> Lwt.return err
         in
         let go () =
           try%lwt go_exn () with

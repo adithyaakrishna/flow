@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -39,21 +39,10 @@ let handle_message genv = function
         }
     )
   | MonitorProt.FileWatcherNotification { files = changed_files; metadata; initial } ->
-    let open LspProt in
-    let file_count = SSet.cardinal changed_files in
     if initial then
-      let reason = Lazy_init_typecheck in
-      ServerMonitorListenerState.push_files_to_force_focused_and_recheck ~reason changed_files
+      ServerMonitorListenerState.push_lazy_init changed_files
     else
-      let reason =
-        match metadata with
-        | Some { MonitorProt.changed_mergebase = Some true; _ } -> Rebased { file_count }
-        | Some { MonitorProt.missed_changes = true; _ } -> File_watcher_missed_changes
-        | _ when file_count = 1 ->
-          Single_file_changed { filename = SSet.elements changed_files |> List.hd }
-        | _ -> Many_files_changed { file_count }
-      in
-      ServerMonitorListenerState.push_files_to_recheck ?metadata ~reason changed_files
+      ServerMonitorListenerState.push_files_to_recheck ?metadata changed_files
   | MonitorProt.PleaseDie please_die_reason ->
     kill_workers ();
     let msg =

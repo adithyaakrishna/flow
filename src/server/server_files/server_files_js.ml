@@ -1,11 +1,13 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 let default_flowconfig_name = ".flowconfig"
+
+let default_temp_dir = Filename.concat Sys_utils.temp_dir_name "flow"
 
 let add_dir_sep dir =
   Filename.(
@@ -42,7 +44,7 @@ let digest_root_part root_part max_len =
 let file_of_root ?max_root_part_len extension ~flowconfig_name ~tmp_dir root =
   let tmp_dir = tmp_dir |> Path.make |> Path.to_string |> add_dir_sep in
   let root = mk_root flowconfig_name root in
-  let root_part = Path.slash_escaped_string_of_path root in
+  let root_part = String_utils.filename_escape (Path.to_string root) in
   let root_part =
     match max_root_part_len with
     | None -> root_part
@@ -62,6 +64,8 @@ let config_file flowconfig_name root = Path.to_string (Path.concat root flowconf
 let max_root_part_len = 200
 
 let log_file = file_of_root ~max_root_part_len "log"
+
+let dfind_log_file = file_of_root ~max_root_part_len "dfind_log"
 
 let monitor_log_file = file_of_root ~max_root_part_len "monitor_log"
 

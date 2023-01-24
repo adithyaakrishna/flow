@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -21,11 +21,11 @@ let info_of_file_key = function
     | None ->
       let contents = Sys_utils.cat file in
       let offsets = Offset_utils.make ~kind:Offset_utils.Utf8 contents in
-      let ends_in_newline = contents.[String.length contents - 1] = '\n' in
+      let ends_in_newline = String.ends_with ~suffix:"\n" contents in
       let info = { offsets; ends_in_newline } in
       info_cache := SMap.add file info !info_cache;
       Some info)
-  | File_key.(ResourceFile _ | Builtins) -> None
+  | File_key.ResourceFile _ -> None
 
 open Base.Option.Let_syntax
 

@@ -1,16 +1,13 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-external realpath : string -> string option = "hh_realpath"
-
-(** Option type intead of exception throwing. *)
-let get_env name =
-  try Some (Sys.getenv name) with
-  | Not_found -> None
+let realpath p =
+  try Some (Unix.realpath p) with
+  | Unix.Unix_error _ -> None
 
 let getenv_home () =
   let home_var =
@@ -19,12 +16,12 @@ let getenv_home () =
     else
       "HOME"
   in
-  get_env home_var
+  Sys.getenv_opt home_var
 
 let getenv_term () =
   let term_var = "TERM" in
   (* This variable does not exist on windows. *)
-  get_env term_var
+  Sys.getenv_opt term_var
 
 let path_sep =
   if Sys.win32 then
@@ -47,49 +44,7 @@ let temp_dir_name =
 let getenv_path () =
   let path_var = "PATH" in
   (* Same variable on windows *)
-  get_env path_var
-
-let open_in_no_fail fn =
-  try open_in fn with
-  | e ->
-    let e = Printexc.to_string e in
-    Printf.fprintf stderr "Could not open_in: '%s' (%s)\n" fn e;
-    exit 3
-
-let open_in_bin_no_fail fn =
-  try open_in_bin fn with
-  | e ->
-    let e = Printexc.to_string e in
-    Printf.fprintf stderr "Could not open_in_bin: '%s' (%s)\n" fn e;
-    exit 3
-
-let close_in_no_fail fn ic =
-  try close_in ic with
-  | e ->
-    let e = Printexc.to_string e in
-    Printf.fprintf stderr "Could not close: '%s' (%s)\n" fn e;
-    exit 3
-
-let open_out_no_fail fn =
-  try open_out fn with
-  | e ->
-    let e = Printexc.to_string e in
-    Printf.fprintf stderr "Could not open_out: '%s' (%s)\n" fn e;
-    exit 3
-
-let open_out_bin_no_fail fn =
-  try open_out_bin fn with
-  | e ->
-    let e = Printexc.to_string e in
-    Printf.fprintf stderr "Could not open_out_bin: '%s' (%s)\n" fn e;
-    exit 3
-
-let close_out_no_fail fn oc =
-  try close_out oc with
-  | e ->
-    let e = Printexc.to_string e in
-    Printf.fprintf stderr "Could not close: '%s' (%s)\n" fn e;
-    exit 3
+  Sys.getenv_opt path_var
 
 let cat = Disk.cat
 
@@ -98,26 +53,6 @@ let cat_or_failed file =
   | Sys_error _
   | Failure _ ->
     None
-
-let cat_no_fail filename =
-  let ic = open_in_bin_no_fail filename in
-  let len = in_channel_length ic in
-  let buf = Buffer.create len in
-  Buffer.add_channel buf ic len;
-  let content = Buffer.contents buf in
-  close_in_no_fail filename ic;
-  content
-
-let nl_regexp = Str.regexp "[\r\n]"
-
-let split_lines = Str.split nl_regexp
-
-(** Returns true if substring occurs somewhere inside str. *)
-let string_contains str substring =
-  (* regexp_string matches only this string and nothing else. *)
-  let re = Str.regexp_string substring in
-  try Str.search_forward re str 0 >= 0 with
-  | Not_found -> false
 
 let exec_read cmd =
   let ic = Unix.open_process_in cmd in
@@ -140,55 +75,6 @@ let exec_read_lines ?(reverse = false) cmd =
   else
     !result
 
-(**
- * Collects paths that satisfy a predicate, recursively traversing directories.
- *)
-let rec collect_paths path_predicate path =
-  if Sys.is_directory path then
-    path
-    |> Sys.readdir
-    |> Array.to_list
-    |> Base.List.map ~f:(Filename.concat path)
-    |> Base.List.concat_map ~f:(collect_paths path_predicate)
-  else if path_predicate path then
-    [path]
-  else
-    []
-
-(**
- * Sometimes the user wants to pass a list of paths on the command-line.
- * However, we have enough files in the codebase that sometimes that list
- * exceeds the maximum number of arguments that can be passed on the
- * command-line. To work around this, we can use the convention that some Unix
- * tools use: a `@` before a path name represents a file that should be read
- * to get the necessary information (in this case, containing a list of files,
- * one per line).
- *)
-let parse_path_list (paths : string list) : string list =
-  Base.List.concat_map paths ~f:(fun path ->
-      if String_utils.string_starts_with path "@" then
-        let path = String_utils.lstrip path "@" in
-        cat path |> split_lines
-      else
-        [path]
-  )
-  |> Base.List.map ~f:(fun path ->
-         match realpath path with
-         | Some path -> path
-         | None -> failwith (Printf.sprintf "Invalid path: %s" path)
-     )
-
-let rm_dir_tree ?(skip_mocking = false) =
-  if skip_mocking then
-    RealDisk.rm_dir_tree
-  else
-    Disk.rm_dir_tree
-
-let restart () =
-  let cmd = Sys.argv.(0) in
-  let argv = Sys.argv in
-  Unix.execv cmd argv
-
 let with_umask umask f =
   if Sys.win32 then
     f ()
@@ -198,17 +84,6 @@ let with_umask umask f =
         let _ = Unix.umask old_umask in
         ()
     )
-
-let read_stdin_to_string () =
-  let buf = Buffer.create 4096 in
-  try
-    while true do
-      Buffer.add_string buf (input_line stdin);
-      Buffer.add_char buf '\n'
-    done;
-    assert false
-  with
-  | End_of_file -> Buffer.contents buf
 
 let read_all ?(buf_size = 4096) ic =
   let buf = Buffer.create buf_size in
@@ -236,16 +111,15 @@ let expanduser path =
     (Str.regexp "^~\\([^/]*\\)")
     begin
       fun s ->
-      match Str.matched_group 1 s with
-      | "" ->
-        begin
+        match Str.matched_group 1 s with
+        | "" -> begin
           match getenv_home () with
           | None -> (Unix.getpwuid (Unix.getuid ())).Unix.pw_dir
           | Some home -> home
         end
-      | unixname ->
-        (try (Unix.getpwnam unixname).Unix.pw_dir with
-        | Not_found -> Str.matched_string s)
+        | unixname ->
+          (try (Unix.getpwnam unixname).Unix.pw_dir with
+          | Not_found -> Str.matched_string s)
     end
     path
 
@@ -273,9 +147,9 @@ let executable_path : unit -> string =
         ~f:
           begin
             fun acc p ->
-            match acc with
-            | Some _ -> acc
-            | None -> realpath (expanduser (Filename.concat p path))
+              match acc with
+              | Some _ -> acc
+              | None -> realpath (expanduser (Filename.concat p path))
           end
         ~init:None
     in
@@ -331,37 +205,6 @@ let read_file file =
 
 let write_file ~file s = Disk.write_file ~file ~contents:s
 
-let append_file ~file s =
-  let chan = open_out_gen [Open_wronly; Open_append; Open_creat] 0o666 file in
-  output_string chan s;
-  close_out chan
-
-let write_strings_to_file ~file (ss : string list) =
-  let chan = open_out_gen [Open_wronly; Open_creat] 0o666 file in
-  Base.List.iter ~f:(output_string chan) ss;
-  close_out chan
-
-(* could be in control section too *)
-
-let filemtime file = (Unix.stat file).Unix.st_mtime
-
-external lutimes : string -> unit = "hh_lutimes"
-
-let try_touch ~follow_symlinks file =
-  try
-    if follow_symlinks then
-      Unix.utimes file 0.0 0.0
-    else
-      lutimes file
-  with
-  | _ -> ()
-
-let mkdir_p ?(skip_mocking = false) =
-  if skip_mocking then
-    RealDisk.mkdir_p
-  else
-    Disk.mkdir_p
-
 (* Emulate "mkdir -p", i.e., no error if already exists. *)
 let mkdir_no_fail dir =
   with_umask 0 (fun () ->
@@ -370,34 +213,6 @@ let mkdir_no_fail dir =
       try Unix.mkdir dir 0o777 with
       | Unix.Unix_error (Unix.EEXIST, _, _) -> ()
   )
-
-let unlink_no_fail fn =
-  try Unix.unlink fn with
-  | Unix.Unix_error (Unix.ENOENT, _, _) -> ()
-
-let readlink_no_fail fn =
-  if Sys.win32 && Sys.file_exists fn then
-    cat fn
-  else
-    try Unix.readlink fn with
-    | _ -> fn
-
-let splitext filename =
-  let root = Filename.chop_extension filename in
-  let root_length = String.length root in
-  (* -1 because the extension includes the period, e.g. ".foo" *)
-  let ext_length = String.length filename - root_length - 1 in
-  let ext = String.sub filename (root_length + 1) ext_length in
-  (root, ext)
-
-let is_test_mode () =
-  try
-    ignore @@ Sys.getenv "HH_TEST_MODE";
-    true
-  with
-  | _ -> false
-
-let sleep ~seconds = ignore @@ Unix.select [] [] [] seconds
 
 let symlink =
   (* Dummy implementation of `symlink` on Windows: we create a text
@@ -412,34 +227,6 @@ let symlink =
      *)
     fun source dest ->
   Unix.symlink source dest
-
-(* Creates a symlink at <dir>/<linkname.ext> to
- * <dir>/<pluralized ext>/<linkname>-<timestamp>.<ext> *)
-let make_link_of_timestamped linkname =
-  Unix.(
-    let dir = Filename.dirname linkname in
-    mkdir_no_fail dir;
-    let base = Filename.basename linkname in
-    let (base, ext) = splitext base in
-    let dir = Filename.concat dir (Printf.sprintf "%ss" ext) in
-    mkdir_no_fail dir;
-    let tm = localtime (time ()) in
-    let year = tm.tm_year + 1900 in
-    let time_str =
-      Printf.sprintf
-        "%d-%02d-%02d-%02d-%02d-%02d"
-        year
-        (tm.tm_mon + 1)
-        tm.tm_mday
-        tm.tm_hour
-        tm.tm_min
-        tm.tm_sec
-    in
-    let filename = Filename.concat dir (Printf.sprintf "%s-%s.%s" base time_str ext) in
-    unlink_no_fail linkname;
-    symlink filename linkname;
-    filename
-  )
 
 let setsid =
   (* Not implemented on Windows. Let's just return the pid *)
@@ -463,6 +250,10 @@ let signal =
     fun _ _ ->
   ()
 
+external is_rosetta : unit -> bool = "hh_is_rosetta"
+
+let is_rosetta = is_rosetta ()
+
 external get_total_ram : unit -> int = "hh_sysinfo_totalram"
 
 external uptime : unit -> int = "hh_sysinfo_uptime"
@@ -473,9 +264,28 @@ let total_ram = get_total_ram ()
 
 let nbr_procs = nproc ()
 
-external set_priorities : cpu_priority:int -> io_priority:int -> unit = "hh_set_priorities"
+(** There are a bunch of functions that you expect to return a pid,
+  like Unix.getpid() and Unix.create_process(). However, on
+  Windows, instead of returning the process ID, they return a
+  process handle.
 
+  Process handles act like pointers to a process. You can have
+  more than one handle that points to a single process (unlike
+  pids, where there is a single pid for a process).
+
+  This isn't a problem normally, since functons like Unix.waitpid()
+  will take the process handle on Windows. But if you want to print
+  or log the pid, then you need to dereference the handle and get
+  the pid. And that's what this function does. *)
 external pid_of_handle : int -> int = "pid_of_handle"
+
+(** Returns the actual process identifier on all platforms.
+
+  [Unix.getpid ()] on Windows returns the process handle, not the process identifier.
+  The handle is what you need for the other APIs that take a "pid", but the actual
+  process identifier is unique across processes and what shows up in Task Manager.
+  Use [get_pretty_pid] when showing the PID to the user, logging, etc. *)
+let get_pretty_pid () = Unix.getpid () |> pid_of_handle
 
 external handle_of_pid_for_termination : int -> int = "handle_of_pid_for_termination"
 
@@ -486,7 +296,7 @@ let lstat path =
      '/' (or a '\', whatever) *)
   Unix.lstat
   @@
-  if Sys.win32 && String_utils.string_ends_with path Filename.dir_sep then
+  if Sys.win32 && String.ends_with ~suffix:Filename.dir_sep path then
     String.sub path 0 (String.length path - 1)
   else
     path
@@ -602,40 +412,6 @@ let find_oom_in_dmesg_output pid name lines =
 let check_dmesg_for_oom pid name =
   let dmesg = exec_read_lines ~reverse:true "dmesg" in
   find_oom_in_dmesg_output pid name dmesg
-
-(* Be careful modifying the rusage type! Like other types that interact with C, the order matters!
- * If you change things here you must update hh_getrusage too! *)
-type rusage = {
-  ru_maxrss: int;
-  (* maximum resident set size *)
-  ru_ixrss: int;
-  (* integral shared memory size *)
-  ru_idrss: int;
-  (* integral unshared data size *)
-  ru_isrss: int;
-  (* integral unshared stack size *)
-  ru_minflt: int;
-  (* page reclaims (soft page faults) *)
-  ru_majflt: int;
-  (* page faults (hard page faults) *)
-  ru_nswap: int;
-  (* swaps *)
-  ru_inblock: int;
-  (* block input operations *)
-  ru_oublock: int;
-  (* block output operations *)
-  ru_msgsnd: int;
-  (* IPC messages sent *)
-  ru_msgrcv: int;
-  (* IPC messages received *)
-  ru_nsignals: int;
-  (* signals received *)
-  ru_nvcsw: int;
-  (* voluntary context switches *)
-  ru_nivcsw: int; (* involuntary context switches *)
-}
-
-external getrusage : unit -> rusage = "hh_getrusage"
 
 external start_gc_profiling : unit -> unit = "hh_start_gc_profiling" [@@noalloc]
 

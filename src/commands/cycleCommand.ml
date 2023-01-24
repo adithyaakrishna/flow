@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -27,7 +27,7 @@ let spec =
         |> connect_flags
         |> root_flag
         |> strip_root_flag
-        |> flag "--types" no_arg ~doc:"Only consider type dependencies"
+        |> flag "--types" truthy ~doc:"Only consider type dependencies"
         |> anon "FILE..." (required string)
       );
   }

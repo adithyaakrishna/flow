@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -103,8 +103,8 @@ let run_full_test source =
   List.iter
     begin
       fun loc ->
-      let (_ : int) = get_offset offset_table loc in
-      ()
+        let (_ : int) = get_offset offset_table loc in
+        ()
     end
     all_positions
 

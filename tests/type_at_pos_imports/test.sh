@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -119,3 +119,7 @@ printf "import-type.js:3:20 = "
 assert_ok "$FLOW" type-at-pos import-type.js 3 20 --strip-root --pretty
 printf "import-type.js:7:7 = "
 assert_ok "$FLOW" type-at-pos import-type.js 7 7 --strip-root --pretty --expand-json-output
+
+# rtype-main.js - import RType reason
+printf "rtype-main.js:4:13 = "
+assert_ok "$FLOW" type-at-pos rtype-main.js 4 13 --strip-root --pretty --expand-json-output

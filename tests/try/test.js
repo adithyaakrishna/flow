@@ -4,7 +4,7 @@
  */
 
 function foo() {
-    var x = 0;
+    var x: number | string | boolean = 0;
     var y;
     try {
         x = "";
@@ -15,11 +15,11 @@ function foo() {
         y = {};
     }
     // here via [try; finally] only.
-    x(); // string ~/> function call (no num or bool error)
+    x(); // string ~/> function call (no num or boolean error)
     y(); // object ~/> function call (no uninitialized error)
 }
 
-function bar(response) {
+function bar(response: string) {
     var payload;
     try {
         payload = JSON.parse(response);

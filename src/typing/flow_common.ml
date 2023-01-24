@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -53,6 +53,17 @@ module type BASE = sig
 
   val filter_optional : Context.t -> ?trace:Type.trace -> reason -> Type.t -> Type.ident
 
+  val mk_typeapp_instance_annot :
+    Context.t ->
+    ?trace:Type.trace ->
+    use_op:Type.use_op ->
+    reason_op:Reason.reason ->
+    reason_tapp:Reason.reason ->
+    ?cache:Reason.reason list ->
+    Type.t ->
+    Type.t list ->
+    Type.t
+
   val mk_typeapp_instance :
     Context.t ->
     ?trace:Type.trace ->
@@ -72,11 +83,18 @@ module type BASE = sig
     Type.ident ->
     Type.t ->
     unit
+
+  val flow_use_op : Context.t -> Type.use_op -> Type.use_t -> Type.use_t
 end
 
 module type CHECK_POLARITY = sig
   val check_polarity :
-    Context.t -> ?trace:Type.trace -> Type.typeparam SMap.t -> Polarity.t -> Type.t -> unit
+    Context.t ->
+    ?trace:Type.trace ->
+    Type.typeparam Subst_name.Map.t ->
+    Polarity.t ->
+    Type.t ->
+    unit
 end
 
 module type TRUST_CHECKING = sig
@@ -92,6 +110,13 @@ end
 module type BUILTINS = sig
   val get_builtin_type :
     Context.t -> ?trace:Type.trace -> Reason.reason -> ?use_desc:bool -> name -> Type.t
+
+  val get_builtin_result :
+    Context.t ->
+    ?trace:Type.trace ->
+    name ->
+    reason ->
+    (Type.t, Type.t * Env_api.cacheable_env_error Nel.t) result
 
   val get_builtin_prop_type :
     Context.t -> ?trace:Type.trace -> Reason.reason -> Type.React.PropType.complex -> Type.t
@@ -124,7 +149,11 @@ end
 
 module type SUBTYPING = sig
   val fix_this_class :
-    Context.t -> Type.trace -> Reason.reason -> Reason.reason * Type.t * bool -> Type.t
+    Context.t ->
+    Type.trace ->
+    Reason.reason ->
+    Reason.reason * Type.t * bool * Subst_name.t ->
+    Type.t
 
   val reposition_reason :
     Context.t -> ?trace:Type.trace -> Reason.reason -> ?use_desc:bool -> Type.t -> Type.t
@@ -154,12 +183,25 @@ module type SUBTYPING = sig
     use_op:use_op ->
     reason ->
     reason ->
-    (string * reason * Type.t * Polarity.t) list ->
-    (string * reason * Type.t * Polarity.t) list ->
+    (Subst_name.t * reason * Type.t * Polarity.t) list ->
+    (Subst_name.t * reason * Type.t * Polarity.t) list ->
     unit
 
   val instantiate_this_class :
     Context.t -> Type.trace -> Reason.reason -> Type.t -> Type.t -> Type.cont -> unit
+
+  val instantiate_poly_with_targs :
+    Context.t ->
+    Type.trace ->
+    use_op:Type.use_op ->
+    reason_op:Reason.reason ->
+    reason_tapp:Reason.t ->
+    ?cache:Reason.t list ->
+    ?errs_ref:Context.subst_cache_err list ref ->
+    ?unify_bounds:bool ->
+    ALoc.t * Type.typeparam Nel.t * Type.t ->
+    Type.t list ->
+    Type.t * (Type.t * Subst_name.t) list
 
   val instantiate_poly :
     Context.t ->
@@ -168,8 +210,9 @@ module type SUBTYPING = sig
     reason_op:Reason.reason ->
     reason_tapp:Reason.reason ->
     ?cache:Reason.reason Base.List.t ->
+    ?unify_bounds:bool ->
     ALoc.t * Type.typeparam Nel.t * Type.t ->
-    Type.t
+    Type.t * (Type.t * Subst_name.t) list
 
   val specialize_class :
     Context.t ->
@@ -200,7 +243,15 @@ module type EVAL = sig
     Context.t -> ?trace:Type.trace -> Type.t -> Type.defer_use_t -> Type.Eval.id -> Type.t
 
   val eval_selector :
-    Context.t -> ?trace:Type.trace -> reason -> Type.t -> Type.selector -> Type.tvar -> int -> unit
+    Context.t ->
+    ?trace:Type.trace ->
+    annot:bool ->
+    reason ->
+    Type.t ->
+    Type.selector ->
+    Type.tvar ->
+    int ->
+    unit
 
   val mk_type_destructor :
     Context.t ->

@@ -1,11 +1,11 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-val kind_is_supported : options:Options.t -> Lsp.CodeActionKind.t list option -> bool
+val kind_is_supported : Lsp.CodeActionKind.t list option -> bool
 
 type text_edits = {
   title: string;
@@ -32,7 +32,7 @@ type ast_transform_of_error = {
   target_loc: Loc.t;
 }
 
-val ast_transform_of_error : ?loc:Loc.t -> Loc.t Error_message.t' -> ast_transform_of_error option
+val ast_transforms_of_error : ?loc:Loc.t -> Loc.t Error_message.t' -> ast_transform_of_error list
 
 val code_actions_at_loc :
   options:Options.t ->
@@ -62,7 +62,6 @@ val autofix_imports :
 
 val autofix_exports :
   options:Options.t ->
-  env:ServerEnv.env ->
   profiling:Profiling_js.running ->
   file_key:File_key.t ->
   file_content:string ->

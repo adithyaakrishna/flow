@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -47,8 +47,8 @@ assert_ok "$FLOW" type-at-pos charset.js 3 13 --strip-root --pretty
 # destructuring.js
 printf "destructuring.js:3:6 = "
 assert_ok "$FLOW" type-at-pos destructuring.js 3 6 --strip-root --pretty
-printf "destructuring.js:17:13 = "
-assert_ok "$FLOW" type-at-pos destructuring.js 17 13 --strip-root --pretty
+printf "destructuring.js:11:13 = "
+assert_ok "$FLOW" type-at-pos destructuring.js 11 13 --strip-root --pretty
 
 # generics.js
 printf "generics.js:5:1 = "
@@ -76,7 +76,7 @@ assert_ok "$FLOW" type-at-pos implicit-instantiation.js 5 10 --strip-root --pret
 printf "implicit-instantiation.js:6:10"
 assert_ok "$FLOW" type-at-pos implicit-instantiation.js 6 10 --strip-root --pretty --expand-json-output
 printf "implicit-instantiation.js:10:21"
-assert_ok "$FLOW" type-at-pos implicit-instantiation.js 10 21 --strip-root --pretty --expand-json-output
+assert_ok "$FLOW" type-at-pos implicit-instantiation.js 10 41 --strip-root --pretty --expand-json-output
 
 # interface.js
 printf "interface.js:6:7 = "
@@ -172,21 +172,17 @@ assert_ok "$FLOW" type-at-pos optional.js 14 10 --strip-root --pretty
 printf "recursive.js:3:25 = "
 assert_ok "$FLOW" type-at-pos recursive.js 3 25 --strip-root --pretty
 printf "recursive.js:6:11 = "
-assert_ok "$FLOW" type-at-pos recursive.js 6 11 --strip-root --pretty
+assert_ok "$FLOW" type-at-pos recursive.js 7 11 --strip-root --pretty
 printf "recursive.js:13:12 = "
-assert_ok "$FLOW" type-at-pos recursive.js 13 12 --strip-root --pretty
+assert_ok "$FLOW" type-at-pos recursive.js 15 12 --strip-root --pretty
 printf "recursive.js:23:12 = "
-assert_ok "$FLOW" type-at-pos recursive.js 23 12 --strip-root --pretty
-printf "recursive.js:38:2 = "
-assert_ok "$FLOW" type-at-pos recursive.js 38 2 --strip-root --pretty
-printf "recursive.js:41:17 = "
-assert_ok "$FLOW" type-at-pos recursive.js 41 17 --strip-root --pretty
-printf "recursive.js:58:1 = "
-assert_ok "$FLOW" type-at-pos recursive.js 58 1 --strip-root --pretty
-printf "recursive.js:60:6 = "
-assert_ok "$FLOW" type-at-pos recursive.js 60 6 --strip-root --pretty
-printf "recursive.js:60:31 = "
-assert_ok "$FLOW" type-at-pos recursive.js 60 31 --strip-root --pretty
+assert_ok "$FLOW" type-at-pos recursive.js 26 12 --strip-root --pretty
+printf "recursive.js:49:1 = "
+assert_ok "$FLOW" type-at-pos recursive.js 52 1 --strip-root --pretty
+printf "recursive.js:51:6 = "
+assert_ok "$FLOW" type-at-pos recursive.js 54 6 --strip-root --pretty
+printf "recursive.js:51:31 = "
+assert_ok "$FLOW" type-at-pos recursive.js 54 31 --strip-root --pretty
 
 # subst.js
 printf "subst.js:13:7 = "

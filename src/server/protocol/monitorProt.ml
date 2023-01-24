@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -63,6 +63,7 @@ type server_to_monitor_message =
   | PersistentConnectionResponse of LspProt.client_id * LspProt.message_from_server
   (* A notification of the server's current status *)
   | StatusUpdate of ServerStatus.status
+  | Telemetry of LspProt.telemetry_from_server  (** A telemetry notification from the server *)
 
 (* These are the messages that the server sends to an ephemeral socket connection *)
 type monitor_to_client_message =

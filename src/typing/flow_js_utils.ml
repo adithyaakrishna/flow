@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -22,17 +22,15 @@ type loc = ALoc.t
  * to a separate module in order to avoid a circular dependency *)
 
 (* Def types that describe the solution of a type variable. *)
-let possible_types cx id =
-  types_of (Lazy.force (Context.find_graph cx id)) |> List.filter is_proper_def
+let possible_types cx id = types_of (Context.find_graph cx id) |> List.filter is_proper_def
 
 let possible_types_of_type cx = function
   | OpenT (_, id) -> possible_types cx id
   | _ -> []
 
-let possible_uses cx id =
-  uses_of (Lazy.force (Context.find_graph cx id)) |> List.filter is_proper_use
+let possible_uses cx id = uses_of (Context.find_graph cx id) |> List.filter is_proper_use
 
-let merge_tvar =
+let merge_tvar_opt =
   let rec collect_lowers ~filter_empty cx seen acc = function
     | [] -> Base.List.rev acc
     | t :: ts ->
@@ -49,15 +47,20 @@ let merge_tvar =
       (* Everything else becomes part of the merge typed *)
       | _ -> collect_lowers ~filter_empty cx seen (t :: acc) ts)
   in
-  fun ?(filter_empty = false) ~no_lowers cx r id ->
+  fun ?(filter_empty = false) cx r id ->
     let lowers =
       let seen = ISet.singleton id in
       collect_lowers cx seen [] (possible_types cx id) ~filter_empty
     in
     match lowers with
-    | [t] -> t
-    | t0 :: t1 :: ts -> UnionT (r, UnionRep.make t0 t1 ts)
-    | [] -> no_lowers cx r
+    | [t] -> Some t
+    | t0 :: t1 :: ts -> Some (UnionT (r, UnionRep.make t0 t1 ts))
+    | [] -> None
+
+let merge_tvar ?(filter_empty = false) ~no_lowers cx r id =
+  match merge_tvar_opt ~filter_empty cx r id with
+  | Some t -> t
+  | None -> no_lowers cx r
 
 (** Type predicates *)
 
@@ -105,6 +108,7 @@ let ground_subtype = function
   | (DefT (_, _, NumT _), UseT (_, DefT (_, _, NumT _)))
   | (DefT (_, _, StrT _), UseT (_, DefT (_, _, StrT _)))
   | (DefT (_, _, BoolT _), UseT (_, DefT (_, _, BoolT _)))
+  | (DefT (_, _, BigIntT _), UseT (_, DefT (_, _, BigIntT _)))
   | (DefT (_, _, SymbolT), UseT (_, DefT (_, _, SymbolT)))
   | (DefT (_, _, NullT), UseT (_, DefT (_, _, NullT)))
   | (DefT (_, _, VoidT), UseT (_, DefT (_, _, VoidT))) ->
@@ -126,17 +130,16 @@ let ground_subtype = function
     true
   | _ -> false
 
-let numeric = function
+let is_number = function
   | DefT (_, _, NumT _) -> true
   | DefT (_, _, SingletonNumT _) -> true
   | _ -> false
 
-let dateiform = function
+let is_date = function
   | DefT (reason, _, InstanceT _) -> DescFormat.name_of_instance_reason reason = "Date"
   | _ -> false
 
-let numberesque = function
-  | x -> numeric x || dateiform x
+let is_number_or_date x = is_number x || is_date x
 
 let function_like = function
   | DefT (_, _, ClassT _)
@@ -169,6 +172,7 @@ let object_like_op = function
   | GetKeysT _
   | HasOwnPropT _
   | GetValuesT _
+  | GetDictValuesT _
   | ObjAssignToT _
   | ObjAssignFromT _
   | ObjRestT _
@@ -246,26 +250,25 @@ let patt_that_needs_concretization = function
   | _ -> false
 
 let parts_to_replace_t cx = function
-  | DefT (_, _, ObjT { call_t = Some id; _ }) ->
-    begin
-      match Context.find_call cx id with
-      | DefT (_, _, FunT (_, _, ft)) ->
-        let ts =
-          List.fold_left
-            (fun acc (_, t) ->
-              if patt_that_needs_concretization t then
-                t :: acc
-              else
-                acc)
-            []
-            ft.params
-        in
-        (match ft.rest_param with
-        | Some (_, _, t) when patt_that_needs_concretization t -> t :: ts
-        | _ -> ts)
-      | _ -> []
-    end
-  | DefT (_, _, FunT (_, _, ft)) ->
+  | DefT (_, _, ObjT { call_t = Some id; _ }) -> begin
+    match Context.find_call cx id with
+    | DefT (_, _, FunT (_, ft)) ->
+      let ts =
+        List.fold_left
+          (fun acc (_, t) ->
+            if patt_that_needs_concretization t then
+              t :: acc
+            else
+              acc)
+          []
+          ft.params
+      in
+      (match ft.rest_param with
+      | Some (_, _, t) when patt_that_needs_concretization t -> t :: ts
+      | _ -> ts)
+    | _ -> []
+  end
+  | DefT (_, _, FunT (_, ft)) ->
     let ts =
       List.fold_left
         (fun acc (_, t) ->
@@ -284,7 +287,7 @@ let parts_to_replace_t cx = function
 (* for now, we only care about concretizating parts of functions and calls *)
 let parts_to_replace cx = function
   | UseT (_, t) -> parts_to_replace_t cx t
-  | CallT (_, _, callt) ->
+  | CallT { use_op = _; reason = _; call_action = Funcalltype callt; return_hint = _ } ->
     List.fold_left
       (fun acc -> function
         | Arg t
@@ -326,30 +329,33 @@ let replace_parts =
       replace_args (arg :: acc) (ys, args)
   in
   fun cx resolved -> function
-    | UseT (op, DefT (r1, t1, ObjT ({ call_t = Some id; _ } as o))) as u ->
-      begin
-        match Context.find_call cx id with
-        | DefT (r2, t2, FunT (static, proto, ft)) ->
-          let (resolved, params) = replace_params [] (resolved, ft.params) in
-          let (resolved, rest_param) = replace_rest_param (resolved, ft.rest_param) in
-          assert (resolved = []);
-          let id' =
-            Context.make_call_prop
-              cx
-              (DefT (r2, t2, FunT (static, proto, { ft with params; rest_param })))
-          in
-          UseT (op, DefT (r1, t1, ObjT { o with call_t = Some id' }))
-        | _ -> u
-      end
-    | UseT (op, DefT (r, trust, FunT (t1, t2, ft))) ->
+    | UseT (op, DefT (r1, t1, ObjT ({ call_t = Some id; _ } as o))) as u -> begin
+      match Context.find_call cx id with
+      | DefT (r2, t2, FunT (static, ft)) ->
+        let (resolved, params) = replace_params [] (resolved, ft.params) in
+        let (resolved, rest_param) = replace_rest_param (resolved, ft.rest_param) in
+        assert (resolved = []);
+        let id' =
+          Context.make_call_prop cx (DefT (r2, t2, FunT (static, { ft with params; rest_param })))
+        in
+        UseT (op, DefT (r1, t1, ObjT { o with call_t = Some id' }))
+      | _ -> u
+    end
+    | UseT (op, DefT (r, trust, FunT (t1, ft))) ->
       let (resolved, params) = replace_params [] (resolved, ft.params) in
       let (resolved, rest_param) = replace_rest_param (resolved, ft.rest_param) in
       assert (resolved = []);
-      UseT (op, DefT (r, trust, FunT (t1, t2, { ft with params; rest_param })))
-    | CallT (op, r, callt) ->
-      let (resolved, call_args_tlist) = replace_args [] (resolved, callt.call_args_tlist) in
+      UseT (op, DefT (r, trust, FunT (t1, { ft with params; rest_param })))
+    | CallT { use_op; reason; call_action = Funcalltype funcalltype; return_hint } ->
+      let (resolved, call_args_tlist) = replace_args [] (resolved, funcalltype.call_args_tlist) in
       assert (resolved = []);
-      CallT (op, r, { callt with call_args_tlist })
+      CallT
+        {
+          use_op;
+          reason;
+          call_action = Funcalltype { funcalltype with call_args_tlist };
+          return_hint;
+        }
     | u -> u
 
 (** Errors *)
@@ -363,9 +369,9 @@ let error_message_kind_of_lower = function
     None
 
 let error_message_kind_of_upper = function
-  | GetPropT (_, _, Named (r, name), _) ->
+  | GetPropT (_, _, _, Named (r, name), _) ->
     Error_message.IncompatibleGetPropT (aloc_of_reason r, Some name)
-  | GetPropT (_, _, Computed t, _) -> Error_message.IncompatibleGetPropT (loc_of_t t, None)
+  | GetPropT (_, _, _, Computed t, _) -> Error_message.IncompatibleGetPropT (loc_of_t t, None)
   | GetPrivatePropT (_, _, _, _, _, _) -> Error_message.IncompatibleGetPrivatePropT
   | SetPropT (_, _, Named (r, name), _, _, _, _) ->
     Error_message.IncompatibleSetPropT (aloc_of_reason r, Some name)
@@ -373,23 +379,22 @@ let error_message_kind_of_upper = function
   | MatchPropT (_, _, Named (r, name), _) ->
     Error_message.IncompatibleMatchPropT (aloc_of_reason r, Some name)
   | MatchPropT (_, _, Computed t, _) -> Error_message.IncompatibleMatchPropT (loc_of_t t, None)
-  | SetPrivatePropT (_, _, _, _, _, _, _, _) -> Error_message.IncompatibleSetPrivatePropT
+  | SetPrivatePropT (_, _, _, _, _, _, _, _, _) -> Error_message.IncompatibleSetPrivatePropT
   | MethodT (_, _, _, Named (r, name), _, _) ->
     Error_message.IncompatibleMethodT (aloc_of_reason r, Some name)
   | MethodT (_, _, _, Computed t, _, _) -> Error_message.IncompatibleMethodT (loc_of_t t, None)
   | CallT _ -> Error_message.IncompatibleCallT
-  | ConstructorT _ -> Error_message.IncompatibleConstructorT
-  | GetElemT (_, _, t, _) -> Error_message.IncompatibleGetElemT (loc_of_t t)
+  | GetElemT (_, _, _, t, _) -> Error_message.IncompatibleGetElemT (loc_of_t t)
   | SetElemT (_, _, t, _, _, _) -> Error_message.IncompatibleSetElemT (loc_of_t t)
   | CallElemT (_, _, t, _) -> Error_message.IncompatibleCallElemT (loc_of_t t)
   | ElemT (_, _, DefT (_, _, ArrT _), _) -> Error_message.IncompatibleElemTOfArrT
   | ObjAssignFromT (_, _, _, _, ObjSpreadAssign) -> Error_message.IncompatibleObjAssignFromTSpread
   | ObjAssignFromT _ -> Error_message.IncompatibleObjAssignFromT
   | ObjRestT _ -> Error_message.IncompatibleObjRestT
-  | ObjSealT _ -> Error_message.IncompatibleObjSealT
   | ArrRestT _ -> Error_message.IncompatibleArrRestT
   | SuperT _ -> Error_message.IncompatibleSuperT
   | MixinT _ -> Error_message.IncompatibleMixinT
+  | SpecializeT (Op (ClassExtendsCheck _), _, _, _, _, _) -> Error_message.IncompatibleSuperT
   | SpecializeT _ -> Error_message.IncompatibleSpecializeT
   | ConcretizeTypeAppsT _ -> Error_message.IncompatibleSpecializeT
   | ThisSpecializeT _ -> Error_message.IncompatibleThisSpecializeT
@@ -404,7 +409,8 @@ let error_message_kind_of_upper = function
     Error_message.IncompatibleHasOwnPropT (aloc_of_reason r, Some name)
   | HasOwnPropT (_, r, _) -> Error_message.IncompatibleHasOwnPropT (aloc_of_reason r, None)
   | GetValuesT _ -> Error_message.IncompatibleGetValuesT
-  | UnaryMinusT _ -> Error_message.IncompatibleUnaryMinusT
+  | GetDictValuesT _ -> Error_message.IncompatibleGetValuesT
+  | UnaryArithT _ -> Error_message.IncompatibleUnaryArithT
   | MapTypeT (_, _, (ObjectMap _ | ObjectMapi _ | ObjectMapConst _ | ObjectKeyMirror), _) ->
     Error_message.IncompatibleMapTypeTObject
   | TypeAppVarianceCheckT _ -> Error_message.IncompatibleTypeAppVarianceCheckT
@@ -417,10 +423,12 @@ let use_op_of_lookup_action = function
   | WriteProp { use_op; _ }
   | LookupProp (use_op, _)
   | SuperProp (use_op, _)
-  | MatchProp (use_op, _) ->
+  | MatchProp { use_op; _ } ->
     use_op
 
 exception SpeculativeError of Error_message.t
+
+exception SpeculationSingletonError
 
 (* [src_cx] is the context in which the error is created, and [dst_cx] the context
  * in which it is recorded. *)
@@ -439,18 +447,17 @@ let add_output_generic ~src_cx:cx ~dst_cx ?trace msg =
   in
   let is_enabled =
     match Error_message.kind_of_msg msg with
-    | Errors.LintError lint_kind ->
-      begin
-        match Error_message.loc_of_msg msg with
-        | Some loc ->
-          ALoc.to_loc_with_tables (Context.aloc_tables cx) loc
-          |> Error_suppressions.get_lint_settings (Context.severity_cover cx)
-          |> Base.Option.value_map ~default:true ~f:(fun lint_settings ->
-                 LintSettings.is_explicit lint_kind lint_settings
-                 || LintSettings.get_value lint_kind lint_settings <> Severity.Off
-             )
-        | _ -> true
-      end
+    | Errors.LintError lint_kind -> begin
+      match Error_message.loc_of_msg msg with
+      | Some loc ->
+        ALoc.to_loc_with_tables (Context.aloc_tables cx) loc
+        |> Error_suppressions.get_lint_settings (Context.severity_cover cx)
+        |> Base.Option.value_map ~default:true ~f:(fun lint_settings ->
+               LintSettings.is_explicit lint_kind lint_settings
+               || LintSettings.get_value lint_kind lint_settings <> Severity.Off
+           )
+      | _ -> true
+    end
     | _ -> true
   in
   (* If the lint error isn't enabled at this location and isn't explicitly suppressed, just don't
@@ -500,6 +507,7 @@ let exact_obj_error cx trace obj_kind ~use_op ~exact_reason l =
 (** TODO: (1) Define a more general partial equality, that takes into
     account unified type variables. (2) Get rid of UnionRep.quick_mem. **)
 let union_optimization_guard =
+  let unwrap_type cx t = Base.Option.value (Context.find_resolved cx t) ~default:t in
   (* Compare l to u. Flatten both unions and then check that each element
      of l is comparable to an element of u. Note that the comparator need not
      be symmetric. *)
@@ -513,8 +521,7 @@ let union_optimization_guard =
     match (l, u) with
     | (UnionT (_, rep1), UnionT (_, rep2)) ->
       rep1 = rep2
-      ||
-      (* Try O(n) check, then O(n log n) check, then O(n^2) check *)
+      || (* Try O(n) check, then O(n log n) check, then O(n^2) check *)
       begin
         (* Only optimize for enums, since this is the only fast path examined below.
          * Note that optimizing both reps with [UnionRep.optimize] can potentially
@@ -528,7 +535,7 @@ let union_optimization_guard =
         match (UnionRep.check_enum rep1, UnionRep.check_enum rep2) with
         | (Some enums1, Some enums2) -> UnionEnumSet.subset enums1 enums2
         | (_, _) ->
-          let unwrap rep = UnionRep.members rep |> Base.List.map ~f:(Type_mapper.unwrap_type cx) in
+          let unwrap rep = UnionRep.members rep |> Base.List.map ~f:(unwrap_type cx) in
           let lts = unwrap rep1 in
           let uts = unwrap rep2 in
           (* Pointwise subtyping check: O(N) *)
@@ -561,12 +568,23 @@ let remove_predicate_from_union reason cx predicate =
   %> Base.List.rev_filter ~f:(predicate %> not)
   %> union_of_ts reason
 
-let iter_union ~f cx trace rep u =
+let iter_union :
+      't.
+      f:(Context.t -> Type.trace -> Type.t * Type.use_t -> 't) ->
+      init:'t ->
+      join:('t -> 't -> 't) ->
+      Context.t ->
+      Type.trace ->
+      Type.UnionRep.t ->
+      Type.use_t ->
+      't =
+ fun ~f ~init ~join cx trace rep u ->
   (* This is required so that our caches don't treat different branches of unions as the same type *)
   let union_reason i r = replace_desc_reason (RUnionBranching (desc_of_reason r, i)) r in
   UnionRep.members rep
-  |> Base.List.iteri ~f:(fun i ->
-         mod_reason_of_t (union_reason i) %> mk_tuple_swapped u %> f cx trace
+  |> Base.List.foldi ~init ~f:(fun i acc b ->
+         let r = (mod_reason_of_t (union_reason i) %> mk_tuple_swapped u %> f cx trace) b in
+         join acc r
      )
 
 let map_union ~f cx trace rep reason =
@@ -589,9 +607,10 @@ let iter_resolve_union ~f cx trace reason rep upper =
 (** Generics *)
 
 (* New generics mode: generate a GenericT from a generic *)
-let generic_bound cx prev_map { bound; name; reason = param_reason; is_this = _; _ } =
+
+let generic_of_tparam cx ~f { bound; name; reason = param_reason; is_this = _; _ } =
   let param_loc = aloc_of_reason param_reason in
-  let bound = subst cx prev_map bound in
+  let bound = f bound in
   let id = Context.make_generic_id cx name param_loc in
   let bound =
     mod_reason_of_t
@@ -601,19 +620,22 @@ let generic_bound cx prev_map { bound; name; reason = param_reason; is_this = _;
         opt_annot_reason ?annot_loc @@ mk_reason desc param_loc)
       bound
   in
-  let generic = GenericT { reason = reason_of_t bound; name; id; bound } in
-  SMap.add name generic prev_map
+  GenericT { reason = reason_of_t bound; name; id; bound }
 
-(** Harness for testing parameterized types. Given a test function and a list
-    of type params, replace the type params with GenericTs and run the test function.
-  *)
-let check_with_generics cx params f =
-  if params = [] then
-    f SMap.empty
-  else
-    (* main - run f over a collection of arg maps generated for params *)
-    let map = Base.List.fold_left ~f:(generic_bound cx) ~init:SMap.empty params in
-    f map
+let generic_bound cx prev_map ({ name; _ } as tparam) =
+  let generic = generic_of_tparam cx ~f:(subst cx prev_map) tparam in
+  (generic, Subst_name.Map.add name generic prev_map)
+
+let mk_tparams cx params =
+  let (map, rev_lst) =
+    Base.List.fold_left
+      ~f:(fun (prev_map, rev_lst) tparam ->
+        let (generic, map) = generic_bound cx prev_map tparam in
+        (map, generic :: rev_lst))
+      ~init:(Subst_name.Map.empty, [])
+      params
+  in
+  (map, List.rev rev_lst)
 
 let mk_poly_arity_reason tparams_loc =
   mk_reason (RCustom "See type parameters of definition here") tparams_loc
@@ -627,13 +649,7 @@ let poly_minimum_arity =
   in
   Nel.fold_left f 0
 
-let position_generic_bound reason = mod_reason_of_t (Fn.const reason)
-
 (** Object Subtyping *)
-
-let speculative_object_write cx flds s up =
-  let action = Speculation_state.UnsealedObjectProperty (flds, s, up) in
-  if not (Speculation.defer_action cx action) then Context.set_prop cx flds s up
 
 let string_key s reason =
   let key_reason = replace_desc_reason (RPropertyIsAString s) reason in
@@ -685,28 +701,91 @@ let instantiate_poly_param_upper_bounds cx typeparams =
     Nel.fold_left
       (fun (map, list) { name; bound; _ } ->
         let t = subst cx map bound in
-        (SMap.add name t map, t :: list))
-      (SMap.empty, [])
+        (Subst_name.Map.add name t map, t :: list))
+      (Subst_name.Map.empty, [])
       typeparams
   in
   List.rev revlist
 
 (** Builtins *)
 
-let lookup_builtin_strict cx x reason =
+let emit_cacheable_env_error cx loc err =
+  let open Error_message in
+  let err =
+    match err with
+    | Env_api.ReferencedBeforeDeclaration { name; def_loc } ->
+      EBindingError (EReferencedBeforeDeclaration, loc, OrdinaryName name, def_loc)
+    | Env_api.BuiltinLookupFailed { reason_desc; potential_generator; name } ->
+      EBuiltinLookupFailed
+        { reason = mk_reason reason_desc loc; potential_generator; name = Some name }
+  in
+  add_output cx err
+
+let lookup_builtin_strict_result cx x reason =
   let builtins = Context.builtins cx in
   Builtins.get_builtin builtins x ~on_missing:(fun () ->
-      add_output cx (Error_message.EBuiltinLookupFailed { reason; name = Some x });
-      AnyT.error_of_kind UnresolvedName reason
+      let potential_generator =
+        Context.missing_module_generators cx
+        |> Base.List.find ~f:(fun (pattern, _) -> Str.string_match pattern (uninternal_name x) 0)
+        |> Base.Option.map ~f:snd
+      in
+      Error
+        ( AnyT.error_of_kind UnresolvedName reason,
+          Nel.one
+            (Env_api.BuiltinLookupFailed
+               { reason_desc = desc_of_reason reason; name = x; potential_generator }
+            )
+        )
   )
+
+let apply_env_errors cx loc = function
+  | Ok t -> t
+  | Error (t, errs) ->
+    Nel.iter (emit_cacheable_env_error cx loc) errs;
+    t
+
+let lookup_builtin_strict cx x reason =
+  lookup_builtin_strict_result cx x reason |> apply_env_errors cx (aloc_of_reason reason)
 
 let lookup_builtin_with_default cx x default =
   let builtins = Context.builtins cx in
-  Builtins.get_builtin builtins x ~on_missing:(fun () -> default)
+  let builtin = Builtins.get_builtin builtins x ~on_missing:(fun () -> Ok default) in
+  Base.Result.ok_exn builtin
+
+let lookup_builtin_opt cx x =
+  let builtins = Context.builtins cx in
+  Builtins.get_builtin_opt builtins x
 
 let lookup_builtin_typeapp cx reason x targs =
   let t = lookup_builtin_strict cx x reason in
   typeapp reason t targs
+
+let builtin_promise_class_id cx =
+  let promise_t = lookup_builtin_opt cx (OrdinaryName "Promise") in
+  match promise_t with
+  | Some (OpenT (_, id)) ->
+    let (_, constraints) = Context.find_constraints cx id in
+    begin
+      match constraints with
+      | Constraint.FullyResolved
+          ( _,
+            (lazy
+              (DefT
+                ( _,
+                  _,
+                  PolyT
+                    {
+                      t_out = ThisClassT (_, DefT (_, _, InstanceT (_, _, _, { class_id; _ })), _, _);
+                      _;
+                    }
+                )
+                )
+              )
+          ) ->
+        Some class_id
+      | _ -> None
+    end
+  | _ -> None
 
 (**
  * Determines whether a property name should be considered "munged"/private when
@@ -737,7 +816,7 @@ let map_obj cx trust o reason_op ~map_t ~map_field =
   in
   let reason = replace_desc_reason RObjectType reason_op in
   let t = DefT (reason, trust, ObjT { o with props_tmap; flags }) in
-  if Obj_type.is_legacy_exact_DO_NOT_USE o.flags.obj_kind then
+  if Obj_type.is_exact o.flags.obj_kind then
     ExactT (reason, t)
   else
     t
@@ -800,6 +879,8 @@ module type Instantiation_helper_sig = sig
 
   val is_subtype : Context.t -> Type.trace -> use_op:use_op -> Type.t * Type.t -> unit
 
+  val unify : Context.t -> Type.trace -> use_op:use_op -> Type.t * Type.t -> unit
+
   val mk_targ : Context.t -> Type.typeparam -> Reason.t -> Reason.t -> Type.t
 
   val unresolved_id : Context.t -> Reason.t -> int
@@ -814,7 +895,16 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
 
   (* Instantiate a polymorphic definition given type arguments. *)
   let instantiate_poly_with_targs
-      cx trace ~use_op ~reason_op ~reason_tapp ?cache ?errs_ref (tparams_loc, xs, t) ts =
+      cx
+      trace
+      ~use_op
+      ~reason_op
+      ~reason_tapp
+      ?cache
+      ?errs_ref
+      ?(unify_bounds = false)
+      (tparams_loc, xs, t)
+      ts =
     let minimum_arity = poly_minimum_arity xs in
     let maximum_arity = Nel.length xs in
     let reason_arity = mk_poly_arity_reason tparams_loc in
@@ -827,14 +917,14 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
           errs_ref := Context.ETooManyTypeArgs (reason_arity, maximum_arity) :: !errs_ref
       )
     );
-    let (map, _) =
+    let (map, _, all_ts_rev) =
       Nel.fold_left
-        (fun (map, ts) typeparam ->
-          let (t, ts) =
+        (fun (map, ts, all_ts) typeparam ->
+          let (t, ts, all_ts) =
             match (typeparam, ts) with
             | ({ default = Some default; _ }, []) ->
               (* fewer arguments than params and we have a default *)
-              (subst cx ~use_op map default, [])
+              (subst cx ~use_op map default, [], (default, typeparam.name) :: all_ts)
             | ({ default = None; _ }, []) ->
               (* fewer arguments than params but no default *)
               add_output
@@ -844,17 +934,21 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
               Base.Option.iter errs_ref ~f:(fun errs_ref ->
                   errs_ref := Context.ETooFewTypeArgs (reason_arity, minimum_arity) :: !errs_ref
               );
-              (AnyT (reason_op, AnyError None), [])
-            | (_, t :: ts) -> (t, ts)
+              (AnyT (reason_op, AnyError None), [], all_ts)
+            | (_, t :: ts) -> (t, ts, (t, typeparam.name) :: all_ts)
           in
           let t_ = cache_instantiate cx trace ~use_op ?cache typeparam reason_op reason_tapp t in
           let frame = Frame (TypeParamBound { name = typeparam.name }, use_op) in
-          is_subtype cx trace ~use_op:frame (t_, subst cx ~use_op map typeparam.bound);
-          (SMap.add typeparam.name t_ map, ts))
-        (SMap.empty, ts)
+          if not (Context.in_implicit_instantiation cx) then
+            if unify_bounds then
+              unify cx trace ~use_op:frame (t_, subst cx ~use_op map typeparam.bound)
+            else
+              is_subtype cx trace ~use_op:frame (t_, subst cx ~use_op map typeparam.bound);
+          (Subst_name.Map.add typeparam.name t_ map, ts, all_ts))
+        (Subst_name.Map.empty, ts, [])
         xs
     in
-    reposition cx ~trace (aloc_of_reason reason_tapp) (subst cx ~use_op map t)
+    (reposition cx ~trace (aloc_of_reason reason_tapp) (subst cx ~use_op map t), all_ts_rev)
 
   let mk_typeapp_of_poly cx trace ~use_op ~reason_op ~reason_tapp ?cache id tparams_loc xs t ts =
     match cache with
@@ -868,10 +962,11 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
         ~cache
         (tparams_loc, xs, t)
         ts
+      |> fst
     | None ->
       let key = (id, ts) in
       let cache = Context.subst_cache cx in
-      (match Hashtbl.find_opt cache key with
+      (match Type.SubstCacheMap.find_opt key !cache with
       | None ->
         let errs_ref = ref [] in
         let t =
@@ -884,8 +979,9 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
             ~errs_ref
             (tparams_loc, xs, t)
             ts
+          |> fst
         in
-        Hashtbl.add cache key (!errs_ref, t);
+        cache := Type.SubstCacheMap.add key (!errs_ref, t) !cache;
         t
       | Some (errs, t) ->
         errs
@@ -904,7 +1000,8 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
         t)
 
   (* Instantiate a polymorphic definition by creating fresh type arguments. *)
-  let instantiate_poly cx trace ~use_op ~reason_op ~reason_tapp ?cache (tparams_loc, xs, t) =
+  let instantiate_poly
+      cx trace ~use_op ~reason_op ~reason_tapp ?cache ?(unify_bounds = false) (tparams_loc, xs, t) =
     let ts = xs |> Nel.map (fun typeparam -> mk_targ cx typeparam reason_op reason_tapp) in
     instantiate_poly_with_targs
       cx
@@ -913,6 +1010,7 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
       ~reason_op
       ~reason_tapp
       ?cache
+      ~unify_bounds
       (tparams_loc, xs, t)
       (Nel.to_list ts)
 
@@ -920,7 +1018,7 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
      fixpoint is some `this`, substitute it as This in the instance type, and
      finally unify it with the instance type. Return the class type wrapping the
      instance type. *)
-  let fix_this_class cx trace reason (r, i, is_this) =
+  let fix_this_class cx trace reason (r, i, is_this, this_name) =
     let i' =
       match Flow_cache.Fix.find cx is_this i with
       | Some i' -> i'
@@ -933,15 +1031,15 @@ module Instantiation_kit (H : Instantiation_helper_sig) = struct
           if is_this then
             GenericT
               {
-                id = Context.make_generic_id cx "this" (def_aloc_of_reason r);
+                id = Context.make_generic_id cx this_name (def_aloc_of_reason r);
                 reason;
-                name = "this";
+                name = this_name;
                 bound = this;
               }
           else
             this
         in
-        let i' = subst cx (SMap.singleton "this" this_generic) i in
+        let i' = subst cx (Subst_name.Map.singleton this_name this_generic) i in
         Flow_cache.Fix.add cx is_this i i';
         resolve_id cx trace ~use_op:unknown_use tvar i';
         i'
@@ -1030,11 +1128,15 @@ module type Import_export_helper_sig = sig
   val return : Context.t -> use_op:use_op -> Type.trace -> Type.t -> r
 
   val fix_this_class :
-    Context.t -> Type.trace -> Reason.reason -> Reason.reason * Type.t * bool -> Type.t
+    Context.t ->
+    Type.trace ->
+    Reason.reason ->
+    Reason.reason * Type.t * bool * Subst_name.t ->
+    Type.t
 
   val mk_typeof_annotation : Context.t -> ?trace:Type.trace -> reason -> Type.t -> Type.t
 
-  val error_type : Reason.t -> r
+  val error_type : Context.t -> Type.trace -> Reason.t -> r
 end
 
 (*********************************************************************)
@@ -1082,12 +1184,13 @@ module ImportTypeT_kit (F : Import_export_helper_sig) = struct
     (* delay fixing a polymorphic this-abstracted class until it is specialized,
        by transforming the instance type to a type application *)
     | DefT (_, _, PolyT { tparams_loc; tparams = typeparams; t_out = ThisClassT _; _ }) ->
-      let targs = typeparams |> Nel.map (fun tp -> BoundT (tp.reason, tp.name)) |> Nel.to_list in
+      let (_, targs) = typeparams |> Nel.to_list |> mk_tparams cx in
       let tapp = implicit_typeapp t targs in
-      Some (poly_type (Context.generate_poly_id cx) tparams_loc typeparams (class_type tapp))
+      Some (poly_type (Type.Poly.generate_id ()) tparams_loc typeparams (class_type tapp))
     | DefT (_, _, PolyT { t_out = DefT (_, _, TypeT _); _ }) -> Some t
     (* fix this-abstracted class when used as a type *)
-    | ThisClassT (r, i, this) -> Some (F.fix_this_class cx trace reason (r, i, this))
+    | ThisClassT (r, i, this, this_name) ->
+      Some (F.fix_this_class cx trace reason (r, i, this, this_name))
     | DefT (enum_reason, trust, EnumObjectT enum) ->
       let enum_type = mk_enum_type ~trust enum_reason enum in
       Some (DefT (reason, trust, TypeT (ImportEnumKind, enum_type)))
@@ -1104,7 +1207,7 @@ module ImportTypeT_kit (F : Import_export_helper_sig) = struct
       | Some imported_t -> F.return cx trace ~use_op:unknown_use imported_t
       | None ->
         add_output cx ~trace (Error_message.EImportValueAsType (reason, export_name));
-        F.error_type reason)
+        F.error_type cx trace reason)
 end
 
 (************************************************************************)
@@ -1140,7 +1243,7 @@ module ImportTypeofT_kit (F : Import_export_helper_sig) = struct
     | DefT (_, _, TypeT _)
     | DefT (_, _, PolyT { t_out = DefT (_, _, TypeT _); _ }) ->
       add_output cx ~trace (Error_message.EImportTypeAsTypeof (reason, export_name));
-      F.error_type reason
+      F.error_type cx trace reason
     | _ ->
       let typeof_t = F.mk_typeof_annotation cx ~trace reason l in
       F.return
@@ -1183,8 +1286,13 @@ end
 
 module ImportModuleNsT_kit (F : Import_export_helper_sig) = struct
   (* import * as X from 'SomeModule'; *)
-  let on_ModuleT cx trace (reason, is_strict) (_, exports, imported_is_strict) =
-    check_nonstrict_import cx trace is_strict imported_is_strict reason;
+  let on_ModuleT cx trace (reason_op, is_strict) (module_reason, exports, imported_is_strict) =
+    check_nonstrict_import cx trace is_strict imported_is_strict reason_op;
+    let reason =
+      module_reason
+      |> Reason.repos_reason (aloc_of_reason reason_op)
+      |> Reason.replace_desc_reason (desc_of_reason reason_op)
+    in
     let exports_tmap = Context.find_exports cx exports.exports_tmap in
     let props =
       NameUtils.Map.map (fun (loc, t) -> Field (loc, t, Polarity.Positive)) exports_tmap
@@ -1411,7 +1519,7 @@ module AssertExportIsTypeT_kit (F : Import_export_helper_sig) = struct
   let rec is_type = function
     | DefT (_, _, ClassT _)
     | DefT (_, _, EnumObjectT _)
-    | ThisClassT (_, _, _)
+    | ThisClassT (_, _, _, _)
     | DefT (_, _, TypeT _)
     | AnyT _ ->
       true
@@ -1541,7 +1649,9 @@ module Access_prop_options = struct
     use_op: Type.use_op;
     previously_seen_props: Type.Properties.Set.t;
     allow_method_access: bool;
-    strict: Type.lookup_kind;
+    lookup_kind: Type.lookup_kind;
+    (* Same `id` as in `GetPropT` and `TestPropT`: it represents some syntactic access. *)
+    id: ident option;
   }
 end
 
@@ -1584,14 +1694,18 @@ module type Get_prop_helper_sig = sig
 
   val return : Context.t -> use_op:use_op -> Type.trace -> Type.t -> r
 
-  val error_type : Reason.t -> r
+  val error_type : Context.t -> Type.trace -> Reason.t -> r
 
   val cg_get_prop :
-    Context.t -> Type.trace -> Type.t -> use_op * reason * (Reason.t * Reason.name) -> r
+    Context.t ->
+    Type.trace ->
+    Type.t ->
+    use_op * reason * Type.ident option * (Reason.t * Reason.name) ->
+    r
 end
 
 module GetPropT_kit (F : Get_prop_helper_sig) = struct
-  let on_InstanceT cx trace ~l r super insttype use_op reason_op propref =
+  let on_InstanceT cx trace ~l ~id r super insttype use_op reason_op propref =
     match propref with
     | Named (_, OrdinaryName "constructor") ->
       F.return
@@ -1603,7 +1717,7 @@ module GetPropT_kit (F : Get_prop_helper_sig) = struct
       let own_props = Context.find_props cx insttype.own_props in
       let proto_props = Context.find_props cx insttype.proto_props in
       let fields = NameUtils.Map.union own_props proto_props in
-      let strict =
+      let lookup_kind =
         if insttype.has_unknown_react_mixins then
           NonstrictReturning (None, None)
         else
@@ -1614,7 +1728,8 @@ module GetPropT_kit (F : Get_prop_helper_sig) = struct
           Access_prop_options.use_op;
           previously_seen_props = Properties.Set.of_list [insttype.own_props; insttype.proto_props];
           allow_method_access = false;
-          strict;
+          lookup_kind;
+          id;
         }
       in
       (* Instance methods cannot be unbound *)
@@ -1625,10 +1740,10 @@ module GetPropT_kit (F : Get_prop_helper_sig) = struct
          element resolution in ElemT. *)
       let loc = aloc_of_reason reason_op in
       add_output cx ~trace Error_message.(EInternal (loc, InstanceLookupComputed));
-      F.error_type reason_op
+      F.error_type cx trace reason_op
 
   let on_EnumObjectT cx trace enum_reason trust enum access =
-    let (_, access_reason, (prop_reason, member_name)) = access in
+    let (_, access_reason, _, (prop_reason, member_name)) = access in
     let { members; _ } = enum in
     let error_invalid_access ~suggestion =
       let member_reason = replace_desc_reason (RIdentifier member_name) prop_reason in
@@ -1707,34 +1822,40 @@ module GetPropT_kit (F : Get_prop_helper_sig) = struct
       in
       let msg = Error_message.EPropNotReadable { reason_prop; prop_name; use_op } in
       add_output cx ~trace msg;
-      F.error_type ureason
+      F.error_type cx trace ureason
 
-  let read_obj_prop cx trace ~use_op o propref reason_obj reason_op =
+  let read_obj_prop cx trace ~use_op o propref reason_obj reason_op lookup_info =
     let l = DefT (reason_obj, bogus_trust (), ObjT o) in
     match get_obj_prop cx trace o propref reason_op with
-    | Some (p, _target_kind) -> perform_read_prop_action cx trace use_op propref p reason_op
+    | Some (p, _target_kind) ->
+      Base.Option.iter ~f:(fun (id, _) -> Context.test_prop_hit cx id) lookup_info;
+      perform_read_prop_action cx trace use_op propref p reason_op
     | None ->
       (match propref with
-      | Named _ ->
-        let strict =
-          if Obj_type.sealed_in_op reason_op o.flags.obj_kind then
-            Strict reason_obj
-          else
-            ShadowRead (None, Nel.one o.props_tmap)
+      | Named (reason_prop, name) ->
+        let lookup_kind =
+          match lookup_info with
+          | Some (id, lookup_default_tout) when Obj_type.is_exact o.flags.obj_kind ->
+            let lookup_default =
+              let r = replace_desc_reason (RMissingProperty (Some name)) reason_op in
+              Some (DefT (r, bogus_trust (), VoidT), lookup_default_tout)
+            in
+            NonstrictReturning (lookup_default, Some (id, (reason_prop, reason_obj)))
+          | _ -> Strict reason_obj
         in
-        let x = (reason_op, strict, propref, use_op, Properties.Set.singleton o.props_tmap) in
+        let x = (reason_op, lookup_kind, propref, use_op, Properties.Set.singleton o.props_tmap) in
         F.cg_lookup cx trace ~obj_t:l o.proto_t x
       | Computed elem_t ->
         (match elem_t with
         | OpenT _ ->
           let loc = loc_of_t elem_t in
           add_output cx ~trace Error_message.(EInternal (loc, PropRefComputedOpen));
-          F.error_type reason_op
+          F.error_type cx trace reason_op
         | GenericT { bound = DefT (_, _, StrT (Literal _)); _ }
         | DefT (_, _, StrT (Literal _)) ->
           let loc = loc_of_t elem_t in
           add_output cx ~trace Error_message.(EInternal (loc, PropRefComputedLiteral));
-          F.error_type reason_op
+          F.error_type cx trace reason_op
         | AnyT _ -> F.return cx trace ~use_op:unknown_use (AnyT.untyped reason_op)
         | GenericT { bound = DefT (_, _, StrT _); _ }
         | GenericT { bound = DefT (_, _, NumT _); _ }
@@ -1746,7 +1867,7 @@ module GetPropT_kit (F : Get_prop_helper_sig) = struct
         | _ ->
           let reason_prop = reason_of_t elem_t in
           add_output cx ~trace (Error_message.EObjectComputedPropertyAccess (reason_op, reason_prop));
-          F.error_type reason_op))
+          F.error_type cx trace reason_op))
 end
 
 (***************)
@@ -1756,60 +1877,78 @@ end
 let array_elem_check ~write_action cx trace l use_op reason reason_tup arrtype =
   let (value, ts, is_index_restricted, is_tuple) =
     match arrtype with
-    | ArrayAT (value, ts) -> (value, ts, false, false)
-    | TupleAT (value, ts) -> (value, Some ts, true, true)
+    | ArrayAT (value, ts) ->
+      let ts = Base.Option.map ~f:(Base.List.map ~f:(fun t -> (t, Polarity.Neutral, None))) ts in
+      (value, ts, false, false)
+    | TupleAT { elem_t; elements } ->
+      let ts =
+        Base.List.map ~f:(fun (TupleElement { t; polarity; name }) -> (t, polarity, name)) elements
+      in
+      (elem_t, Some ts, true, true)
     | ROArrayAT value -> (value, None, true, false)
   in
   let (can_write_tuple, value) =
     match l with
-    | DefT (index_reason, _, NumT (Literal (_, (float_value, _)))) ->
-      begin
-        match ts with
-        | None -> (false, value)
-        | Some ts ->
-          let index_string = Dtoa.ecma_string_of_float float_value in
-          begin
-            match int_of_string_opt index_string with
-            | Some index ->
-              let value_opt =
-                try List.nth_opt ts index with
-                | Invalid_argument _ -> None
-              in
-              begin
-                match value_opt with
-                | Some value -> (true, value)
-                | None ->
-                  if is_tuple then (
-                    add_output
-                      cx
-                      ~trace
-                      (Error_message.ETupleOutOfBounds
-                         {
-                           use_op;
-                           reason;
-                           reason_op = reason_tup;
-                           length = List.length ts;
-                           index = index_string;
-                         }
-                      );
-                    (true, AnyT.error (mk_reason RTupleOutOfBoundsAccess (aloc_of_reason reason)))
-                  ) else
-                    (true, value)
-              end
-            | None ->
-              (* not an integer index *)
-              if is_tuple then (
-                add_output
-                  cx
-                  ~trace
-                  (Error_message.ETupleNonIntegerIndex
-                     { use_op; reason = index_reason; index = index_string }
-                  );
-                (true, AnyT.error reason)
-              ) else
+    | DefT (index_reason, _, NumT (Literal (_, (float_value, _)))) -> begin
+      match ts with
+      | None -> (false, value)
+      | Some ts ->
+        let index_string = Dtoa.ecma_string_of_float float_value in
+        begin
+          match int_of_string_opt index_string with
+          | Some index ->
+            let value_opt =
+              try List.nth_opt ts index with
+              | Invalid_argument _ -> None
+            in
+            begin
+              match value_opt with
+              | Some (value, polarity, name) when is_tuple ->
+                if write_action && (not @@ Polarity.compat (polarity, Polarity.Negative)) then
+                  add_output
+                    cx
+                    ~trace
+                    (Error_message.ETupleElementNotWritable { use_op; reason; index; name })
+                else if (not write_action) && (not @@ Polarity.compat (polarity, Polarity.Positive))
+                then
+                  add_output
+                    cx
+                    ~trace
+                    (Error_message.ETupleElementNotReadable { use_op; reason; index; name });
                 (true, value)
-          end
-      end
+              | Some (value, _, _) -> (true, value)
+              | None ->
+                if is_tuple then (
+                  add_output
+                    cx
+                    ~trace
+                    (Error_message.ETupleOutOfBounds
+                       {
+                         use_op;
+                         reason;
+                         reason_op = reason_tup;
+                         length = List.length ts;
+                         index = index_string;
+                       }
+                    );
+                  (true, AnyT.error (mk_reason RTupleOutOfBoundsAccess (aloc_of_reason reason)))
+                ) else
+                  (true, value)
+            end
+          | None ->
+            (* not an integer index *)
+            if is_tuple then (
+              add_output
+                cx
+                ~trace
+                (Error_message.ETupleNonIntegerIndex
+                   { use_op; reason = index_reason; index = index_string }
+                );
+              (true, AnyT.error reason)
+            ) else
+              (true, value)
+        end
+    end
     | _ -> (false, value)
   in
   ( if is_index_restricted && (not can_write_tuple) && write_action then
@@ -1852,16 +1991,151 @@ let objt_to_obj_rest cx props_tmap flags reason xs =
    * handle internal names *)
   let props = NameUtils.Map.filter (fun x _ -> not (is_internal_name x)) props in
   let proto = ObjProtoT reason in
-  (* A rest result can not be exact if the source object is unsealed,
-     because we may not have seen all the writes yet. *)
-  let obj_kind =
-    match flags.obj_kind with
-    | UnsealedInFile _ when not (Obj_type.sealed_in_op reason flags.obj_kind) ->
-      UnsealedInFile (ALoc.source (aloc_of_reason reason))
-    | UnsealedInFile _
-    | Exact ->
-      Exact
-    | Indexed d -> Indexed d
-    | _ -> Inexact
-  in
+  let obj_kind = flags.obj_kind in
   Obj_type.mk_with_proto cx reason ~props proto ~obj_kind
+
+(* $Values *)
+
+let get_values_type_of_obj_t cx o reason =
+  let {
+    flags;
+    proto_t = _;
+    props_tmap = tmap;
+    call_t = _ (* call props excluded from values *);
+    reachable_targs = _;
+  } =
+    o
+  in
+  (* Find all of the props. *)
+  let props = Context.find_props cx tmap in
+  (* Get the read type for all readable properties and discard the rest. *)
+  let ts =
+    NameUtils.Map.fold
+      (fun _ prop ts ->
+        match Property.read_t prop with
+        | Some t ->
+          let t =
+            if flags.frozen then
+              match t with
+              | DefT (t_reason, trust, StrT (Literal (_, (OrdinaryName _ as name)))) ->
+                let t_reason = replace_desc_reason (RStringLit name) t_reason in
+                DefT (t_reason, trust, SingletonStrT name)
+              | DefT (t_reason, trust, NumT (Literal (_, lit))) ->
+                let t_reason = replace_desc_reason (RNumberLit (snd lit)) t_reason in
+                DefT (t_reason, trust, SingletonNumT lit)
+              | DefT (t_reason, trust, BoolT (Some lit)) ->
+                let t_reason = replace_desc_reason (RBooleanLit lit) t_reason in
+                DefT (t_reason, trust, SingletonBoolT lit)
+              | _ -> t
+            else
+              t
+          in
+          t :: ts
+        | None -> ts)
+      props
+      []
+  in
+  (* If the object has a dictionary value then add that to our types. *)
+  let ts =
+    match flags.obj_kind with
+    | Indexed { value; _ } -> value :: ts
+    | _ -> ts
+  in
+  (* Create a union type from all our selected types. *)
+  Type_mapper.union_flatten cx ts |> union_of_ts reason
+
+let remove_dict_from_props props =
+  props |> NameUtils.Map.remove (OrdinaryName "$key") |> NameUtils.Map.remove (OrdinaryName "$value")
+
+let get_values_type_of_instance_t cx own_props reason =
+  (* Find all of the props. *)
+  let props = Context.find_props cx own_props in
+  let props_without_dict = remove_dict_from_props props in
+  (* Get the read type for all readable properties and discard the rest. *)
+  let ts =
+    NameUtils.Map.fold
+      (fun _ prop ts ->
+        match Property.read_t prop with
+        | Some t -> t :: ts
+        | _ -> ts)
+      props_without_dict
+      []
+  in
+  let ts =
+    (* If these are physically equal, $key and $value were not present, and thus there is no indexer *)
+    if props == props_without_dict then
+      ts
+    else
+      match NameUtils.Map.find (OrdinaryName "$value") props with
+      | Field (_, dict_value, polarity) when Polarity.compat (polarity, Polarity.Positive) ->
+        dict_value :: ts
+      | _ -> ts
+  in
+  (* Create a union type from all our selected types. *)
+  Type_mapper.union_flatten cx ts |> union_of_ts reason
+
+let any_mod_src_keep_placeholder new_src = function
+  | Placeholder -> Placeholder
+  | _ -> new_src
+
+let flow_unary_arith l reason kind add_output =
+  let open UnaryArithKind in
+  match (kind, l) with
+  | (Minus, DefT (_, trust, NumT (Literal (_, (value, raw))))) ->
+    let (value, raw) = Flow_ast_utils.negate_number_literal (value, raw) in
+    DefT (replace_desc_reason RNumber reason, trust, NumT (Literal (None, (value, raw))))
+  | (Minus, DefT (_, _, NumT (AnyLiteral | Truthy))) -> l
+  | (Minus, DefT (_, trust, BigIntT (Literal (_, (value, raw))))) ->
+    let (value, raw) = Flow_ast_utils.negate_bigint_literal (value, raw) in
+    DefT (replace_desc_reason RBigInt reason, trust, BigIntT (Literal (None, (value, raw))))
+  | (Minus, DefT (_, _, BigIntT (AnyLiteral | Truthy))) -> l
+  | (Plus, DefT (reason_bigint, _, BigIntT _)) ->
+    add_output (Error_message.EBigIntNumCoerce reason_bigint);
+    AnyT.error reason
+  | (Plus, _) -> NumT.why reason (bogus_trust ())
+  | (BitNot, DefT (_, _, NumT _)) -> NumT.why reason (bogus_trust ())
+  | (BitNot, DefT (_, _, BigIntT _)) -> BigIntT.why reason (bogus_trust ())
+  | (Update, DefT (_, _, NumT _)) -> NumT.why reason (bogus_trust ())
+  | (Update, DefT (_, _, BigIntT _)) -> BigIntT.why reason (bogus_trust ())
+  | (_, AnyT (_, src)) ->
+    let src = any_mod_src_keep_placeholder Untyped src in
+    AnyT.why src reason
+  | (_, _) ->
+    add_output (Error_message.EArithmeticOperand (reason_of_t l));
+    AnyT.error reason
+
+let flow_arith reason l r kind add_output =
+  let open ArithKind in
+  let (_, op) = kind in
+  match (op, l, r) with
+  (* any <> _ *)
+  (* _ <> any *)
+  | (_, AnyT (_, src), _)
+  | (_, _, AnyT (_, src)) ->
+    AnyT.why src reason
+  (* empty <> _ *)
+  (* _ <> empty *)
+  | (_, DefT (_, _, EmptyT), _)
+  | (_, _, DefT (_, _, EmptyT)) ->
+    EmptyT.why reason |> with_trust bogus_trust
+  (* num <> num *)
+  | (_, DefT (_, _, NumT _), DefT (_, _, NumT _)) -> NumT.why reason |> with_trust bogus_trust
+  | (RShift3, DefT (reason, _, BigIntT _), _) ->
+    add_output (Error_message.EBigIntRShift3 reason);
+    AnyT.error reason
+  (* bigint <> bigint *)
+  | (_, DefT (_, _, BigIntT _), DefT (_, _, BigIntT _)) ->
+    BigIntT.why reason |> with_trust bogus_trust
+  (* str + str *)
+  (* str + num *)
+  (* num + str *)
+  | (Plus, DefT (_, _, StrT _), DefT (_, _, StrT _))
+  | (Plus, DefT (_, _, StrT _), DefT (_, _, NumT _))
+  | (Plus, DefT (_, _, NumT _), DefT (_, _, StrT _)) ->
+    StrT.why reason |> with_trust bogus_trust
+  | _ ->
+    add_output
+      (Error_message.EInvalidBinaryArith
+         { reason_out = reason; reason_l = reason_of_t l; reason_r = reason_of_t r; kind }
+      );
+    AnyT.error reason

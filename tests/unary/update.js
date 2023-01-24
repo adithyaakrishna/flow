@@ -2,16 +2,16 @@
 
 let tests = [
   function(y: number) {
-    y++;
-    y--;
-    ++y;
-    --y;
+    (y++: number);
+    (y--: number);
+    (++y: number);
+    (--y: number);
   },
 
   function(y: string) {
     y++; // error, we don't allow coercion here
-    (y: number); // ok, y is a number now
-    y++; // error, but you still can't write a number to a string
+    (y: number); // ok, y is now any
+    (y: bigint); // ok, y is now any
   },
 
   function(y: string) {
@@ -49,6 +49,18 @@ let tests = [
   },
 
   function(y: any) {
-    y++; // ok
+    (y++: number); // ok (because any)
+    (y++: bigint); // ok (because any)
+  },
+
+  function(y: empty) {
+    (y++: empty); // ok
+  },
+
+  function(y: bigint) {
+    (y++: bigint);
+    (y--: bigint);
+    (++y: bigint);
+    (--y: bigint);
   },
 ];

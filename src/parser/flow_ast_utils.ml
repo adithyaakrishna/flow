@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -68,15 +68,117 @@ let partition_directives statements =
   in
   helper [] statements
 
-let negate_number_literal (value, raw) =
-  let raw_len = String.length raw in
-  let raw =
-    if raw_len > 0 && raw.[0] = '-' then
-      String.sub raw 1 (raw_len - 1)
-    else
-      "-" ^ raw
+let hoist_function_declarations stmts =
+  let open Flow_ast.Statement in
+  let (func_decs, other_stmts) =
+    List.partition
+      (function
+        (* function f() {} *)
+        | (_, FunctionDeclaration { Flow_ast.Function.id = Some _; _ })
+        (* export function f() {} *)
+        | ( _,
+            ExportNamedDeclaration
+              {
+                ExportNamedDeclaration.declaration =
+                  Some (_, FunctionDeclaration { Flow_ast.Function.id = Some _; _ });
+                _;
+              }
+          )
+        (* export default function f() {} *)
+        | ( _,
+            ExportDefaultDeclaration
+              {
+                ExportDefaultDeclaration.declaration =
+                  ExportDefaultDeclaration.Declaration
+                    (_, FunctionDeclaration { Flow_ast.Function.id = Some _; _ });
+                _;
+              }
+          )
+        (* declare function f(): void; *)
+        | (_, DeclareFunction _)
+        (* declare export function f(): void; *)
+        | ( _,
+            DeclareExportDeclaration DeclareExportDeclaration.{ declaration = Some (Function _); _ }
+          ) ->
+          true
+        | _ -> false)
+      stmts
   in
-  (~-.value, raw)
+  func_decs @ other_stmts
+
+let negate_raw_lit raw =
+  let raw_len = String.length raw in
+  if raw_len > 0 && raw.[0] = '-' then
+    String.sub raw 1 (raw_len - 1)
+  else
+    "-" ^ raw
+
+let negate_number_literal (value, raw) = (~-.value, negate_raw_lit raw)
+
+let negate_bigint_literal (value, raw) =
+  match value with
+  | None -> (None, raw)
+  | Some value -> (Some (Int64.neg value), negate_raw_lit raw)
+
+let is_call_to_invariant callee =
+  match callee with
+  | (_, Expression.Identifier (_, { Identifier.name = "invariant"; _ })) -> true
+  | _ -> false
+
+let is_call_to_is_array callee =
+  match callee with
+  | ( _,
+      Flow_ast.Expression.Member
+        {
+          Flow_ast.Expression.Member._object =
+            ( _,
+              Flow_ast.Expression.Identifier
+                (_, { Flow_ast.Identifier.name = "Array"; comments = _ })
+            );
+          property =
+            Flow_ast.Expression.Member.PropertyIdentifier
+              (_, { Flow_ast.Identifier.name = "isArray"; comments = _ });
+          comments = _;
+        }
+    ) ->
+    true
+  | _ -> false
+
+let is_call_to_object_dot_freeze callee =
+  match callee with
+  | ( _,
+      Flow_ast.Expression.Member
+        {
+          Flow_ast.Expression.Member._object =
+            ( _,
+              Flow_ast.Expression.Identifier
+                (_, { Flow_ast.Identifier.name = "Object"; comments = _ })
+            );
+          property =
+            Flow_ast.Expression.Member.PropertyIdentifier
+              (_, { Flow_ast.Identifier.name = "freeze"; comments = _ });
+          comments = _;
+        }
+    ) ->
+    true
+  | _ -> false
+
+let is_call_to_object_static_method callee =
+  match callee with
+  | ( _,
+      Flow_ast.Expression.Member
+        {
+          Flow_ast.Expression.Member._object =
+            ( _,
+              Flow_ast.Expression.Identifier
+                (_, { Flow_ast.Identifier.name = "Object"; comments = _ })
+            );
+          property = Flow_ast.Expression.Member.PropertyIdentifier _;
+          comments = _;
+        }
+    ) ->
+    true
+  | _ -> false
 
 let loc_of_statement = fst
 
@@ -151,6 +253,9 @@ let string_of_assignment_operator op =
   | BitOrAssign -> "|="
   | BitXorAssign -> "^="
   | BitAndAssign -> "&="
+  | NullishAssign -> "??="
+  | AndAssign -> "&&="
+  | OrAssign -> "||="
 
 let string_of_binary_operator op =
   let open Flow_ast.Expression.Binary in

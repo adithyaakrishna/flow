@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,27 +18,41 @@ type flow_mode =
   *)
 type jsx_pragma = string * (Loc.t, Loc.t) Flow_ast.Expression.t
 
+type jsx_runtime_pragma =
+  | JsxRuntimePragmaClassic
+  | JsxRuntimePragmaAutomatic
+
 type t = {
   flow: flow_mode option;
-  typeAssert: bool;
   preventMunge: bool;
   providesModule: string option;
   jsx: jsx_pragma option;
+  jsxRuntime: jsx_runtime_pragma option;
+  lti: bool;
 }
 
 let default_info =
-  { flow = None; typeAssert = false; preventMunge = false; providesModule = None; jsx = None }
+  {
+    flow = None;
+    preventMunge = false;
+    providesModule = None;
+    jsx = None;
+    jsxRuntime = None;
+    lti = false;
+  }
 
 (* accessors *)
 let flow info = info.flow
-
-let typeAssert info = info.typeAssert
 
 let preventMunge info = info.preventMunge
 
 let providesModule info = info.providesModule
 
 let jsx info = info.jsx
+
+let jsx_runtime info = info.jsxRuntime
+
+let lti info = info.lti
 
 let is_strict info =
   match info.flow with
@@ -81,12 +95,6 @@ let json_of_docblock info =
       | Some str -> JSON_String str
       | None -> JSON_Null
     in
-    let typeAssert = JSON_Bool (typeAssert info) in
     JSON_Object
-      [
-        ("flow", flow);
-        ("typeAssert", typeAssert);
-        ("preventMunge", preventsMunge);
-        ("providesModule", providesModule);
-      ]
+      [("flow", flow); ("preventMunge", preventsMunge); ("providesModule", providesModule)]
   )

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -75,7 +75,11 @@ val supports_status : Lsp.Initialize.params -> bool
 
 val supports_snippets : Lsp.Initialize.params -> bool
 
+val supports_tags : Lsp.Initialize.params -> Lsp.CompletionItemTag.t -> bool
+
 val supports_preselect : Lsp.Initialize.params -> bool
+
+val supports_completion_item_insert_replace : Lsp.Initialize.params -> bool
 
 val supports_completion_item_label_details : Lsp.Initialize.params -> bool
 

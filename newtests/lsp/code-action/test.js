@@ -1881,7 +1881,7 @@ module.exports = (suite(
                             end: {line: 6, character: 1},
                           },
                           newText:
-                            'class Test {\n  newProperty = this.test();\n  \n  test(): void {\n    this.newProperty;\n  }\n}',
+                            'class Test {\n  newProperty = this.test();\n  test(): void {\n    this.newProperty;\n  }\n}',
                         },
                       ],
                     },
@@ -1909,7 +1909,7 @@ module.exports = (suite(
                             end: {line: 4, character: 16},
                           },
                           newText:
-                            'const newLocal = this.test();\n    \n    newLocal;',
+                            'const newLocal = this.test();\n    newLocal;',
                         },
                       ],
                     },
@@ -1976,7 +1976,7 @@ module.exports = (suite(
                           },
                         },
                         newText:
-                          'type NewType = number;\n  \n  const a: NewType = 3;',
+                          'type NewType = number;\n  const a: NewType = 3;',
                       },
                     ],
                   },
@@ -2056,7 +2056,7 @@ module.exports = (suite(
                             character: 8,
                           },
                         },
-                        newText: 'const newLocal = foo.bar;\n\nnewLocal;',
+                        newText: 'const newLocal = foo.bar;\nnewLocal;',
                       },
                     ],
                   },
@@ -2152,7 +2152,7 @@ module.exports = (suite(
                             character: 8,
                           },
                         },
-                        newText: 'const newLocal = foo.bar;\n\nnewLocal;',
+                        newText: 'const newLocal = foo.bar;\nnewLocal;',
                       },
                     ],
                   },
@@ -2265,6 +2265,977 @@ module.exports = (suite(
         ],
         ['textDocument/publishDiagnostics', ...lspIgnoreStatusAndCancellation],
       ),
+    ]),
+    test('provide quickfix for unused promise errors', [
+      addFile('fix-unused-promise.js.ignored', 'fix-unused-promise.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-unused-promise.js',
+        },
+        range: {
+          start: {
+            line: 5,
+            character: 5,
+          },
+          end: {
+            line: 5,
+            character: 5,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Insert `await`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-unused-promise.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 5,
+                              "character": 4
+                            },
+                            "end": {
+                              "line": 5,
+                              "character": 9
+                            }
+                          },
+                          "newText": "await foo()"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "insert_await",
+                      "Insert `await`"
+                    ]
+                  }
+                },
+                {
+                  "title": "Insert `void`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-unused-promise.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 5,
+                              "character": 4
+                            },
+                            "end": {
+                              "line": 5,
+                              "character": 9
+                            }
+                          },
+                          "newText": "void foo()"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "insert_void",
+                      "Insert `void`"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `unknown` type', [
+      addFile('fix-unknown-type.js.ignored', 'fix-unknown-type.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-unknown-type.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 9,
+          },
+          end: {
+            line: 2,
+            character: 16,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `mixed`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-unknown-type.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 9
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 16
+                            }
+                          },
+                          "newText": "mixed"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_unknown_type",
+                      "Convert to `mixed`"
+                    ]
+                  }
+                },
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+      )
+    ]),
+    test('provide quickfix for `never` type', [
+      addFile('fix-never-type.js.ignored', 'fix-never-type.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-never-type.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 9,
+          },
+          end: {
+            line: 2,
+            character: 14,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `empty`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-never-type.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 9
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 14
+                            }
+                          },
+                          "newText": "empty"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_never_type",
+                      "Convert to `empty`"
+                    ]
+                  }
+                },
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+      )
+    ]),
+    test('provide quickfix for `undefined` type', [
+      addFile('fix-undefined-type.js.ignored', 'fix-undefined-type.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-undefined-type.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 9,
+          },
+          end: {
+            line: 2,
+            character: 18,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `void`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-undefined-type.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 9
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 18
+                            }
+                          },
+                          "newText": "void"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_undefined_type",
+                      "Convert to `void`"
+                    ]
+                  }
+                },
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+      )
+    ]),
+    test('provide quickfix for `keyof`', [
+      addFile('fix-keyof.js.ignored', 'fix-keyof.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-keyof.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 9,
+          },
+          end: {
+            line: 2,
+            character: 16,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `$Keys<T>`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-keyof.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 9
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 16
+                            }
+                          },
+                          "newText": "$Keys<O>"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_keyof_type",
+                      "Convert to `$Keys<T>`"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `extends` in type param', [
+      addFile('fix-type-param-extends.js.ignored', 'fix-type-param-extends.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-type-param-extends.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 7,
+          },
+          end: {
+            line: 2,
+            character: 23,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `: T`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-type-param-extends.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 7
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 23
+                            }
+                          },
+                          "newText": "A: string"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_type_param_extends",
+                      "Convert to `: T`"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `readonly` variance', [
+      addFile('fix-readonly-variance.js.ignored', 'fix-readonly-variance.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-readonly-variance.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 10,
+          },
+          end: {
+            line: 2,
+            character: 18,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `+`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-readonly-variance.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 9
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 31
+                            }
+                          },
+                          "newText": "{ +foo: number }"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_readonly_variance",
+                      "Convert to `+`"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `in` variance', [
+      addFile('fix-in-variance.js.ignored', 'fix-in-variance.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-in-variance.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 20,
+          },
+          end: {
+            line: 2,
+            character: 21,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `-`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-in-variance.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 18
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 33
+                            }
+                          },
+                          "newText": ": (<-A>(A) => void)"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_in_variance",
+                      "Convert to `-`"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `out` variance', [
+      addFile('fix-out-variance.js.ignored', 'fix-out-variance.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-out-variance.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 20,
+          },
+          end: {
+            line: 2,
+            character: 21,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `+`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-out-variance.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 18
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 30
+                            }
+                          },
+                          "newText": ": (<+A>() => A)"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_out_variance",
+                      "Convert to `+`"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `in out` variance', [
+      addFile('fix-in-out-variance.js.ignored', 'fix-in-out-variance.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-in-out-variance.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 20,
+          },
+          end: {
+            line: 2,
+            character: 21,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Remove",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-in-out-variance.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 18
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 34
+                            }
+                          },
+                          "newText": ": (<A>(A) => A)"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "remove_in_out_variance",
+                      "Remove"
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `as` type cast', [
+      addFile('fix-as-expression.js.ignored', 'fix-as-expression.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-as-expression.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 0,
+          },
+          end: {
+            line: 2,
+            character: 14,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to type cast `(<expr>: <type>)`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-as-expression.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 0
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 14
+                            }
+                          },
+                          "newText": "(\"foo\": mixed)"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_as_expression",
+                      "Convert to type cast `(<expr>: <type>)`",
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `satisfies` type cast', [
+      addFile('fix-satisfies-expression.js.ignored', 'fix-satisfies-expression.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-satisfies-expression.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 0,
+          },
+          end: {
+            line: 2,
+            character: 21,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to type cast `(<expr>: <type>)`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-satisfies-expression.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 0
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 21
+                            }
+                          },
+                          "newText": "(\"foo\": mixed)"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_satisfies_expression",
+                      "Convert to type cast `(<expr>: <type>)`",
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `readonly` array type', [
+      addFile('fix-readonly-array-type.js.ignored', 'fix-readonly-array-type.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-readonly-array-type.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 10,
+          },
+          end: {
+            line: 2,
+            character: 26,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `$ReadOnlyArray`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-readonly-array-type.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 9
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 26
+                            }
+                          },
+                          "newText": "$ReadOnlyArray<string>"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_readonly_array_type",
+                      "Convert to `$ReadOnlyArray`",
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
+    ]),
+    test('provide quickfix for `readonly` tuple type', [
+      addFile('fix-readonly-tuple-type.js.ignored', 'fix-readonly-tuple-type.js'),
+      lspStartAndConnect(),
+      lspRequestAndWaitUntilResponse('textDocument/codeAction', {
+        textDocument: {
+          uri: '<PLACEHOLDER_PROJECT_URL>/fix-readonly-tuple-type.js',
+        },
+        range: {
+          start: {
+            line: 2,
+            character: 10,
+          },
+          end: {
+            line: 2,
+            character: 34,
+          },
+        },
+        context: {
+          only: ['quickfix'],
+          diagnostics: [],
+        },
+      }).verifyAllLSPMessagesInStep(
+          [
+            {
+              "method": "textDocument/codeAction",
+              "result": [
+                {
+                  "title": "Convert to `$ReadOnly`",
+                  "kind": "quickfix",
+                  "diagnostics": [],
+                  "edit": {
+                    "changes": {
+                      "<PLACEHOLDER_PROJECT_URL>/fix-readonly-tuple-type.js": [
+                        {
+                          "range": {
+                            "start": {
+                              "line": 2,
+                              "character": 9
+                            },
+                            "end": {
+                              "line": 2,
+                              "character": 34
+                            }
+                          },
+                          "newText": "$ReadOnly<[string, number]>"
+                        }
+                      ]
+                    }
+                  },
+                  "command": {
+                    "title": "",
+                    "command": "log:org.flow:<PLACEHOLDER_PROJECT_URL>",
+                    "arguments": [
+                      "textDocument/codeAction",
+                      "convert_readonly_tuple_type",
+                      "Convert to `$ReadOnly`",
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+          [
+            "textDocument/publishDiagnostics"
+          ],
+        )
     ]),
   ],
 ): Suite);

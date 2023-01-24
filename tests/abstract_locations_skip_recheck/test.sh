@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -15,13 +15,13 @@ printf "\\nAdding a line should cause minimal rechecking (but preserve errors)\\
 cp tmp1/test1.js test1.js
 assert_ok "$FLOW" force-recheck --focus test1.js
 assert_errors "$FLOW" status --strip-root
-show_skipping_stats_types_first "$FLOW_LOG_FILE"
+show_skipping_stats "$FLOW_LOG_FILE"
 
 printf "\\nAdding a comment should cause minimal rechecking (but preserve errors)\\n"
 cp tmp2/test1.js test1.js
 assert_ok "$FLOW" force-recheck --focus test1.js
 assert_errors "$FLOW" status --strip-root
-show_skipping_stats_types_first "$FLOW_LOG_FILE"
+show_skipping_stats "$FLOW_LOG_FILE"
 
 assert_ok "$FLOW" stop
 

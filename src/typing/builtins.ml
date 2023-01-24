@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -13,12 +13,19 @@ type t = (Reason.name, entry) Hashtbl.t
 
 let add_not_yet_seen_builtin builtins name t = Hashtbl.add builtins name (NotYetWritten t)
 
+let get_builtin_opt builtins name =
+  match Hashtbl.find_opt builtins name with
+  | None -> None
+  | Some (NotYetWritten t)
+  | Some (Entry t) ->
+    Some t
+
 let get_builtin builtins name ~on_missing =
   match Hashtbl.find_opt builtins name with
   | None -> on_missing ()
   | Some (NotYetWritten t)
   | Some (Entry t) ->
-    t
+    Ok t
 
 (* Having to pass flow_t is not ideal. In a more ideal world, we should be able to functorize
  * this module over FLOW_COMMON so that we could call flow_t directly. Unfortunately, even that
@@ -36,7 +43,7 @@ let set_builtin ~flow_t builtins name t =
   | Some (NotYetWritten tvar) ->
     flow_t (t, tvar);
     Hashtbl.replace builtins name (Entry tvar)
-  | Some (Entry _) -> failwith "Should have been excluded"
+  | Some (Entry _) -> failwith ("Should have been excluded: " ^ Reason.display_string_of_name name)
 
 let empty () : t = Hashtbl.create 0
 

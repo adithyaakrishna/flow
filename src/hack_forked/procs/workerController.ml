@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -115,6 +115,7 @@ type worker = {
   (* On Windows, a function to spawn a worker. *)
   spawn: unit -> (void, request) Daemon.handle;
 }
+[@@warning "-69"]
 
 let worker_id w = w.id
 
@@ -136,7 +137,7 @@ let spawn w =
   | Some handle -> handle
 
 (* If the worker isn't prespawned, close the worker *)
-let close w h = if Option.is_none w.prespawned then Daemon.close h
+let close_noerr w h = if Option.is_none w.prespawned then Daemon.close_noerr h
 
 (* If there is a call_wrapper, apply it and create the Request *)
 let wrap_request w f x =
@@ -150,52 +151,12 @@ type 'a entry = ('a entry_state * Unix.file_descr option, request, void) Daemon.
 
 let entry_counter = ref 0
 
-(** [Gc.set] has a bug in all ocaml releases since 4.08.0 and before 2021-01-07,
-    which causes the `custom_*` fields to be doubled, plus 1. To work around it, we
-    halve those values. still off by one, so you'll still see them change if you run
-    OCAMLRUNPARAM='v=0x20', but best we can do.
-
-    Fixed in https://github.com/ocaml/ocaml/pull/10125 *)
-let gc_set : Caml.Gc.control -> unit =
-  let fixed_set control =
-    let open Caml.Gc in
-    let { custom_major_ratio; custom_minor_ratio; custom_minor_max_size; _ } = control in
-    let control =
-      {
-        control with
-        custom_major_ratio = custom_major_ratio lsr 1;
-        custom_minor_ratio = custom_minor_ratio lsr 1;
-        custom_minor_max_size = custom_minor_max_size lsr 1;
-      }
-    in
-    Caml.Gc.set control
-  in
-  let v =
-    let v = Sys.ocaml_version in
-    match String.index v '+' with
-    | Some i -> String.sub v 0 i
-    | None -> v
-  in
-  (* the fix has been backported to all of these branches, so any
-     version after these will be fixed. *)
-  match v with
-  | "4.11.1"
-  | "4.11.0"
-  | "4.10.2"
-  | "4.10.1"
-  | "4.09.1"
-  | "4.09.0"
-  | "4.08.1"
-  | "4.08.0" ->
-    fixed_set
-  | _ -> Caml.Gc.set
-
 let register_entry_point ~restore =
   Int.incr entry_counter;
   let restore (st, gc_control, heap_handle, worker_id) =
     restore st ~worker_id;
     SharedMem.connect heap_handle ~worker_id;
-    gc_set gc_control
+    Caml.Gc.set gc_control
   in
   let name = Printf.sprintf "worker_%d" !entry_counter in
   Daemon.register_entry_point
@@ -264,17 +225,17 @@ let make ~call_wrapper ~saved_state ~entry ~nbr_procs ~gc_control ~heap_handle =
     handle
   in
   let made_workers = ref [] in
-  let pid = Unix.getpid () in
+  let pretty_pid = Sys_utils.get_pretty_pid () in
   for n = 1 to nbr_procs do
     let (controller_fd, child_fd) = setup_controller_fd () in
-    let name = Printf.sprintf "worker process %d/%d for server %d" n nbr_procs pid in
+    let name = Printf.sprintf "worker process %d/%d for server %d" n nbr_procs pretty_pid in
     made_workers := make_one ?call_wrapper controller_fd (spawn n name child_fd) n :: !made_workers
   done;
   !made_workers
 
 (** Sends a request to call `f x` on `worker` *)
-let send worker worker_pid outfd (f : 'a -> 'b) (x : 'a) : unit Lwt.t =
-  let outfd_lwt = Lwt_unix.of_unix_file_descr ~blocking:false ~set_flags:true outfd in
+let send worker worker_pid outfd_lwt (f : 'a -> 'b) (x : 'a) : unit Lwt.t =
+  let outfd = Lwt_unix.unix_file_descr outfd_lwt in
   let request = wrap_request worker f x in
   try%lwt
     (* Wait in an lwt-friendly manner for the worker to be writable (should be instant) *)
@@ -301,7 +262,7 @@ let send worker worker_pid outfd (f : 'a -> 'b) (x : 'a) : unit Lwt.t =
   with
   | exn ->
     let exn = Exception.wrap exn in
-    Hh_logger.error ~exn "Failed to read response from work #%d" (worker_id worker);
+    Hh_logger.error ~exn "Failed to send request to worker #%d" (worker_id worker);
 
     (* Failed to send the job to the worker. Is it because the worker is dead or is it
      * something else? *)
@@ -311,8 +272,8 @@ let send worker worker_pid outfd (f : 'a -> 'b) (x : 'a) : unit Lwt.t =
     | exception Unix.Unix_error (Unix.ECHILD, _, _) ->
       raise (Worker_failed_to_send_job (Worker_already_exited None)))
 
-let read (type result) worker_pid infd : (result * Measure.record_data) Lwt.t =
-  let infd_lwt = Lwt_unix.of_unix_file_descr ~blocking:false ~set_flags:true infd in
+let read (type result) worker_pid infd_lwt : (result * Measure.record_data) Lwt.t =
+  let infd = Lwt_unix.unix_file_descr infd_lwt in
   try%lwt
     (* Wait in an lwt-friendly manner for the worker to finish the job *)
     let%lwt () = Lwt_unix.wait_read infd_lwt in
@@ -354,16 +315,16 @@ let read (type result) worker_pid infd : (result * Measure.record_data) Lwt.t =
       | Some Exit.Hash_table_full -> raise SharedMem.Hash_table_full
       | Some Exit.Heap_full -> raise SharedMem.Heap_full
       | _ ->
-        let () = Caml.Printf.eprintf "Subprocess(%d): fail %d" worker_pid i in
+        let () = Caml.Printf.eprintf "Subprocess(%d): fail %d\n%!" worker_pid i in
         raise (Worker_failed (worker_pid, Worker_quit (Some (Unix.WEXITED i)))))
     | (_, Unix.WSTOPPED i) ->
-      let () = Caml.Printf.eprintf "Subprocess(%d): stopped %d" worker_pid i in
+      let () = Caml.Printf.eprintf "Subprocess(%d): stopped %d\n%!" worker_pid i in
       raise (Worker_failed (worker_pid, Worker_quit (Some (Unix.WSTOPPED i))))
     | (_, Unix.WSIGNALED i) ->
-      let () = Caml.Printf.eprintf "Subprocess(%d): signaled %d" worker_pid i in
+      let () = Caml.Printf.eprintf "Subprocess(%d): signaled %d\n%!" worker_pid i in
       raise (Worker_failed (worker_pid, Worker_quit (Some (Unix.WSIGNALED i))))
     | exception Unix.Unix_error (Unix.ECHILD, _, _) ->
-      let () = Caml.Printf.eprintf "Subprocess(%d): gone" worker_pid in
+      let () = Caml.Printf.eprintf "Subprocess(%d): gone\n%!" worker_pid in
       raise (Worker_failed (worker_pid, Worker_quit None)))
 
 (** Send a job to a worker
@@ -376,19 +337,22 @@ let call w (f : 'a -> 'b) (x : 'a) : 'b Lwt.t =
 
   (* Spawn the worker, if not prespawned. *)
   let ({ Daemon.pid = worker_pid; channels = (inc, outc) } as h) = spawn w in
-  let infd = Daemon.descr_of_in_channel inc in
-  let outfd = Daemon.descr_of_out_channel outc in
-  Lwt.finalize
-    (fun () ->
-      let%lwt () = send w worker_pid outfd f x in
-      let%lwt (res, measure_data) = read worker_pid infd in
-      close w h;
-      Measure.merge (Measure.deserialize measure_data);
-      Lwt.return res)
-    (fun () ->
-      (* No matter what, always mark worker as free when we're done *)
-      mark_free w;
-      Lwt.return_unit)
+  let infd = Lwt_unix.of_unix_file_descr (Daemon.descr_of_in_channel inc) in
+  let outfd = Lwt_unix.of_unix_file_descr (Daemon.descr_of_out_channel outc) in
+  try%lwt
+    let%lwt () = send w worker_pid outfd f x in
+    let%lwt (res, measure_data) = read worker_pid infd in
+    close_noerr w h;
+    Measure.merge (Measure.deserialize measure_data);
+    mark_free w;
+    Lwt.return res
+  with
+  | exn ->
+    let exn = Exception.wrap exn in
+    (* No matter what, always close and mark worker as free when we're done *)
+    close_noerr w h;
+    mark_free w;
+    Exception.reraise exn
 
 (**************************************************************************
  * Worker termination

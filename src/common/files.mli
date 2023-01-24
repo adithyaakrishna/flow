@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -18,7 +18,7 @@ type options = {
   declarations: (string * Str.regexp) list;
   includes: Path_matcher.t;
   lib_paths: Path.t list;
-  module_file_exts: SSet.t;
+  module_file_exts: string list;
   module_resource_exts: SSet.t;
   node_resolver_dirnames: string list;
 }
@@ -35,7 +35,7 @@ val includes : options -> Path_matcher.t
 
 val lib_paths : options -> Path.t list
 
-val module_file_exts : options -> SSet.t
+val module_file_exts : options -> string list
 
 val module_resource_exts : options -> SSet.t
 
@@ -50,6 +50,8 @@ val flow_ext : string
 val has_flow_ext : File_key.t -> bool
 
 val chop_flow_ext : File_key.t -> File_key.t
+
+val eponymous_module : File_key.t -> Modulename.t
 
 val is_json_file : string -> bool
 
@@ -75,10 +77,6 @@ val get_all_watched_extensions : options -> SSet.t
 
 val init : ?flowlibs_only:bool -> options -> string list * SSet.t
 
-val module_ref : File_key.t -> string
-
-val lib_module_ref : string
-
 (* regexp for Filename constants *)
 val dir_sep : Str.regexp
 
@@ -97,6 +95,7 @@ val wanted : options:options -> SSet.t -> string -> bool
 val make_next_files :
   root:Path.t ->
   all:bool ->
+  sort:bool ->
   subdir:Path.t option ->
   options:options ->
   libs:SSet.t ->

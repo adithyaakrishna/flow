@@ -277,6 +277,21 @@ References:
             ^^^^^ [2]
 
 
+Error --------------------------------------------------------------------------------------------------- literal.js:6:2
+
+Cannot cast `o_get.q` to empty because `void` (due to access of non-existent property `q`) [1] is incompatible with
+empty [2]. [incompatible-cast]
+
+   literal.js:6:2
+   6| (o_get.q: empty); // error: property `q` not found
+       ^^^^^^^ [1]
+
+References:
+   literal.js:6:11
+   6| (o_get.q: empty); // error: property `q` not found
+                ^^^^^ [2]
+
+
 Error --------------------------------------------------------------------------------------------------- literal.js:6:8
 
 Cannot get `o_get.q` because property `q` is missing in object literal [1]. [prop-missing]
@@ -316,6 +331,21 @@ References:
                             ^^^^^ [2]
 
 
+Error -------------------------------------------------------------------------------------------------- literal.js:17:2
+
+Cannot cast `o_shorthand.q` to empty because `void` (due to access of non-existent property `q`) [1] is incompatible
+with empty [2]. [incompatible-cast]
+
+   literal.js:17:2
+   17| (o_shorthand.q: empty); // error: property `q` not found
+        ^^^^^^^^^^^^^ [1]
+
+References:
+   literal.js:17:17
+   17| (o_shorthand.q: empty); // error: property `q` not found
+                       ^^^^^ [2]
+
+
 Error ------------------------------------------------------------------------------------------------- literal.js:17:14
 
 Cannot get `o_shorthand.q` because property `q` is missing in object literal [1]. [prop-missing]
@@ -330,26 +360,20 @@ References:
                          ^^^^^^^^^^^^^ [1]
 
 
-Error ------------------------------------------------------------------------------------------------- literal.js:20:21
-
-Mutating this prototype is unsupported. [cannot-write]
-
-   20| var o_computed = { ["__proto__"]: 0 }; // TODO: computed props use SetElem :/
-                           ^^^^^^^^^^^
-
-
 Error -------------------------------------------------------------------------------------------------- literal.js:21:2
 
-Cannot cast `o_computed.__proto__` to empty because object literal [1] is incompatible with empty [2].
-[incompatible-cast]
+Cannot cast `o_computed.__proto__` to empty because number [1] is incompatible with empty [2]. [incompatible-cast]
 
    literal.js:21:2
-   21| (o_computed.__proto__: empty); // TODO: error: number ~> empty
-        ^^^^^^^^^^^^^^^^^^^^ [1]
+   21| (o_computed.__proto__: empty); // error: number ~> empty
+        ^^^^^^^^^^^^^^^^^^^^
 
 References:
+   literal.js:20:35
+   20| var o_computed = { ["__proto__"]: 0 }; // OK
+                                         ^ [1]
    literal.js:21:24
-   21| (o_computed.__proto__: empty); // TODO: error: number ~> empty
+   21| (o_computed.__proto__: empty); // error: number ~> empty
                               ^^^^^ [2]
 
 
@@ -381,6 +405,21 @@ References:
                          ^ [1]
    literal.js:24:12
    24| (o_loop.p: empty); // error: number ~> empty
+                  ^^^^^ [2]
+
+
+Error -------------------------------------------------------------------------------------------------- literal.js:25:2
+
+Cannot cast `o_loop.q` to empty because `void` (due to access of non-existent property `q`) [1] is incompatible with
+empty [2]. [incompatible-cast]
+
+   literal.js:25:2
+   25| (o_loop.q: empty); // error: property `q` not found
+        ^^^^^^^^ [1]
+
+References:
+   literal.js:25:12
+   25| (o_loop.q: empty); // error: property `q` not found
                   ^^^^^ [2]
 
 
@@ -420,68 +459,52 @@ References:
                    ^^^^^^^^^^^^^^^^^^^^^^^^^ [1]
 
 
-Error ----------------------------------------------------------------------------------------------------- null.js:13:2
+Error ---------------------------------------------------------------------------------------------------- null.js:13:17
 
-Cannot cast `o_shadow.p` to string because number [1] is incompatible with string [2]. [incompatible-cast]
+Cannot get `o_nonstrict.p` because property `p` is missing in object type [1]. [prop-missing]
 
-   null.js:13:2
-   13| (o_shadow.p: string);
-        ^^^^^^^^^^
-
-References:
-   null.js:14:14
-   14| o_shadow.p = 0; // error: number ~> string
-                    ^ [1]
-   null.js:13:14
-   13| (o_shadow.p: string);
-                    ^^^^^^ [2]
-
-
-Error ----------------------------------------------------------------------------------------------------- null.js:17:5
-
-Property `p` is missing in object type [1]. [prop-missing]
-
-   null.js:17:5
-   17| if (o_nonstrict.p) { // Error - property p is unknown
-           ^^^^^^^^^^^^^
+   null.js:13:17
+   13| if (o_nonstrict.p) { // Error - property p is unknown
+                       ^
 
 References:
-   null.js:16:26
-   16| declare var o_nonstrict: { __proto__: null };
+   null.js:12:26
+   12| declare var o_nonstrict: { __proto__: null };
                                 ^^^^^^^^^^^^^^^^^^^ [1]
 
 
-Error ----------------------------------------------------------------------------------------------------- null.js:18:4
+Error ----------------------------------------------------------------------------------------------------- null.js:14:4
 
 Cannot cast `o_nonstrict.p` to empty because property `p` of unknown type [1] is incompatible with empty [2].
 [incompatible-cast]
 
-   null.js:18:4
-   18|   (o_nonstrict.p: empty); // error: mixed ~> empty
+   null.js:14:4
+   14|   (o_nonstrict.p: empty); // error: mixed ~> empty
           ^^^^^^^^^^^^^
 
 References:
-   null.js:17:5
-   17| if (o_nonstrict.p) { // Error - property p is unknown
+   null.js:13:5
+   13| if (o_nonstrict.p) { // Error - property p is unknown
            ^^^^^^^^^^^^^ [1]
-   null.js:18:19
-   18|   (o_nonstrict.p: empty); // error: mixed ~> empty
+   null.js:14:19
+   14|   (o_nonstrict.p: empty); // error: mixed ~> empty
                          ^^^^^ [2]
 
 
 Error -------------------------------------------------------------------------------------------- ternary-crash.js:2:33
 
-property `constructor` [1] cannot be unbound from the context [2] where it was defined. [method-unbinding]
+Cannot get `err.constructor` because property `constructor` [1] cannot be unbound from the context [2] where it was
+defined. [method-unbinding]
 
    ternary-crash.js:2:33
       2| const constructor = (typeof err.constructor === 'function') ? err.constructor : Error;
                                          ^^^^^^^^^^^ [1]
 
 References:
-   <BUILTINS>/core.js:1552:5
-   1552|     constructor (message?: mixed): void;
+   <BUILTINS>/core.js:1578:5
+   1578|     constructor (message?: mixed): void;
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ [2]
 
 
 
-Found 34 errors
+Found 35 errors

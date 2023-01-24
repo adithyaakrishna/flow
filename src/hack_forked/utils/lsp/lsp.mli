@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -45,13 +45,6 @@ module Location : sig
   }
 end
 
-module DefinitionLocation : sig
-  type t = {
-    location: Location.t;
-    title: string option;
-  }
-end
-
 module MarkupKind : sig
   type t =
     | Markdown
@@ -86,6 +79,14 @@ module TextEdit : sig
   type t = {
     range: range;
     newText: string;
+  }
+end
+
+module InsertReplaceEdit : sig
+  type t = {
+    newText: string;
+    insert: range;
+    replace: range;
   }
 end
 
@@ -243,10 +244,18 @@ module CodeActionClientCapabilities : sig
   }
 end
 
+module CompletionItemTag : sig
+  type t = Deprecated [@value 1] [@@deriving enum]
+end
+
 module CompletionClientCapabilities : sig
+  type tagSupport = { valueSet: CompletionItemTag.t list }
+
   type completionItem = {
     snippetSupport: bool;
     preselectSupport: bool;
+    tagSupport: tagSupport;
+    insertReplaceSupport: bool;
     labelDetailsSupport: bool;
   }
 
@@ -336,7 +345,10 @@ module Initialize : sig
     trace: trace;
   }
 
-  and result = { server_capabilities: server_capabilities }
+  and result = {
+    server_capabilities: server_capabilities;  (** "capabilities" over wire *)
+    server_info: serverInfo;  (** details about the language server *)
+  }
 
   and errorData = { retry: bool }
 
@@ -382,7 +394,10 @@ module Initialize : sig
 
   and experimentalClientCapabilities = { snippetTextEdit: bool }
 
-  and experimentalServerCapabilities = { server_snippetTextEdit: bool }
+  and experimentalServerCapabilities = {
+    server_snippetTextEdit: bool;
+    strictCompletionOrder: bool;
+  }
 
   and server_capabilities = {
     textDocumentSync: TextDocumentSyncOptions.t;
@@ -408,6 +423,11 @@ module Initialize : sig
     server_experimental: experimentalServerCapabilities;
     typeCoverageProvider: bool;
     rageProvider: bool;
+  }
+
+  and serverInfo = {
+    name: string;
+    version: string;
   }
 
   and signatureHelpOptions = { sighelp_triggerCharacters: string list }
@@ -565,13 +585,13 @@ end
 module Definition : sig
   type params = TextDocumentPositionParams.t
 
-  and result = DefinitionLocation.t list
+  and result = Location.t list
 end
 
 module TypeDefinition : sig
   type params = TextDocumentPositionParams.t
 
-  and result = DefinitionLocation.t list
+  and result = Location.t list
 end
 
 module ApplyWorkspaceEdit : sig
@@ -695,12 +715,15 @@ module Completion : sig
     kind: completionItemKind option;  (** tells editor which icon to use *)
     detail: string option;  (** human-readable string like type/symbol info *)
     documentation: markedString list option;  (** human-readable doc-comment *)
+    (* extra annotations that tweak the rendering of a completion item. *)
+    tags: CompletionItemTag.t list option;
     preselect: bool;  (** select this item when showing *)
     sortText: string option;  (** used for sorting; if absent, uses label *)
     filterText: string option;  (** used for filtering; if absent, uses label *)
     insertText: string option;  (** used for inserting; if absent, uses label *)
     insertTextFormat: insertTextFormat option;
-    textEdits: TextEdit.t list;  (** wire: split into hd and tl *)
+    textEdit: [ `TextEdit of TextEdit.t | `InsertReplaceEdit of InsertReplaceEdit.t ] option;
+    additionalTextEdits: TextEdit.t list;
     command: Command.t option;  (** if present, is executed after completion *)
     data: Hh_json.json option;
   }

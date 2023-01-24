@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -68,20 +68,24 @@ let dummy_options_flags =
     temp_dir = None;
     traces = None;
     trust_mode = None;
-    new_merge = false;
-    abstract_locations = true;
+    abstract_locations = None;
     verbose = None;
     wait_for_recheck = None;
-    env_mode = Some (Options.ClassicEnv []);
+    inference_mode = Some Options.ConstrainWrites;
+    run_post_inference_implicit_instantiation = None;
     include_suppressions = false;
-    prioritize_dependency_checks = None;
+    estimate_recheck_time = None;
+    distributed = false;
   }
 
 let dummy_saved_state_flags =
   {
-    CommandUtils.Saved_state_flags.saved_state_fetcher = None;
+    CommandUtils.Saved_state_flags.saved_state_allow_reinit = None;
+    saved_state_fetcher = None;
     saved_state_force_recheck = false;
     saved_state_no_fallback = false;
+    saved_state_skip_version_check = false;
+    saved_state_verify = false;
   }
 
 let test_with_profiling test_fun ctxt =
@@ -133,20 +137,6 @@ let determine_what_to_recheck
   let freshparsed = prepare_freshparsed freshparsed in
   let options = make_options () in
   let unchanged_checked = make_unchanged_checked checked_files freshparsed in
-  (* This approximates the behavior of Dep_service.calc_direct_dependents. As of October 2019, it
-   * includes all direct dependents, not just sig direct dependents. If
-   * Dep_service.calc_direct_dependents changes, this should change too so that these tests more
-   * accurately reflect reality. *)
-  let direct_dependent_files =
-    FilenameGraph.fold
-      (fun file deps acc ->
-        if FilenameSet.exists (fun x -> CheckedSet.mem x freshparsed) deps then
-          FilenameSet.add file acc
-        else
-          acc)
-      implementation_dependency_graph
-      FilenameSet.empty
-  in
   Types_js.debug_determine_what_to_recheck
     ~profiling
     ~options
@@ -155,7 +145,7 @@ let determine_what_to_recheck
     ~freshparsed
     ~unchanged_checked
     ~unchanged_files_to_force:CheckedSet.empty
-    ~direct_dependent_files
+    ~dirty_direct_dependents:FilenameSet.empty
 
 let include_dependencies_and_dependents
     ~profiling

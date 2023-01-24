@@ -4,12 +4,12 @@ function h(x: $Trusted<number>): number {
   return (42: any)
 }
 
-function g(x) {
+function g(x: number) {
   return h(x);
 }
 
 function f(x: number): $Trusted<number> {
-  return g(x)
+  return g(x) // Fails.
 }
 
 f(42);

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -31,6 +31,14 @@ type error = error_kind * string
 
 val error_to_string : error -> string
 
+module Lookahead : sig
+  type t =
+    | Recursive
+    | LowerBounds of Type.t list
+
+  val peek : Context.t -> Type.t -> t
+end
+
 val from_type : options:options -> genv:genv -> Type.t -> (Ty.elt, error) result
 
 val from_scheme : options:options -> genv:genv -> Type.TypeScheme.t -> (Ty.elt, error) result
@@ -56,13 +64,18 @@ val fold_hashtbl :
   'a ->
   'a
 
-(* `include_proto_members` controls whether to include prototypes' members.
-   `idx_hook` is a function that will be called if the given type is in an IdxWrapper;
-   Feels hacky, but idx isn't super important now that we have optional chaining. *)
+(* `idx_hook` is a function that will be called if the given type is in an IdxWrapper;
+   Feels hacky, but idx isn't super important now that we have optional chaining.
+   `force_instance` controls whether ThisClassT will always expand its inner InstanceT's instance members *)
 val expand_members :
-  include_proto_members:bool ->
   idx_hook:(unit -> unit) ->
+  force_instance:bool ->
   options:options ->
   genv:genv ->
   Type.TypeScheme.t ->
   (Ty.t, error) result
+
+val expand_literal_union : options:options -> genv:genv -> Type.TypeScheme.t -> (Ty.t, error) result
+
+(* A debugging facility for getting quick string representations of Type.t *)
+val debug_string_of_t : Context.t -> Type.t -> string

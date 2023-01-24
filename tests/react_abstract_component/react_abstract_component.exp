@@ -266,6 +266,24 @@ References:
                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^ [2]
 
 
+Error -------------------------------------------------------------------------------------------------- config.js:42:13
+
+Cannot create `WrappedComponent2` element because property `bar` is missing in props [1] but exists in object type [2].
+[prop-missing]
+
+   config.js:42:13
+   42| const _f = <WrappedComponent2 />; // Error missing bar
+                   ^^^^^^^^^^^^^^^^^
+
+References:
+   config.js:42:12
+   42| const _f = <WrappedComponent2 />; // Error missing bar
+                  ^^^^^^^^^^^^^^^^^^^^^ [1]
+   config.js:41:32
+   41| const WrappedComponent2 = HOC2<{foo: number, bar: number}, {foo: number}, _>(Component);
+                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ [2]
+
+
 Error ------------------------------------------------------------------------------------------- create_element.js:9:13
 
 Cannot create `C` element because property `bar` is missing in props [1] but exists in object type [2]. [prop-missing]
@@ -318,11 +336,11 @@ References:
    create_element.js:15:32
     15| const refBad = React.createRef<string>();
                                        ^^^^^^ [2]
-   <BUILTINS>/react.js:266:6
-   266|   ): {|current: null | T|};
+   <BUILTINS>/react.js:240:6
+   240|   ): {|current: null | T|};
              ^^^^^^^^^^^^^^^^^^^^^ [3]
-   <BUILTINS>/react.js:215:6
-   215|   | ((React$ElementRef<ElementType> | null) => mixed)
+   <BUILTINS>/react.js:189:6
+   189|   | ((React$ElementRef<ElementType> | null) => mixed)
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ [4]
 
 
@@ -337,11 +355,11 @@ Cannot create `C` element because in property `key`: [incompatible-type]
                                                         ^^^^^^^^ [1]
 
 References:
-   <BUILTINS>/react.js:208:26
-   208| declare type React$Key = string | number;
+   <BUILTINS>/react.js:182:26
+   182| declare type React$Key = string | number;
                                  ^^^^^^ [2]
-   <BUILTINS>/react.js:208:35
-   208| declare type React$Key = string | number;
+   <BUILTINS>/react.js:182:35
+   182| declare type React$Key = string | number;
                                           ^^^^^^ [3]
 
 
@@ -427,13 +445,13 @@ References:
                                                  ^^^^^^^^^^^^^^^^^ [2]
 
 
-Error --------------------------------------------------------------------- error_positioning/error_positioning.js:31:28
+Error --------------------------------------------------------------------- error_positioning/error_positioning.js:31:36
 
 `MockFn` [1] is not a React component. [not-a-component]
 
-   error_positioning/error_positioning.js:31:28
-   31| let RefetchContainer = HOC(Component); // Error, mock is not a Component
-                                  ^^^^^^^^^
+   error_positioning/error_positioning.js:31:36
+   31| let RefetchContainer = HOC<any, _>(Component); // Error, mock is not a Component
+                                          ^^^^^^^^^
 
 References:
    error_positioning/error_positioning.js:24:4
@@ -518,17 +536,17 @@ Cannot return `NotAComponent` because: [incompatible-return]
                 ^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:20:5
-   20|   | React$Element<any>
+   <BUILTINS>/react.js:21:5
+   21|   | React$Element<any>
            ^^^^^^^^^^^^^^^^^^ [1]
    function_lower.js:22:7
    22| class NotAComponent {};
              ^^^^^^^^^^^^^ [2]
-   <BUILTINS>/react.js:21:5
-   21|   | React$Portal
-           ^^^^^^^^^^^^ [3]
    <BUILTINS>/react.js:22:5
-   22|   | Iterable<?React$Node>;
+   22|   | React$Portal
+           ^^^^^^^^^^^^ [3]
+   <BUILTINS>/react.js:23:5
+   23|   | Iterable<?React$Node>;
            ^^^^^^^^^^^^^^^^^^^^^ [4]
 
 
@@ -544,18 +562,41 @@ Cannot cast `NotAFunctionComponent` to AbstractComponent because: [incompatible-
         ^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:20:5
-   20|   | React$Element<any>
+   <BUILTINS>/react.js:21:5
+   21|   | React$Element<any>
            ^^^^^^^^^^^^^^^^^^ [1]
    function_lower.js:22:7
    22| class NotAComponent {};
              ^^^^^^^^^^^^^ [2]
-   <BUILTINS>/react.js:21:5
-   21|   | React$Portal
-           ^^^^^^^^^^^^ [3]
    <BUILTINS>/react.js:22:5
-   22|   | Iterable<?React$Node>;
+   22|   | React$Portal
+           ^^^^^^^^^^^^ [3]
+   <BUILTINS>/react.js:23:5
+   23|   | Iterable<?React$Node>;
            ^^^^^^^^^^^^^^^^^^^^^ [4]
+
+
+Error ---------------------------------------------------------------------------------------------- get_set_elem.js:6:3
+
+Cannot assign `y` to `x[y]` because an index signature declaring the expected key / value type is missing in
+`React.AbstractComponentStatics` [1]. [prop-missing]
+
+   get_set_elem.js:6:3
+     6| x[y] = y; // error: no indexed type
+          ^
+
+References:
+   <BUILTINS>/react.js:122:47
+                                                      v
+   122| declare type React$AbstractComponentStatics = {
+   123|   displayName?: ?string,
+   124|   // This is only on function components, but trying to access name when
+   125|   // displayName is undefined is a common pattern.
+   126|   name?: ?string,
+   127|   propTypes?: {[string] : any, ...},
+   128|   ...
+   129| };
+        ^ [1]
 
 
 Error -------------------------------------------------------------------------------------------- get_set_props.js:8:17
@@ -567,8 +608,8 @@ Cannot call `x.displayName.toString` because property `toString` is missing in n
                         ^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:148:17
-   148|   displayName?: ?string,
+   <BUILTINS>/react.js:123:17
+   123|   displayName?: ?string,
                         ^^^^^^^ [1]
 
 
@@ -581,8 +622,8 @@ Cannot call `x.displayName.toString` because property `toString` is missing in u
                         ^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:148:17
-   148|   displayName?: ?string,
+   <BUILTINS>/react.js:123:17
+   123|   displayName?: ?string,
                         ^^^^^^^ [1]
 
 
@@ -610,16 +651,16 @@ Cannot get `x.definitelyNotHere` because property `definitelyNotHere` is missing
             ^^^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:147:47
+   <BUILTINS>/react.js:122:47
                                                       v
-   147| declare type React$AbstractComponentStatics = {
-   148|   displayName?: ?string,
-   149|   // This is only on function components, but trying to access name when
-   150|   // displayName is undefined is a common pattern.
-   151|   name?: ?string,
-   152|   propTypes?: {[string] : any, ...},
-   153|   ...
-   154| };
+   122| declare type React$AbstractComponentStatics = {
+   123|   displayName?: ?string,
+   124|   // This is only on function components, but trying to access name when
+   125|   // displayName is undefined is a common pattern.
+   126|   name?: ?string,
+   127|   propTypes?: {[string] : any, ...},
+   128|   ...
+   129| };
         ^ [1]
 
 
@@ -632,23 +673,9 @@ Cannot assign `3` to `x.displayName` because number [1] is incompatible with str
                           ^ [1]
 
 References:
-   <BUILTINS>/react.js:148:18
-   148|   displayName?: ?string,
+   <BUILTINS>/react.js:123:18
+   123|   displayName?: ?string,
                          ^^^^^^ [2]
-
-
-Error --------------------------------------------------------------------------------------------- no_annot_fun.js:3:35
-
-Cannot get `props.LOL` because property `LOL` is missing in props [1]. [prop-missing]
-
-   no_annot_fun.js:3:35
-   3| function Component(props) { props.LOL ; return null} // Error, missing LOL
-                                        ^^^
-
-References:
-   no_annot_fun.js:4:37
-   4| (Component: React$AbstractComponent<{}, void>);
-                                          ^^ [1]
 
 
 Error --------------------------------------------------------------------------------------------------- strict.js:4:12
@@ -663,8 +690,8 @@ References:
    strict.js:4:11
      4| const c = <Component f = {3}/>;
                   ^^^^^^^^^^^^^^^^^^^^ [1]
-   <BUILTINS>/react.js:189:29
-   189|   | React$AbstractComponent<empty, mixed>;
+   <BUILTINS>/react.js:163:29
+   163|   | React$AbstractComponent<empty, mixed>;
                                     ^^^^^ [2]
 
 
@@ -696,33 +723,34 @@ Cannot call `foo` with `ref` bound to `a` because mixed [1] is incompatible with
             ^^^
 
 References:
-   <BUILTINS>/react.js:189:36
-   189|   | React$AbstractComponent<empty, mixed>;
+   <BUILTINS>/react.js:163:36
+   163|   | React$AbstractComponent<empty, mixed>;
                                            ^^^^^ [1]
    strict.js:7:26
      7| declare function foo(a: ?React$Component<any, any>): void;
                                  ^^^^^^^^^^^^^^^^^^^^^^^^^ [2]
 
 
-Error ------------------------------------------------------------------------------------------------- test_prop.js:5:7
+Error ------------------------------------------------------------------------------------------------- test_prop.js:5:9
 
-Property `notOnEitherSFCOrClass` is missing in `React.AbstractComponentStatics` [1]. [prop-missing]
+Cannot get `x.notOnEitherSFCOrClass` because property `notOnEitherSFCOrClass` is missing in
+`React.AbstractComponentStatics` [1]. [prop-missing]
 
-   test_prop.js:5:7
+   test_prop.js:5:9
      5|   if (x.notOnEitherSFCOrClass) {} // Error Not on any component
-              ^^^^^^^^^^^^^^^^^^^^^^^
+                ^^^^^^^^^^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/react.js:147:47
+   <BUILTINS>/react.js:122:47
                                                       v
-   147| declare type React$AbstractComponentStatics = {
-   148|   displayName?: ?string,
-   149|   // This is only on function components, but trying to access name when
-   150|   // displayName is undefined is a common pattern.
-   151|   name?: ?string,
-   152|   propTypes?: {[string] : any, ...},
-   153|   ...
-   154| };
+   122| declare type React$AbstractComponentStatics = {
+   123|   displayName?: ?string,
+   124|   // This is only on function components, but trying to access name when
+   125|   // displayName is undefined is a common pattern.
+   126|   name?: ?string,
+   127|   propTypes?: {[string] : any, ...},
+   128|   ...
+   129| };
         ^ [1]
 
 
@@ -737,7 +765,7 @@ expression. [signature-verification-failure]
 
 
 
-Found 44 errors
+Found 45 errors
 
 Only showing the most relevant union/intersection branches.
 To see all branches, re-run Flow with --show-all-branches

@@ -230,16 +230,6 @@ function f25(o: ?{x: 'a' | 'b'}): number {
   }
 }
 
-// Because we do not call this function, this does not error now.
-// Hopefully in the future we will, either by asking for an annotation on the parameter
-// or saying that this is an implicit void return.
-function f26(x): number {
-  switch (x) {
-    case 'a':
-      return 1;
-  }
-}
-
 ///////////////////
 // Implicit void //
 ///////////////////
@@ -381,7 +371,7 @@ function g15(): number { // Error
 g15();
 
 function g16(): number { // Error
-  for (const x of []) {
+  for (const x of ([]: Array<mixed>)) {
     invariant();
   }
 }
@@ -404,7 +394,7 @@ function g18(x: 'a' | 'b' | 'c'): number { // Error
   }
 }
 
-function g19(x): number { // Error
+function g19(x: string): number { // Error
   switch (x) {
     case 'a':
       return 1;

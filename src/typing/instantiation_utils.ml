@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -103,7 +103,7 @@ end = struct
         function
         | ArrayAT _ -> Array r
         | ROArrayAT _ -> ROArray r
-        | TupleAT (_, ts) -> Tuple (r, List.length ts)
+        | TupleAT { elements; _ } -> Tuple (r, List.length elements)
 
       method! type_ cx pole acc t =
         match t with

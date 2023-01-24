@@ -4,7 +4,7 @@ class C<T> {
   m2(x: T) {}
 }
 
-var c1 = new C;
+var c1 = new C<number | string>;
 c1.m1(0);
 c1.m2("");
 (c1.x: void); // error: number|string ~> void
@@ -16,10 +16,3 @@ c2.m2("");
 
 class NonPoly {}
 new NonPoly<string>; // error: expected polymorphic type
-
-function F<T>(x: T, y: T) {}
-new F<string>("foo", "bar"); // ok
-new F<string>("foo", 0); // error, number ~> string
-
-function NonPolyF() {}
-new NonPolyF<string>; // error: expected polymorphic type

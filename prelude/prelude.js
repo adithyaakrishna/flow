@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -27,7 +27,9 @@ declare class $ReadOnlyArray<+T> {
   @@iterator(): Iterator<T>;
 }
 
-declare class Array<T> extends $ReadOnlyArray<T> {}
+declare class Array<T> extends $ReadOnlyArray<T> {
+  constructor(arrayLength?: number): void;
+}
 
 type $ArrayLike<T> = {
   [indexer: number]: T,
@@ -75,3 +77,5 @@ type AsyncIterable<+T> = $AsyncIterable<T,void,void>;
 declare function $asyncIterator<T>(p: AsyncIterable<T>): T;
 
 declare opaque type $Flow$ModuleRef<+T>;
+
+declare var module: { exports: any }

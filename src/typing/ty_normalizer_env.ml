@@ -1,11 +1,16 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
 module File_sig = File_sig.With_ALoc
+
+type evaluate_type_destructors_mode =
+  | EvaluateNone
+  | EvaluateAll
+  | EvaluateSome
 
 type options = {
   (* If this flag is set to `true` then the normalizer will attempt to reuse the
@@ -17,7 +22,7 @@ type options = {
    * Choosing 'false' will typically result in smaller produced types, which makes
    * it a more appropriate option for codemods.
    *)
-  evaluate_type_destructors: bool;
+  evaluate_type_destructors: evaluate_type_destructors_mode;
   (* Expand the signatures of built-in functions, such as:
    * Function.prototype.apply: (thisArg: any, argArray?: any): any
    *)
@@ -69,7 +74,7 @@ type options = {
 
 let default_options =
   {
-    evaluate_type_destructors = false;
+    evaluate_type_destructors = EvaluateNone;
     expand_internal_types = false;
     flag_shadowed_type_params = false;
     merge_bot_and_any_kinds = true;
@@ -78,6 +83,19 @@ let default_options =
     preserve_inferred_literal_types = false;
     verbose_normalizer = false;
     max_depth = Some 50;
+  }
+
+let default_codemod_options =
+  {
+    expand_internal_types = false;
+    flag_shadowed_type_params = false;
+    preserve_inferred_literal_types = false;
+    evaluate_type_destructors = EvaluateSome;
+    optimize_types = false;
+    omit_targ_defaults = true;
+    merge_bot_and_any_kinds = false;
+    verbose_normalizer = false;
+    max_depth = None;
   }
 
 (* This is a global environment that should not change during normalization *)
@@ -154,10 +172,22 @@ type t = {
      or a unique ID of the type alias to make this distinction, but at the moment
      keeping this information around introduces a small space regression. *)
   under_type_alias: SymbolSet.t;
+  (* Detect recursive types *)
+  seen_tvar_ids: ISet.t;
+  seen_eval_ids: Type.EvalIdSet.t;
 }
 
 let init ~options ~genv ~tparams_rev ~imported_names =
-  { options; genv; depth = 0; tparams_rev; imported_names; under_type_alias = SymbolSet.empty }
+  {
+    options;
+    genv;
+    depth = 0;
+    tparams_rev;
+    imported_names;
+    under_type_alias = SymbolSet.empty;
+    seen_tvar_ids = ISet.empty;
+    seen_eval_ids = Type.EvalIdSet.empty;
+  }
 
 let descend e = { e with depth = e.depth + 1 }
 

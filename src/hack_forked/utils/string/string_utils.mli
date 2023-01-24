@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -11,28 +11,6 @@
    clean it up manually, and then delete this comment once the interface is in
    shape. *)
 
-exception Incorrect_format
-
-val soi : int -> string
-
-val string_of_char : char -> string
-
-val string_before : string -> int -> string
-
-val string_after : string -> int -> string
-
-val string_starts_with : string -> string -> bool
-
-val string_ends_with : string -> string -> bool
-
-(** [substring_index needle haystack] returns the index of the first occurrence of
-    string [needle] in string [haystack]. If not found, returns [-1].
-
-    An implementation of the Knuth-Morris-Pratt (KMP) algorithm. *)
-val substring_index : string -> string -> int
-
-val is_substring : string -> string -> bool
-
 (** [lstrip s prefix] returns a copy of [s] with [prefix] removed from
     the beginning if [s] begins with [prefix], or [s] itself if not.
     Physical equality is maintained in the latter case. *)
@@ -42,8 +20,6 @@ val lstrip : string -> string -> string
     the end if [s] ends with [suffix], or [s] itself if not. Physical
     equality is maintained in the latter case. *)
 val rstrip : string -> string -> string
-
-val rpartition : string -> char -> string * string
 
 val truncate : int -> string -> string
 
@@ -63,23 +39,11 @@ val rindex_not_from_opt : string -> int -> string -> int option
     [str] that is not in [chars] if it exists, or [None] otherwise. *)
 val rindex_not_opt : string -> string -> int option
 
-val zero_code : int
-
-val nine_code : int
-
-val is_decimal_digit : char -> bool
-
 val is_lowercase_char : char -> bool
 
 val is_not_lowercase : string -> int -> int -> bool
 
 val fold_left : f:('a -> char -> 'a) -> acc:'a -> string -> 'a
-
-val split : char -> string -> string list
-
-val split2 : char -> string -> (string * string) option
-
-val split2_exn : char -> string -> string * string
 
 (** [replace_char needle replacement str] replaces all instances of the [needle]
     character in [str] with the [replacement] character *)
@@ -97,6 +61,12 @@ val indent : int -> string -> string
     If the string ends with a delimiter, an empty string representing the
     contents after the final delimiter is NOT included (unlike [Str.split_delim]). *)
 val split_on_newlines : string -> string list
+
+(** Escapes special characters to make the given string a valid filename *)
+val filename_escape : string -> string
+
+(** Unescapes the output of `filename_escape` *)
+val filename_unescape : string -> string
 
 module Internal : sig
   val to_list : string -> char list

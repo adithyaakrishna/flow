@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -46,7 +46,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
     | ParamList of (Loc.t, Loc.t) Type.Function.Params.t'
     | Type of (Loc.t, Loc.t) Type.t
 
-  let maybe_variance env =
+  let maybe_variance ?(parse_readonly = false) ?(parse_in_out = false) env =
     let loc = Peek.loc env in
     match Peek.token env with
     | T_PLUS ->
@@ -62,6 +62,35 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
       Some
         ( loc,
           { Variance.kind = Variance.Minus; comments = Flow_ast_utils.mk_comments_opt ~leading () }
+        )
+    | T_READONLY when parse_readonly ->
+      let leading = Peek.comments env in
+      Eat.token env;
+      Some
+        ( loc,
+          {
+            Variance.kind = Variance.Readonly;
+            comments = Flow_ast_utils.mk_comments_opt ~leading ();
+          }
+        )
+    | T_IDENTIFIER { raw = "in"; _ } when parse_in_out && Peek.ith_is_type_identifier ~i:1 env ->
+      let leading = Peek.comments env in
+      Eat.token env;
+      let (kind, loc) =
+        match Peek.token env with
+        | T_IDENTIFIER { raw = "out"; _ } ->
+          let end_loc = Peek.loc env in
+          Eat.token env;
+          (Variance.InOut, Loc.btwn loc end_loc)
+        | _ -> (Variance.In, loc)
+      in
+      Some (loc, { Variance.kind; comments = Flow_ast_utils.mk_comments_opt ~leading () })
+    | T_IDENTIFIER { raw = "out"; _ } when parse_in_out && Peek.ith_is_type_identifier ~i:1 env ->
+      let leading = Peek.comments env in
+      Eat.token env;
+      Some
+        ( loc,
+          { Variance.kind = Variance.Out; comments = Flow_ast_utils.mk_comments_opt ~leading () }
         )
     | _ -> None
 
@@ -89,19 +118,17 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
 
   and union_with =
     let rec unions leading acc env =
-      match Peek.token env with
-      | T_BIT_OR ->
-        Expect.token env T_BIT_OR;
+      if Eat.maybe env T_BIT_OR then
         unions leading (intersection env :: acc) env
-      | _ ->
-        (match List.rev acc with
+      else
+        match List.rev acc with
         | t0 :: t1 :: ts ->
           Type.Union
             {
               Type.Union.types = (t0, t1, ts);
               comments = Flow_ast_utils.mk_comments_opt ~leading ();
             }
-        | _ -> assert false)
+        | _ -> assert false
     in
     fun env ?(leading = []) left ->
       if Peek.token env = T_BIT_OR then
@@ -123,19 +150,17 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
 
   and intersection_with =
     let rec intersections leading acc env =
-      match Peek.token env with
-      | T_BIT_AND ->
-        Expect.token env T_BIT_AND;
+      if Eat.maybe env T_BIT_AND then
         intersections leading (anon_function_without_parens env :: acc) env
-      | _ ->
-        (match List.rev acc with
+      else
+        match List.rev acc with
         | t0 :: t1 :: ts ->
           Type.Intersection
             {
               Type.Intersection.types = (t0, t1, ts);
               comments = Flow_ast_utils.mk_comments_opt ~leading ();
             }
-        | _ -> assert false)
+        | _ -> assert false
     in
     fun env ?(leading = []) left ->
       if Peek.token env = T_BIT_AND then
@@ -245,7 +270,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
 
   and raw_typeof_expr_with_identifier =
     let rec identifier env (q_loc, qualification) =
-      if Peek.token env = T_PERIOD && Peek.ith_is_identifier ~i:1 env then
+      if Peek.token env = T_PERIOD && Peek.ith_is_identifier_name ~i:1 env then
         let (loc, q) =
           with_loc
             ~start_loc:q_loc
@@ -265,17 +290,22 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
       identifier env (loc, id)
 
   and typeof_arg env =
-    match Peek.token env with
-    | T_LPAREN ->
-      Eat.token env;
-      let typeof = typeof_arg env in
-      Expect.token env T_RPAREN;
-      typeof
-    | T_IDENTIFIER _ (* `static` is reserved in strict mode, but still an identifier *) ->
-      Some (typeof_expr env)
-    | _ ->
-      error env Parse_error.InvalidTypeof;
-      None
+    Eat.push_lex_mode env Lex_mode.NORMAL;
+    let result =
+      if Peek.token env = T_LPAREN then (
+        Eat.token env;
+        let typeof = typeof_arg env in
+        Expect.token env T_RPAREN;
+        typeof
+      ) else if Peek.is_identifier env then
+        Some (typeof_expr env)
+      else (
+        error env Parse_error.InvalidTypeof;
+        None
+      )
+    in
+    Eat.pop_lex_mode env;
+    result
 
   and typeof env =
     with_loc
@@ -294,7 +324,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
     match Peek.token env with
     | T_MULT ->
       let leading = Peek.comments env in
-      Expect.token env T_MULT;
+      Eat.token env;
       let trailing = Eat.trailing_comments env in
       (loc, Type.Exists (Flow_ast_utils.mk_comments_opt ~leading ~trailing ()))
     | T_LESS_THAN -> _function env
@@ -307,7 +337,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
       with_loc
         (fun env ->
           let leading = Peek.comments env in
-          Expect.token env T_INTERFACE;
+          Eat.token env;
           let (extends, body) = interface_helper env in
           Type.Interface
             { Type.Interface.extends; body; comments = Flow_ast_utils.mk_comments_opt ~leading () })
@@ -315,13 +345,14 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
     | T_TYPEOF -> typeof env
     | T_LBRACKET -> tuple env
     | T_IDENTIFIER _
-    | T_STATIC (* `static` is reserved in strict mode, but still an identifier *) ->
+    | T_EXTENDS (* `extends` is reserved, but recover by treating it as an identifier *)
+    | T_STATIC (* `static` is reserved, but recover by treating it as an identifier *) ->
       let (loc, g) = generic env in
       (loc, Type.Generic g)
     | T_STRING (loc, value, raw, octal) ->
       if octal then strict_error env Parse_error.StrictOctalLiteral;
       let leading = Peek.comments env in
-      Expect.token env (T_STRING (loc, value, raw, octal));
+      Eat.token env;
       let trailing = Eat.trailing_comments env in
       ( loc,
         Type.StringLiteral
@@ -332,10 +363,10 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
           }
       )
     | T_NUMBER_SINGLETON_TYPE { kind; value; raw } ->
-      let leading = Peek.comments env in
-      Expect.token env (T_NUMBER_SINGLETON_TYPE { kind; value; raw });
-      let trailing = Eat.trailing_comments env in
       if kind = LEGACY_OCTAL then strict_error env Parse_error.StrictOctalLiteral;
+      let leading = Peek.comments env in
+      Eat.token env;
+      let trailing = Eat.trailing_comments env in
       ( loc,
         Type.NumberLiteral
           {
@@ -344,33 +375,55 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
             comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
           }
       )
-    | T_BIGINT_SINGLETON_TYPE { kind; approx_value; raw } ->
-      let bigint = raw in
+    | T_BIGINT_SINGLETON_TYPE { kind = _; value; raw } ->
       let leading = Peek.comments env in
-      Expect.token env (T_BIGINT_SINGLETON_TYPE { kind; approx_value; raw });
+      Eat.token env;
       let trailing = Eat.trailing_comments env in
       ( loc,
         Type.BigIntLiteral
           {
-            Ast.BigIntLiteral.approx_value;
-            bigint;
+            Ast.BigIntLiteral.value;
+            raw;
             comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
           }
       )
     | (T_TRUE | T_FALSE) as token ->
       let leading = Peek.comments env in
-      Expect.token env token;
+      Eat.token env;
       let trailing = Eat.trailing_comments env in
       let value = token = T_TRUE in
       ( loc,
         Type.BooleanLiteral
           { BooleanLiteral.value; comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () }
       )
+    | T_KEYOF ->
+      with_loc
+        (fun env ->
+          let leading = Peek.comments env in
+          Eat.token env;
+          let trailing = Eat.trailing_comments env in
+          let argument = _type env in
+          Type.Keyof
+            { Type.Keyof.argument; comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () })
+        env
+    | T_READONLY ->
+      with_loc
+        (fun env ->
+          let leading = Peek.comments env in
+          Eat.token env;
+          let trailing = Eat.trailing_comments env in
+          let argument = _type env in
+          Type.ReadOnly
+            {
+              Type.ReadOnly.argument;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+            })
+        env
     | _ ->
       (match primitive env with
       | Some t -> (loc, t)
       | None ->
-        error_unexpected env;
+        error_unexpected ~expected:"a type" env;
         (loc, Type.Any None))
 
   and is_primitive = function
@@ -383,7 +436,10 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
     | T_STRING_TYPE
     | T_SYMBOL_TYPE
     | T_VOID_TYPE
-    | T_NULL ->
+    | T_NULL
+    | T_UNKNOWN_TYPE
+    | T_NEVER_TYPE
+    | T_UNDEFINED_TYPE ->
       true
     | _ -> false
 
@@ -403,10 +459,16 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
       Eat.token env;
       let trailing = Eat.trailing_comments env in
       Some (Type.Empty (Flow_ast_utils.mk_comments_opt ~leading ~trailing ()))
-    | T_BOOLEAN_TYPE _ ->
+    | T_BOOLEAN_TYPE kind ->
       Eat.token env;
       let trailing = Eat.trailing_comments env in
-      Some (Type.Boolean (Flow_ast_utils.mk_comments_opt ~leading ~trailing ()))
+      let raw =
+        match kind with
+        | BOOL -> `Bool
+        | BOOLEAN -> `Boolean
+      in
+      let comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () in
+      Some (Type.Boolean { raw; comments })
     | T_NUMBER_TYPE ->
       Eat.token env;
       let trailing = Eat.trailing_comments env in
@@ -431,31 +493,86 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
       Eat.token env;
       let trailing = Eat.trailing_comments env in
       Some (Type.Null (Flow_ast_utils.mk_comments_opt ~leading ~trailing ()))
+    | T_UNKNOWN_TYPE ->
+      Eat.token env;
+      let trailing = Eat.trailing_comments env in
+      Some (Type.Unknown (Flow_ast_utils.mk_comments_opt ~leading ~trailing ()))
+    | T_NEVER_TYPE ->
+      Eat.token env;
+      let trailing = Eat.trailing_comments env in
+      Some (Type.Never (Flow_ast_utils.mk_comments_opt ~leading ~trailing ()))
+    | T_UNDEFINED_TYPE ->
+      Eat.token env;
+      let trailing = Eat.trailing_comments env in
+      Some (Type.Undefined (Flow_ast_utils.mk_comments_opt ~leading ~trailing ()))
     | _ -> None
 
   and tuple =
-    let rec types env acc =
+    let element env =
+      with_loc
+        (fun env ->
+          if Eat.maybe env T_ELLIPSIS then
+            let name =
+              match (Peek.is_identifier env, Peek.ith_token ~i:1 env) with
+              | (true, T_PLING)
+              | (true, T_COLON) ->
+                let name = identifier_name env in
+                if Peek.token env = T_PLING then (
+                  error env Parse_error.InvalidTupleOptionalSpread;
+                  Eat.token env
+                );
+                Expect.token env T_COLON;
+                Some name
+              | _ -> None
+            in
+            let annot = _type env in
+            Type.Tuple.SpreadElement { Type.Tuple.SpreadElement.name; annot }
+          else
+            let variance =
+              match Peek.token env with
+              | T_PLUS -> maybe_variance env
+              | T_MINUS when Peek.ith_is_identifier ~i:1 env ->
+                (* `-1` is a valid type but not a valid tuple label.
+                   But `-foo` is only valid as a tuple label. *)
+                maybe_variance env
+              | _ -> None
+            in
+            match (Peek.is_identifier env, Peek.ith_token ~i:1 env) with
+            | (true, T_PLING)
+            | (true, T_COLON) ->
+              let name = identifier_name env in
+              let optional = Eat.maybe env T_PLING in
+              Expect.token env T_COLON;
+              let annot = _type env in
+              Type.Tuple.LabeledElement
+                { Type.Tuple.LabeledElement.name; annot; variance; optional }
+            | _ ->
+              if Option.is_some variance then error env Parse_error.InvalidTupleVariance;
+              Type.Tuple.UnlabeledElement (_type env))
+        env
+    in
+    let rec elements env acc =
       match Peek.token env with
       | T_EOF
       | T_RBRACKET ->
         List.rev acc
       | _ ->
-        let acc = _type env :: acc in
+        let acc = element env :: acc in
         (* Trailing comma support (like [number, string,]) *)
         if Peek.token env <> T_RBRACKET then Expect.token env T_COMMA;
-        types env acc
+        elements env acc
     in
     fun env ->
       with_loc
         (fun env ->
           let leading = Peek.comments env in
           Expect.token env T_LBRACKET;
-          let tl = types (with_no_anon_function_type false env) [] in
+          let els = elements (with_no_anon_function_type false env) [] in
           Expect.token env T_RBRACKET;
           let trailing = Eat.trailing_comments env in
           Type.Tuple
             {
-              Type.Tuple.types = tl;
+              Type.Tuple.elements = els;
               comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
             })
         env
@@ -699,13 +816,12 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
                 value;
                 static = static <> None;
                 comments = Flow_ast_utils.mk_comments_opt ~leading ();
-              }
-            )
+              })
           env
       in
       Type.Object.CallProperty prop
     in
-    let init_property env start_loc ~variance ~static ~proto ~leading key =
+    let init_property env start_loc ~variance ~static ~proto ~leading (key_loc, key) =
       ignore proto;
       if not (should_parse_types env) then error env Parse_error.UnexpectedTypeAnnotation;
       let prop =
@@ -713,8 +829,12 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
           ~start_loc
           (fun env ->
             let optional = Eat.maybe env T_PLING in
-            Expect.token env T_COLON;
-            let value = _type env in
+            let value =
+              if Expect.token_maybe env T_COLON then
+                _type env
+              else
+                (key_loc, Type.Any None)
+            in
             Type.Object.Property.
               {
                 key;
@@ -725,8 +845,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
                 _method = false;
                 variance;
                 comments = Flow_ast_utils.mk_comments_opt ~leading ();
-              }
-            )
+              })
           env
       in
       Type.Object.Property prop
@@ -772,8 +891,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
                 _method = false;
                 variance = None;
                 comments = Flow_ast_utils.mk_comments_opt ~leading ();
-              }
-            )
+              })
           env
       in
       Type.Object.Property prop
@@ -871,7 +989,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
         Eat.token env
       | T_RCURLYBAR when exact -> ()
       | T_RCURLY when not exact -> ()
-      | _ -> error_unexpected env
+      | _ -> Expect.error env T_COMMA
     in
     let error_unexpected_variance env = function
       | Some (loc, _) -> error_at env (loc, Parse_error.UnexpectedVariance)
@@ -930,7 +1048,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
                 properties ~is_class ~allow_inexact ~allow_spread ~exact env acc
             end
           | _ ->
-            let prop = spread_property env start_loc leading in
+            let prop = spread_property env start_loc ~leading in
             semicolon exact env;
             properties
               ~is_class
@@ -1038,6 +1156,20 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
           ~proto
           ~leading
           start_loc
+      | T_READONLY
+        when variance = None
+             && (Peek.ith_is_identifier ~i:1 env || Peek.ith_token ~i:1 env = T_LBRACKET) ->
+        let variance = maybe_variance ~parse_readonly:true env in
+        property
+          env
+          ~is_class
+          ~allow_static:false
+          ~allow_proto:false
+          ~variance
+          ~static
+          ~proto
+          ~leading
+          start_loc
       | T_LBRACKET ->
         error_unexpected_proto env proto;
         (match Peek.ith_token ~i:1 env with
@@ -1067,7 +1199,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
               )
           in
           let static = None in
-          init_property env start_loc ~variance ~static ~proto ~leading:[] key
+          init_property env start_loc ~variance ~static ~proto ~leading:[] (static_loc, key)
         | (None, Some proto_loc, (T_PLING | T_COLON)) ->
           (* We speculatively parsed `proto` as a proto modifier, but now
              that we've parsed the next token, we changed our minds and want
@@ -1080,7 +1212,7 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
               )
           in
           let proto = None in
-          init_property env start_loc ~variance ~static ~proto ~leading:[] key
+          init_property env start_loc ~variance ~static ~proto ~leading:[] (proto_loc, key)
         | _ ->
           let object_key env =
             Eat.push_lex_mode env Lex_mode.NORMAL;
@@ -1090,42 +1222,40 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
           in
           let leading_key = Peek.comments env in
           (match object_key env with
-          | ( _,
+          | ( key_loc,
               ( Expression.Object.Property.Identifier
                   (_, { Identifier.name = ("get" | "set") as name; comments = _ }) as key
               )
-            ) ->
-            begin
-              match Peek.token env with
-              | T_LESS_THAN
-              | T_LPAREN ->
-                error_unexpected_proto env proto;
-                error_unexpected_variance env variance;
-                method_property env start_loc static key leading
-              | T_COLON
-              | T_PLING ->
-                init_property env start_loc ~variance ~static ~proto ~leading key
-              | _ ->
-                ignore (object_key_remove_trailing env key);
-                let key = object_key env in
-                let is_getter = name = "get" in
-                let leading = leading @ leading_key in
-                error_unexpected_proto env proto;
-                error_unexpected_variance env variance;
-                getter_or_setter ~is_getter ~leading env start_loc static key
-            end
-          | (_, key) ->
-            begin
-              match Peek.token env with
-              | T_LESS_THAN
-              | T_LPAREN ->
-                error_unexpected_proto env proto;
-                error_unexpected_variance env variance;
-                method_property env start_loc static key leading
-              | _ ->
-                error_invalid_property_name env is_class static key;
-                init_property env start_loc ~variance ~static ~proto ~leading key
-            end))
+            ) -> begin
+            match Peek.token env with
+            | T_LESS_THAN
+            | T_LPAREN ->
+              error_unexpected_proto env proto;
+              error_unexpected_variance env variance;
+              method_property env start_loc static key ~leading
+            | T_COLON
+            | T_PLING ->
+              init_property env start_loc ~variance ~static ~proto ~leading (key_loc, key)
+            | _ ->
+              ignore (object_key_remove_trailing env key);
+              let key = object_key env in
+              let is_getter = name = "get" in
+              let leading = leading @ leading_key in
+              error_unexpected_proto env proto;
+              error_unexpected_variance env variance;
+              getter_or_setter ~is_getter ~leading env start_loc static key
+          end
+          | (key_loc, key) -> begin
+            match Peek.token env with
+            | T_LESS_THAN
+            | T_LPAREN ->
+              error_unexpected_proto env proto;
+              error_unexpected_variance env variance;
+              method_property env start_loc static key ~leading
+            | _ ->
+              error_invalid_property_name env is_class static key;
+              init_property env start_loc ~variance ~static ~proto ~leading (key_loc, key)
+          end))
     in
     fun ~is_class ~allow_exact ~allow_spread env ->
       let exact = allow_exact && Peek.token env = T_LCURLYBAR in
@@ -1175,11 +1305,10 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
     in
     fun env ->
       let extends =
-        if Peek.token env = T_EXTENDS then (
-          Expect.token env T_EXTENDS;
+        if Eat.maybe env T_EXTENDS then
           let extends = supers env [] in
           generic_type_list_remove_trailing env extends
-        ) else
+        else
           []
       in
       let body = _object env ~allow_exact:false ~allow_spread:false ~is_class:false in
@@ -1194,68 +1323,126 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
     with_loc
       (fun env ->
         let name = type_identifier env in
-        let bound =
-          if Peek.token env = T_COLON then
-            Ast.Type.Available (annotation env)
-          else
-            Ast.Type.Missing (Peek.loc_skip_lookahead env)
+        let (bound, bound_kind) =
+          match Peek.token env with
+          | T_COLON -> (Ast.Type.Available (annotation env), Ast.Type.TypeParam.Colon)
+          | T_EXTENDS ->
+            ( Ast.Type.Available
+                (with_loc
+                   (fun env ->
+                     Eat.token env;
+                     _type env)
+                   env
+                ),
+              Ast.Type.TypeParam.Extends
+            )
+          | _ -> (Ast.Type.Missing (Peek.loc_skip_lookahead env), Ast.Type.TypeParam.Colon)
         in
-        (name, bound))
+        (name, bound, bound_kind))
       env
 
   and type_params =
+    (* whether we should consume [token] as a type param. a type param can
+       either start with an identifier or a variance sigil; we'll also parse
+       types like `number` to improve error recovery. *)
+    let token_is_maybe_param env token =
+      token_is_type_identifier env token || token_is_variance token || token_is_reserved_type token
+    in
+    (* whether an unexpected [token] should signal the end of the param list.
+       these are tokens that are likely to follow a param list, if the closing
+       > is missing. This improves error recovery when you add type params
+       to an existing node.
+
+       Note that we're in Lex_mode.TYPE here, so the tokens are those produced
+       by [Flow_lexer.type_token]. *)
+    let token_is_maybe_end_of_list env token =
+      match token with
+      (* Reserved words are lexed as identifiers in Lex_env.TYPE mode (if
+         they're not also reserved types). e.g. `switch` is a T_IDENTIFIER.
+         we're not expecting a type identifier, so let's assume it's a
+         NORMAL-mode keyword and end the list. *)
+      | T_IDENTIFIER { raw; _ } when is_reserved raw || is_contextually_reserved raw -> true
+      (* adding a type above an enum: `type T<U\nenum ....` (`enum` is not an ES keyword) *)
+      | T_IDENTIFIER { raw = "enum"; _ } when (parse_options env).enums -> true
+      (* adding a type above another: `type T<U\ntype V ...` (`type` is not an ES keyword) *)
+      | T_IDENTIFIER { raw = "type"; _ }
+      (* RHS: `type U<T = default = ...` (this only helps if there's a default!) *)
+      | T_ASSIGN
+      (* start of function params: `function f<T|(...)` *)
+      | T_LPAREN
+      (* class heritage: `class C<T| implements ...` *)
+      | T_IDENTIFIER { raw = "implements"; _ } ->
+        true
+      | _ -> false
+    in
     let rec params env ~require_default acc =
-      Type.TypeParam.(
-        let (loc, (variance, name, bound, default, require_default)) =
-          with_loc
-            (fun env ->
-              let variance = maybe_variance env in
-              let (loc, (name, bound)) = bounded_type env in
-              let (default, require_default) =
-                match Peek.token env with
-                | T_ASSIGN ->
-                  Eat.token env;
-                  (Some (_type env), true)
-                | _ ->
-                  if require_default then error_at env (loc, Parse_error.MissingTypeParamDefault);
-                  (None, require_default)
-              in
-              (variance, name, bound, default, require_default))
-            env
-        in
-        let param = (loc, { name; bound; variance; default }) in
-        let acc = param :: acc in
-        match Peek.token env with
-        | T_EOF
-        | T_GREATER_THAN ->
-          List.rev acc
-        | _ ->
-          Expect.token env T_COMMA;
-          if Peek.token env = T_GREATER_THAN then
-            List.rev acc
-          else
-            params env ~require_default acc
-      )
+      let (acc, require_default) =
+        if token_is_maybe_param env (Peek.token env) then
+          let (param, require_default) =
+            with_loc_extra
+              (fun env ->
+                let variance = maybe_variance ~parse_in_out:true env in
+                let (loc, (name, bound, bound_kind)) = bounded_type env in
+                let (default, require_default) =
+                  match Peek.token env with
+                  | T_ASSIGN ->
+                    Eat.token env;
+                    (Some (_type env), true)
+                  | _ ->
+                    if require_default then error_at env (loc, Parse_error.MissingTypeParamDefault);
+                    (None, require_default)
+                in
+                ({ Type.TypeParam.name; bound; bound_kind; variance; default }, require_default))
+              env
+          in
+          (param :: acc, require_default)
+        else
+          (acc, require_default)
+      in
+      match Peek.token env with
+      | T_EOF
+      | T_GREATER_THAN ->
+        (* end of list *)
+        List.rev acc
+      | T_COMMA ->
+        (* handle multiple params *)
+        Eat.token env;
+        params env ~require_default acc
+      | token when token_is_maybe_end_of_list env token ->
+        (* error recovery: tokens likely to follow a param list *)
+        Expect.error env T_GREATER_THAN;
+        List.rev acc
+      | token when token_is_maybe_param env token ->
+        (* recover from a missing comma between items by not consuming the token *)
+        Expect.error env T_COMMA;
+        params env ~require_default acc
+      | _ ->
+        (* unexpected token. consume it until we hit the end of the list *)
+        Expect.token env T_COMMA;
+        params env ~require_default acc
     in
     fun env ->
       if Peek.token env = T_LESS_THAN then (
         if not (should_parse_types env) then error env Parse_error.UnexpectedTypeAnnotation;
-        Some
-          (with_loc
-             (fun env ->
-               let leading = Peek.comments env in
-               Expect.token env T_LESS_THAN;
-               let params = params env ~require_default:false [] in
-               let internal = Peek.comments env in
-               Expect.token env T_GREATER_THAN;
-               let trailing = Eat.trailing_comments env in
-               {
-                 Type.TypeParams.params;
-                 comments =
-                   Flow_ast_utils.mk_comments_with_internal_opt ~leading ~trailing ~internal ();
-               })
-             env
-          )
+        let ((loc, { Type.TypeParams.params; _ }) as result) =
+          with_loc
+            (fun env ->
+              let leading = Peek.comments env in
+              Expect.token env T_LESS_THAN;
+              let params = params env ~require_default:false [] in
+              let internal = Peek.comments env in
+              Expect.token_opt env T_GREATER_THAN;
+              let trailing = Eat.trailing_comments env in
+              let comments =
+                Flow_ast_utils.mk_comments_with_internal_opt ~leading ~trailing ~internal ()
+              in
+              { Type.TypeParams.params; comments })
+            env
+        in
+        (match params with
+        | [] -> error_at env (loc, Parse_error.MissingTypeParam)
+        | _ -> ());
+        Some result
       ) else
         None
 
@@ -1359,9 +1546,12 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
       | Number comments -> Number (merge_comments comments)
       | BigInt comments -> BigInt (merge_comments comments)
       | String comments -> String (merge_comments comments)
-      | Boolean comments -> Boolean (merge_comments comments)
+      | Boolean ({ comments; _ } as t) -> Boolean { t with comments = merge_comments comments }
       | Symbol comments -> Symbol (merge_comments comments)
       | Exists comments -> Exists (merge_comments comments)
+      | Unknown comments -> Unknown (merge_comments comments)
+      | Never comments -> Never (merge_comments comments)
+      | Undefined comments -> Undefined (merge_comments comments)
       | Nullable ({ Nullable.comments; _ } as t) ->
         Nullable { t with Nullable.comments = merge_comments comments }
       | Function ({ Function.comments; _ } as t) ->
@@ -1393,6 +1583,10 @@ module Type (Parse : Parser_common.PARSER) : TYPE = struct
         Intersection { t with Intersection.comments = merge_comments comments }
       | Typeof ({ Typeof.comments; _ } as t) ->
         Typeof { t with Typeof.comments = merge_comments comments }
+      | Keyof ({ Keyof.comments; _ } as t) ->
+        Keyof { t with Keyof.comments = merge_comments comments }
+      | ReadOnly ({ ReadOnly.comments; _ } as t) ->
+        ReadOnly { t with ReadOnly.comments = merge_comments comments }
       | Tuple ({ Tuple.comments; _ } as t) ->
         Tuple { t with Tuple.comments = merge_comments comments }
       | StringLiteral ({ StringLiteral.comments; _ } as t) ->

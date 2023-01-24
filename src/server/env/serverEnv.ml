@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -25,6 +25,9 @@ type errors = {
   (* errors are stored in a map from file path to error set, so that the errors
      from checking particular files can be cleared during recheck. *)
   local_errors: Flow_error.ErrorSet.t Utils_js.FilenameMap.t;
+  (* duplicate providers found during commit_modules are stored separately so
+     they can be cleared easily *)
+  duplicate_providers: (File_key.t * File_key.t Nel.t) SMap.t;
   (* errors encountered during merge have to be stored separately so
      dependencies can be cleared during merge. *)
   merge_errors: Flow_error.ErrorSet.t Utils_js.FilenameMap.t;
@@ -42,20 +45,13 @@ type collated_errors = {
 }
 
 type env = {
-  (* All the files that we at least parse. *)
-  files: Utils_js.FilenameSet.t;
-  (* All the files that we at least parse. *)
+  files: Utils_js.FilenameSet.t;  (** All the files that we at least parse (includes libs). *)
   dependency_info: Dependency_info.t;
-  (* All the current files we typecheck. *)
-  checked_files: CheckedSet.t;
-  (* package.json files *)
-  package_json_files: File_key.t list;
-  ordered_libs: string list;
-  (* The lib files, in their merge order *)
-  libs: SSet.t;
-  (* a subset of `files` *)
-  (* The files which didn't parse (skipped or errored) *)
-  unparsed: Utils_js.FilenameSet.t;
+  checked_files: CheckedSet.t;  (** All the current files we typecheck. *)
+  package_json_files: Utils_js.FilenameSet.t;  (** package.json files *)
+  ordered_libs: string list;  (** The lib files, in their merge order *)
+  libs: SSet.t;  (** The lib files as a set *)
+  unparsed: Utils_js.FilenameSet.t;  (** The files which didn't parse (skipped or errored) *)
   errors: errors;
   coverage: Coverage_response.file_coverage Utils_js.FilenameMap.t;
   collated_errors: collated_errors option ref;

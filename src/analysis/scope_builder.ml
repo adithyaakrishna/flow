@@ -1,11 +1,10 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-module Ast = Flow_ast
 open Flow_ast_visitor
 open Hoister
 
@@ -82,12 +81,11 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
     let rec get x t =
       match t with
       | [] -> None
-      | hd :: rest ->
-        begin
-          match SMap.find_opt x hd with
-          | Some def -> Some def
-          | None -> get x rest
-        end
+      | hd :: rest -> begin
+        match SMap.find_opt x hd with
+        | Some def -> Some def
+        | None -> get x rest
+      end
 
     let defs = function
       | [] -> SMap.empty
@@ -109,6 +107,39 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
       in
       env :: parent_env
   end
+
+  class function_annot_collector_and_remover =
+    object (this)
+      inherit [(L.t, L.t) Ast.Type.annotation list, L.t] visitor ~init:[]
+
+      method! type_annotation_hint return =
+        let open Ast.Type in
+        match return with
+        | Available annot ->
+          acc <- annot :: acc;
+          Missing L.none
+        | Missing _ -> return
+
+      method! function_param param =
+        let open Ast.Function.Param in
+        let (loc, { argument; default }) = param in
+        let argument' = this#function_param_pattern argument in
+        (loc, { argument = argument'; default })
+
+      method! function_params params =
+        let open Ast.Function in
+        let (loc, { Params.params = params_list; rest; comments; this_ }) = params in
+        let params_list' = Flow_ast_mapper.map_list this#function_param params_list in
+        let rest' = Flow_ast_mapper.map_opt this#function_rest_param rest in
+        let this_' =
+          Base.Option.bind this_ ~f:(fun (_, { ThisParam.annot; comments = _ }) ->
+              acc <- annot :: acc;
+              None
+          )
+        in
+        let comments' = this#syntax_opt comments in
+        (loc, { Params.params = params_list'; rest = rest'; comments = comments'; this_ = this_' })
+    end
 
   class scope_builder ~flowmin_compatibility ~enable_enums ~with_types =
     object (this)
@@ -277,7 +308,7 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
               Some this#binding_type_identifier
             else
               None
-          | _ -> Some this#pattern_identifier
+          | _ -> Some (this#pattern_identifier ~kind:Ast.Statement.VariableDeclaration.Const)
         in
         (match specifier with
         | { local = Some ident; remote = _; kind }
@@ -305,7 +336,7 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
 
       method! switch loc (switch : ('loc, 'loc) Ast.Statement.Switch.t) =
         let open Ast.Statement.Switch in
-        let { discriminant; cases; comments = _ } = switch in
+        let { discriminant; cases; comments = _; exhaustive_out = _ } = switch in
         let _ = this#expression discriminant in
         let lexical_hoist = new lexical_hoister ~flowmin_compatibility ~enable_enums in
         let lexical_bindings =
@@ -398,29 +429,88 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
         this#with_bindings ~lexical:true loc lexical_bindings (super#catch_clause loc) clause
 
       (* helper for function params and body *)
-      method private lambda params predicate body =
-        (* function params and bindings within the function body share the same scope *)
-        let bindings =
-          let hoist = new hoister ~flowmin_compatibility ~enable_enums ~with_types in
-          run hoist#function_params params;
-          run hoist#function_body_any body;
-          hoist#acc
-        in
+      method private lambda ~is_arrow:_ ~fun_loc:_ ~generator_return_loc:_ params predicate body =
+        let open Ast.Function in
         let body_loc =
-          let open Ast.Function in
           match body with
           | BodyExpression (loc, _)
           | BodyBlock (loc, _) ->
             loc
         in
-        this#with_bindings
-          body_loc
-          bindings
-          (fun () ->
-            run this#function_params params;
-            run_opt this#predicate predicate;
-            run this#function_body_any body)
-          ()
+        (* The old env will first visit all param type annotations before visiting param names.
+           We need to separate them so that we can visit the annotation and names in different
+           scopes. *)
+        let params =
+          let visitor = new function_annot_collector_and_remover in
+          let params = visitor#function_params params in
+          visitor#acc
+          |> Base.List.rev
+          |> Base.List.iter ~f:(fun annot -> ignore @@ this#type_annotation annot);
+          params
+        in
+        (* We need to visit function param default expressions
+           without bindings inside the function body. *)
+        let (_, { Params.params = params_list; _ }) = params in
+        let has_default_parameters =
+          Base.List.exists params_list ~f:(fun (_, { Ast.Function.Param.default; argument = _ }) ->
+              Option.is_some default
+          )
+        in
+        (* We need to create a second scope when we have default parameters.
+           See https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Functions/Default_parameters#scope_effects
+        *)
+        if has_default_parameters then
+          let param_bindings =
+            let hoist = new hoister ~flowmin_compatibility ~enable_enums ~with_types in
+            run hoist#function_params params;
+            hoist#acc
+          in
+          let body_bindings =
+            let hoist = new hoister ~flowmin_compatibility ~enable_enums ~with_types in
+            run hoist#function_body_any body;
+            hoist#acc
+          in
+          this#with_bindings
+            ~lexical:true
+            body_loc
+            param_bindings
+            (fun () ->
+              run this#function_params params;
+              this#with_bindings
+                body_loc
+                body_bindings
+                (fun () ->
+                  run_opt this#predicate predicate;
+                  run this#function_body_any body)
+                ())
+            ()
+        else
+          let bindings =
+            let hoist = new hoister ~flowmin_compatibility ~enable_enums ~with_types in
+            run hoist#function_params params;
+            run hoist#function_body_any body;
+            hoist#acc
+          in
+          this#with_bindings
+            body_loc
+            bindings
+            (fun () ->
+              run this#function_params params;
+              run_opt this#predicate predicate;
+              run this#function_body_any body)
+            ()
+
+      method! declare_module _loc m =
+        let open Ast.Statement.DeclareModule in
+        let { id = _; body; kind = _; comments = _ } = m in
+        let (loc, body) = body in
+        let bindings =
+          let hoist = new hoister ~flowmin_compatibility ~enable_enums ~with_types in
+          run (hoist#block loc) body;
+          hoist#acc
+        in
+        this#with_bindings loc bindings (fun () -> run (this#block loc) body) ();
+        m
 
       method private scoped_type_params ?(hoist_op = (fun f -> f ())) ~in_tparam_scope tparams =
         let open Ast.Type.TypeParams in
@@ -430,11 +520,11 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
         in
         let rec loop tps =
           match tps with
-          | (loc, { name; bound; variance; default }) :: next ->
+          | (loc, { name; bound; bound_kind = _; variance; default }) :: next ->
             hoist_op (fun () -> ignore @@ this#type_annotation_hint bound);
             ignore @@ this#variance_opt variance;
             hoist_op (fun () -> ignore @@ Base.Option.map ~f:this#type_ default);
-            let bindings = Bindings.(singleton (name, Bindings.Type)) in
+            let bindings = Bindings.(singleton (name, Bindings.Type { imported = false })) in
             this#with_bindings
               loc
               bindings
@@ -451,6 +541,9 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
 
       method private hoist_annotations f = f ()
 
+      method private this_binding_function_id_opt ~fun_loc:_ ~has_this_annot:_ ident =
+        Base.Option.iter ident ~f:(fun id -> ignore @@ this#function_identifier id)
+
       method! function_declaration loc (expr : (L.t, L.t) Ast.Function.t) =
         let skip_scope =
           flowmin_compatibility
@@ -462,24 +555,32 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
           let open Ast.Function in
           let {
             id;
-            params;
+            params = (_, { Ast.Function.Params.this_; _ }) as params;
             body;
             return;
             tparams;
             async = _;
-            generator = _;
+            generator;
             predicate;
             sig_loc = _;
             comments = _;
           } =
             expr
           in
-          run_opt this#function_identifier id;
+          this#this_binding_function_id_opt
+            ~fun_loc:loc
+            ~has_this_annot:(Base.Option.is_some this_)
+            id;
+          let generator_return_loc =
+            match (generator, return) with
+            | (false, _) -> None
+            | (true, (Ast.Type.Available (loc, _) | Ast.Type.Missing loc)) -> Some loc
+          in
           this#scoped_type_params
             ~hoist_op:this#hoist_annotations
             tparams
             ~in_tparam_scope:(fun () ->
-              this#lambda params predicate body;
+              this#lambda ~is_arrow:false ~fun_loc:loc ~generator_return_loc params predicate body;
               if with_types then
                 this#hoist_annotations (fun () -> ignore @@ this#type_annotation_hint return)
           )
@@ -489,7 +590,7 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
 
       (* Almost the same as function_declaration, except that the name of the
          function expression is locally in scope. *)
-      method! function_ loc (expr : (L.t, L.t) Ast.Function.t) =
+      method private function_expression_without_name ~is_arrow loc expr =
         let skip_scope =
           flowmin_compatibility
           &&
@@ -500,12 +601,12 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
           let open Ast.Function in
           let {
             id;
-            params;
+            params = (_, { Ast.Function.Params.this_; _ }) as params;
             body;
             return;
             tparams;
             async = _;
-            generator = _;
+            generator;
             predicate;
             sig_loc = _;
             comments = _;
@@ -517,20 +618,44 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
             | Some name -> Bindings.(singleton (name, Bindings.Function))
             | None -> Bindings.empty
           in
+          let generator_return_loc =
+            match (generator, return) with
+            | (false, _) -> None
+            | (true, (Ast.Type.Available (loc, _) | Ast.Type.Missing loc)) -> Some loc
+          in
           this#with_bindings
             loc
             ~lexical:true
             bindings
             (fun () ->
-              run_opt this#function_identifier id;
+              if is_arrow then
+                run_opt this#function_identifier id
+              else
+                this#this_binding_function_id_opt
+                  ~fun_loc:loc
+                  ~has_this_annot:(Base.Option.is_some this_)
+                  id;
               (* This function is not hoisted, so we just traverse the signature *)
               this#scoped_type_params tparams ~in_tparam_scope:(fun () ->
-                  this#lambda params predicate body;
+                  this#lambda ~is_arrow ~fun_loc:loc ~generator_return_loc params predicate body;
                   if with_types then ignore @@ this#type_annotation_hint return
               ))
             ()
         );
         expr
+
+      method! function_ loc (expr : (L.t, L.t) Ast.Function.t) =
+        this#function_expression_without_name ~is_arrow:false loc expr
+
+      method! arrow_function loc (expr : (L.t, L.t) Ast.Function.t) =
+        this#function_expression_without_name ~is_arrow:true loc expr
+
+      method! declare_variable _ decl =
+        let open Ast.Statement.DeclareVariable in
+        let { id = ident; annot; comments = _ } = decl in
+        ignore @@ this#pattern_identifier ~kind:Ast.Statement.VariableDeclaration.Var ident;
+        this#hoist_annotations (fun () -> ignore @@ this#type_annotation annot);
+        decl
 
       method! declare_function loc expr =
         match Declare_function_utils.declare_function_to_function_declaration_simple loc expr with
@@ -577,11 +702,10 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
           ();
         cls
 
-      method! class_ _loc (cls : ('loc, 'loc) Ast.Class.t) =
+      method! class_ loc (cls : ('loc, 'loc) Ast.Class.t) =
         let open Ast.Class in
         let { id; body; tparams; extends; implements; class_decorators; comments = _ } = cls in
         ignore @@ Base.List.map ~f:this#class_decorator class_decorators;
-        ignore @@ Base.Option.map ~f:this#class_identifier id;
         let extends_targs =
           Base.Option.value_map
             extends
@@ -591,6 +715,7 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
               targs
           )
         in
+        this#class_identifier_opt ~class_loc:loc id;
         let implements_targs =
           Base.Option.value_map
             implements
@@ -611,6 +736,9 @@ module Make (L : Loc_sig.S) (Api : Scope_api_sig.S with module L = L) :
         in
         this#scoped_type_params tparams ~in_tparam_scope;
         cls
+
+      method private class_identifier_opt ~class_loc:_ id =
+        ignore @@ Base.Option.map ~f:this#class_identifier id
 
       method! declare_class _loc (decl : ('loc, 'loc) Ast.Statement.DeclareClass.t) =
         let open Ast.Statement.DeclareClass in

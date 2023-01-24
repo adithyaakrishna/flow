@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -17,25 +17,12 @@ type progress = {
   finished: int;
 }
 
-type summary_info =
-  | RecheckSummary of {
-      dependent_file_count: int;
-      changed_file_count: int;
-      top_cycle: (File_key.t * int) option;  (** name of cycle leader, and size of cycle *)
-    }
-  | CommandSummary of string
-  | InitSummary
-
-type summary = {
-  duration: float;
-  info: summary_info;
-}
-
 type deadline = float
 
 type event =
   | Ready  (** The server is free *)
   | Init_start  (** The server is starting to initialize *)
+  | Fetch_saved_state_delay of string  (** Fetching the saved state is taking a long time *)
   | Read_saved_state
   | Load_saved_state_progress of progress
   | Parsing_progress of progress
@@ -45,15 +32,17 @@ type event =
   | Merging_progress of progress
   | Checking_progress of progress
   | Canceling_progress of progress
-  | Finishing_up of summary  (** Server's finishing up typechecking or other work *)
+  | Finishing_up  (** Server's finishing up typechecking or other work *)
   | Recheck_start  (** The server is starting to recheck *)
   | Handling_request_start  (** The server is starting to handle an ephemeral/persistent request *)
+  | Handling_request_end  (** The server is done handling an ephemeral/persistent request *)
   | GC_start  (** The server is starting to GC *)
   | Collating_errors_start  (** The server is collating the errors *)
   | Watchman_wait_start of deadline option  (** The server is now blocked waiting for Watchman *)
 
 type typecheck_status =
   | Starting_typecheck  (** A typecheck's initial state *)
+  | Fetching_saved_state of string  (** Fetching saved state, when it is taking a while *)
   | Reading_saved_state
   | Loading_saved_state of progress
   | Parsing of progress
@@ -64,7 +53,7 @@ type typecheck_status =
   | Checking of progress
   | Canceling of progress
   | Collating_errors  (** We sometimes collate errors during typecheck *)
-  | Finishing_typecheck of summary  (** haven't reached free state yet *)
+  | Finishing_typecheck  (** haven't reached free state yet *)
   | Waiting_for_watchman of deadline option
 
 type restart_reason =
@@ -99,6 +88,7 @@ type emoji =
   | Ghost
   | Open_book
   | Panda_face
+  | Parachute
   | Recycling_symbol
   | Sleeping_face
   | Smiling_face_with_mouth_open
@@ -116,6 +106,7 @@ let string_of_emoji = function
   | Ghost -> "\xF0\x9F\x91\xBB"
   | Open_book -> "\xF0\x9F\x93\x96"
   | Panda_face -> "\xF0\x9F\x90\xBC"
+  | Parachute -> "\xF0\x9F\xAA\x82"
   | Recycling_symbol -> "\xE2\x99\xBB"
   | Sleeping_face -> "\xF0\x9F\x98\xB4"
   | Smiling_face_with_mouth_open -> "\xF0\x9F\x98\x83"
@@ -150,6 +141,7 @@ let render_emoji ~use_emoji ?(pad = After) emoji =
 let string_of_event = function
   | Ready -> "Ready"
   | Init_start -> "Init_start"
+  | Fetch_saved_state_delay message -> spf "Fetch_saved_state_delay %s" message
   | Read_saved_state -> "Read_saved_state"
   | Load_saved_state_progress progress ->
     spf "Load_saved_state_progress %s" (string_of_progress progress)
@@ -160,9 +152,10 @@ let string_of_event = function
   | Merging_progress progress -> spf "Merging_progress %s" (string_of_progress progress)
   | Checking_progress progress -> spf "Checking_progress files %s" (string_of_progress progress)
   | Canceling_progress progress -> spf "Canceling_progress %s" (string_of_progress progress)
-  | Finishing_up _ -> "Finishing_up"
+  | Finishing_up -> "Finishing_up"
   | Recheck_start -> "Recheck_start"
   | Handling_request_start -> "Handling_request_start"
+  | Handling_request_end -> "Handling_request_end"
   | GC_start -> "GC_start"
   | Collating_errors_start -> "Collating_errors_start"
   | Watchman_wait_start _deadline -> "Watchman_wait_start"
@@ -171,6 +164,8 @@ let string_of_event = function
     progressive for those that don't. *)
 let string_of_typecheck_status ~use_emoji = function
   | Starting_typecheck -> spf "%sstarting up" (render_emoji ~use_emoji Sleeping_face)
+  | Fetching_saved_state message ->
+    spf "%sfetching saved state: %s" (render_emoji ~use_emoji Parachute) message
   | Reading_saved_state -> spf "%sreading saved state" (render_emoji ~use_emoji Closed_book)
   | Loading_saved_state progress ->
     spf "%sloading saved state %s" (render_emoji ~use_emoji Open_book) (string_of_progress progress)
@@ -204,7 +199,7 @@ let string_of_typecheck_status ~use_emoji = function
       | None -> ""
     in
     spf "%swaiting for Watchman%s" (render_emoji ~use_emoji Eyes) timeout
-  | Finishing_typecheck _ -> spf "%sfinishing up" (render_emoji ~use_emoji Cookie)
+  | Finishing_typecheck -> spf "%sfinishing up" (render_emoji ~use_emoji Cookie)
 
 let string_of_restart_reason = function
   | Server_out_of_date -> "restarting due to change which cannot be handled incrementally"
@@ -244,7 +239,8 @@ let update ~event ~status =
   | (Ready, _) -> Free
   | (Init_start, _) -> Typechecking (Initializing, Starting_typecheck)
   | (Recheck_start, _) -> Typechecking (Rechecking, Starting_typecheck)
-  | (Handling_request_start, _) -> Typechecking (Handling_request, Starting_typecheck)
+  | (Fetch_saved_state_delay message, Typechecking (mode, _)) ->
+    Typechecking (mode, Fetching_saved_state message)
   | (Read_saved_state, Typechecking (mode, _)) -> Typechecking (mode, Reading_saved_state)
   | (Load_saved_state_progress progress, Typechecking (mode, _)) ->
     Typechecking (mode, Loading_saved_state progress)
@@ -260,9 +256,22 @@ let update ~event ~status =
   | (Collating_errors_start, Typechecking (mode, _)) -> Typechecking (mode, Collating_errors)
   | (Watchman_wait_start deadline, Typechecking (mode, _)) ->
     Typechecking (mode, Waiting_for_watchman deadline)
-  | (Finishing_up summary, Typechecking (mode, _)) ->
-    Typechecking (mode, Finishing_typecheck summary)
+  | (Finishing_up, Typechecking (mode, _)) -> Typechecking (mode, Finishing_typecheck)
   | (GC_start, _) -> Garbage_collecting
+  | (Handling_request_start, _) ->
+    (match status with
+    | Typechecking _ ->
+      (* commands running in parallel with a recheck should not take precedence
+         over the recheck's status *)
+      status
+    | _ -> Typechecking (Handling_request, Starting_typecheck))
+  | (Handling_request_end, _) ->
+    (match status with
+    | Typechecking (Handling_request, _) ->
+      (* as above, parallel rechecks take precedence, so only finish handling a
+         request if that's still the most important thing we're doing. *)
+      Typechecking (Handling_request, Finishing_typecheck)
+    | _ -> status)
   | _ ->
     (* This is a bad transition. In dev mode, let's blow up since something is wrong. However in
      * production let's soldier on. Usually this means that we forgot to send something like
@@ -284,49 +293,58 @@ let is_free = function
   | _ -> false
 
 (** Returns true iff the transition from old_status to new_status is "significant", which is a
-    pretty arbitrary judgement of how interesting the new status is to a user, given that they
-    already have seen the old status *)
+    pretty arbitrary judgement of how interesting the new status is to a user. Significant
+    transitions are pushed to the user immediately; insignificant transitions are throttled. *)
 let is_significant_transition old_status new_status =
   (* If the statuses are literally the same, then the transition is not significant *)
   old_status <> new_status
-  &&
-  match (old_status, new_status) with
-  | (Typechecking (old_mode, old_tc_status), Typechecking (new_mode, new_tc_status)) ->
-    (* A change in mode is always signifcant *)
-    old_mode <> new_mode
-    ||
-    begin
-      match (old_tc_status, new_tc_status) with
-      (* Making progress within parsing, merging or canceling is not significant *)
-      | (Parsing _, Parsing _)
-      | (Indexing _, Indexing _)
-      | (Merging _, Merging _)
-      | (Checking _, Checking _)
-      | (Canceling _, Canceling _) ->
-        false
-      (* But changing typechecking status always is significant *)
-      | (_, Starting_typecheck)
-      | (_, Reading_saved_state)
-      | (_, Loading_saved_state _)
-      | (_, Parsing _)
-      | (_, Indexing _)
-      | (_, Resolving_dependencies)
-      | (_, Calculating_dependencies)
-      | (_, Merging _)
-      | (_, Checking _)
-      | (_, Canceling _)
-      | (_, Waiting_for_watchman _)
-      | (_, Collating_errors)
-      | (_, Finishing_typecheck _) ->
-        true
-    end
-  (* Switching to a completely different status is always significant *)
-  | (_, Starting_up)
-  | (_, Free)
-  | (_, Typechecking _)
-  | (_, Garbage_collecting)
-  | (_, Unknown) ->
-    true
+  && (Utils_js.in_flow_test
+     ||
+     match (old_status, new_status) with
+     | (_, Typechecking (_, Starting_typecheck))
+     | (_, Typechecking (_, Finishing_typecheck)) ->
+       (* These are very short transition statuses that aren't important unless
+          they take a long time for some reason. *)
+       false
+     | (Typechecking (old_mode, old_tc_status), Typechecking (new_mode, new_tc_status)) ->
+       (* A change in mode is always signifcant *)
+       old_mode <> new_mode
+       || begin
+            match (old_tc_status, new_tc_status) with
+            | (Parsing _, Parsing _)
+            | (Indexing _, Indexing _)
+            | (Merging _, Merging _)
+            | (Checking _, Checking _)
+            | (Canceling _, Canceling _) ->
+              (* Making progress within parsing, merging or canceling is not significant *)
+              false
+            | (_, Fetching_saved_state _)
+            | (_, Reading_saved_state)
+            | (_, Loading_saved_state _)
+            | (_, Parsing _)
+            | (_, Indexing _)
+            | (_, Resolving_dependencies)
+            | (_, Calculating_dependencies)
+            | (_, Merging _)
+            | (_, Checking _)
+            | (_, Canceling _)
+            | (_, Waiting_for_watchman _)
+            | (_, Collating_errors) ->
+              (* But changing typechecking status always is significant *)
+              true
+            | (_, Starting_typecheck)
+            | (_, Finishing_typecheck) ->
+              (* also handled above *)
+              false
+          end
+     | (_, Starting_up)
+     | (_, Free)
+     | (_, Typechecking _)
+     | (_, Garbage_collecting)
+     | (_, Unknown) ->
+       (* Switching to a completely different status is always significant *)
+       true
+     )
 
 let get_progress status =
   let print progress =
@@ -342,93 +360,6 @@ let get_progress status =
   | Typechecking (_, Canceling progress) ->
     print progress
   | _ -> (None, None, None)
-
-let get_summary status =
-  match status with
-  | Typechecking (_mode, Finishing_typecheck summary) -> Some summary
-  | _ -> None
-
-let log_of_summaries ~(root : Path.t) (summaries : summary list) : FlowEventLogger.persistent_delay
-    =
-  FlowEventLogger.(
-    let init =
-      {
-        init_duration = 0.0;
-        command_count = 0;
-        command_duration = 0.0;
-        command_worst = None;
-        command_worst_duration = None;
-        recheck_count = 0;
-        recheck_dependent_files = 0;
-        recheck_changed_files = 0;
-        recheck_duration = 0.0;
-        recheck_worst_duration = None;
-        recheck_worst_dependent_file_count = None;
-        recheck_worst_changed_file_count = None;
-        recheck_worst_cycle_leader = None;
-        recheck_worst_cycle_size = None;
-      }
-    in
-    let f acc { duration; info } =
-      match info with
-      | InitSummary ->
-        let acc = { acc with init_duration = acc.init_duration +. duration } in
-        acc
-      | CommandSummary cmd ->
-        let is_worst =
-          match acc.command_worst_duration with
-          | None -> true
-          | Some d -> duration >= d
-        in
-        let acc =
-          if not is_worst then
-            acc
-          else
-            { acc with command_worst = Some cmd; command_worst_duration = Some duration }
-        in
-        let acc =
-          {
-            acc with
-            command_count = acc.command_count + 1;
-            command_duration = acc.command_duration +. duration;
-          }
-        in
-        acc
-      | RecheckSummary { dependent_file_count; changed_file_count; top_cycle } ->
-        let is_worst =
-          match acc.recheck_worst_duration with
-          | None -> true
-          | Some d -> duration >= d
-        in
-        let acc =
-          if not is_worst then
-            acc
-          else
-            {
-              acc with
-              recheck_worst_duration = Some duration;
-              recheck_worst_dependent_file_count = Some dependent_file_count;
-              recheck_worst_changed_file_count = Some changed_file_count;
-              recheck_worst_cycle_size = Base.Option.map top_cycle ~f:(fun (_, size) -> size);
-              recheck_worst_cycle_leader =
-                Base.Option.map top_cycle ~f:(fun (f, _) ->
-                    f |> File_key.to_string |> Files.relative_path (Path.to_string root)
-                );
-            }
-        in
-        let acc =
-          {
-            acc with
-            recheck_count = acc.recheck_count + 1;
-            recheck_dependent_files = acc.recheck_dependent_files + dependent_file_count;
-            recheck_changed_files = acc.recheck_changed_files + changed_file_count;
-            recheck_duration = acc.recheck_duration +. duration;
-          }
-        in
-        acc
-    in
-    Base.List.fold summaries ~init ~f
-  )
 
 (** When the server is initializing it will publish statuses that say it is initializing. The
     monitor might know that the server actually is restarting. This function turns a initializing

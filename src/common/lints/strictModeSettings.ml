@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -25,7 +25,7 @@ let of_lines =
   let rec loop acc = function
     | [] -> Ok acc
     | labeled_line :: labeled_lines ->
-      Base.Result.bind (parse_line labeled_line) (fun kinds ->
+      Base.Result.bind (parse_line labeled_line) ~f:(fun kinds ->
           let acc = List.fold_left (fun acc kind -> LintSet.add kind acc) acc kinds in
           loop acc labeled_lines
       )

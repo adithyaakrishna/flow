@@ -1,24 +1,22 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-(* stops walking the tree *)
+(** stops walking the tree *)
 exception Found
 
-(*  This type is distinct from the one raised by the searcher because
-   it would never make sense for the searcher to raise LocNotFound *)
+(** This type is distinct from the one raised by the searcher because
+  it would never make sense for the searcher to raise LocNotFound *)
 type ('M, 'T) result =
   | OwnDef of 'M
   | Request of ('M, 'T) Get_def_request.t
   | LocNotFound
 
-(**
- * Determines if the given expression is a `require()` call, or a member expression
- * containing one, like `require('foo').bar`.
- *)
+(** Determines if the given expression is a [require()] call, or a member expression
+  containing one, like [require('foo').bar]. *)
 let rec is_require ~is_legit_require expr =
   let open Flow_ast.Expression in
   match expr with
@@ -94,10 +92,12 @@ class ['M, 'T] searcher
 
     method! import_declaration import_loc decl =
       let open Flow_ast.Statement.ImportDeclaration in
-      let { source = (source_loc, { Flow_ast.StringLiteral.value = module_name; _ }); _ } = decl in
+      let { source = (source_annot, { Flow_ast.StringLiteral.value = module_name; _ }); _ } =
+        decl
+      in
       let res = super#import_declaration import_loc decl in
       if covers_target import_loc then
-        this#request (Get_def_request.Require ((source_loc, module_name), import_loc));
+        this#request (Get_def_request.Require (loc_of_annot source_annot, module_name));
       res
 
     method! import_named_specifier ~import_kind decl =
@@ -115,12 +115,25 @@ class ['M, 'T] searcher
       );
       decl
 
-    method! import_default_specifier decl =
+    method! import_default_specifier ~import_kind decl =
+      let open Flow_ast.Statement.ImportDeclaration in
       let (annot, _) = decl in
-      if annot_covers_target annot then this#request (Get_def_request.Type annot);
+      ( if annot_covers_target annot then
+        match import_kind with
+        | ImportTypeof -> this#request (Get_def_request.Typeof annot)
+        | _ -> this#request (Get_def_request.Type annot)
+      );
       decl
 
-    method! import_namespace_specifier id = id
+    method! import_namespace_specifier ~import_kind loc id =
+      let open Flow_ast.Statement.ImportDeclaration in
+      let (annot, _) = id in
+      ( if covers_target loc then
+        match import_kind with
+        | ImportTypeof -> this#request (Get_def_request.Typeof annot)
+        | _ -> this#request (Get_def_request.Type annot)
+      );
+      id
 
     method! export_named_declaration export_loc decl =
       let open Flow_ast.Statement.ExportNamedDeclaration in
@@ -130,7 +143,7 @@ class ['M, 'T] searcher
         let { specifiers; _ } = decl in
         Base.Option.iter ~f:(this#export_specifier_with_loc ~source_loc) specifiers;
         if covers_target export_loc then
-          this#request (Get_def_request.Require ((source_loc, module_name), export_loc));
+          this#request (Get_def_request.Require (source_loc, module_name));
         decl
 
     method export_specifier_with_loc ~source_loc specifier =
@@ -208,24 +221,23 @@ class ['M, 'T] searcher
           List.iter
             Object.(
               function
-              | Property (_, { Property.key; _ }) ->
-                begin
-                  match key with
-                  | Property.Literal
-                      (loc, { Flow_ast.Literal.value = Flow_ast.Literal.String name; _ })
-                    when covers_target loc ->
-                    this#request
-                      Get_def_request.(
-                        Member { prop_name = name; object_source = ObjectType pat_annot }
-                      )
-                  | Property.Identifier (id_annot, { Flow_ast.Identifier.name; _ })
-                    when annot_covers_target id_annot ->
-                    this#request
-                      Get_def_request.(
-                        Member { prop_name = name; object_source = ObjectType pat_annot }
-                      )
-                  | _ -> ()
-                end
+              | Property (_, { Property.key; _ }) -> begin
+                match key with
+                | Property.Literal
+                    (loc, { Flow_ast.Literal.value = Flow_ast.Literal.String name; _ })
+                  when covers_target loc ->
+                  this#request
+                    Get_def_request.(
+                      Member { prop_name = name; object_source = ObjectType pat_annot }
+                    )
+                | Property.Identifier (id_annot, { Flow_ast.Identifier.name; _ })
+                  when annot_covers_target id_annot ->
+                  this#request
+                    Get_def_request.(
+                      Member { prop_name = name; object_source = ObjectType pat_annot }
+                    )
+                | _ -> ()
+              end
               | _ -> ()
             )
             properties
@@ -265,14 +277,13 @@ class ['M, 'T] searcher
           _
         )
         when annot_covers_target annot && is_legit_require source_annot ->
-        let loc = loc_of_annot annot in
         let source_loc = loc_of_annot source_annot in
-        this#request (Get_def_request.Require ((source_loc, module_name), loc))
+        this#request (Get_def_request.Require (source_loc, module_name))
       | (Flow_ast.Expression.Literal Flow_ast.Literal.{ value = String str; _ }, Some prefix)
         when annot_covers_target annot && Base.String.is_prefix str ~prefix ->
         let loc = loc_of_annot annot in
         let mref = Base.String.chop_prefix_exn str ~prefix in
-        this#request (Get_def_request.Require ((loc, mref), loc))
+        this#request (Get_def_request.Require (loc, mref))
       | _ -> super#expression (annot, expr)
 
     (* object keys would normally hit this#t_identifier; this circumvents that. *)

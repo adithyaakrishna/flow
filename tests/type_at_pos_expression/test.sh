@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -154,3 +154,4 @@ printf "optional_chaining.js:16:24 = "
 assert_ok "$FLOW" type-at-pos optional_chaining.js 16 24 --strip-root --pretty
 
 queries_in_file "type-at-pos" "identifier.js"
+queries_in_file "type-at-pos" "reduce_recursive.js"

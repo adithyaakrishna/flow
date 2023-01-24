@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -39,8 +39,6 @@ module type READER = sig
   type fd
 
   val return : 'a -> 'a result
-
-  val fail : exn -> 'a result
 
   val ( >>= ) : 'a result -> ('a -> 'b result) -> 'b result
 

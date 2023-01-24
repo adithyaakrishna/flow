@@ -1,34 +1,21 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-type kind =
-  | Ordinary
-  | Async
-  | Generator
-  | AsyncGenerator
-  | FieldInit of (ALoc.t, ALoc.t) Flow_ast.Expression.t
-  | Predicate
-  | Ctor
-
 module type S = sig
-  type func_params
+  module Config_types : Func_class_sig_types.Config.S
 
-  type func_params_tast
+  module Config : Func_params_intf.Config with module Types := Config_types
 
-  type t = {
-    reason: Reason.t;
-    kind: kind;
-    tparams: Type.typeparams;
-    tparams_map: Type.t SMap.t;
-    fparams: func_params;
-    body: (ALoc.t, ALoc.t) Flow_ast.Function.body option;
-    return_t: Type.annotated_or_inferred;
-    knot: Type.t;
-  }
+  module Param : Func_params.S with module Config_types := Config_types and module Config := Config
+
+  module Types :
+    Func_class_sig_types.Func.S with module Config := Config_types and module Param := Param.Types
+
+  open Types
 
   (** 1. Constructors *)
 
@@ -46,7 +33,7 @@ module type S = sig
       from this module to evaluate the initializer in the appropriate context,
       where `this` and `super` point to the appropriate types. *)
   val field_initializer :
-    Type.t SMap.t ->
+    Type.t Subst_name.Map.t ->
     (* type params map *)
     Reason.t ->
     (ALoc.t, ALoc.t) Flow_ast.Expression.t ->
@@ -57,30 +44,10 @@ module type S = sig
 
   (** 1. Manipulation *)
 
-  (** Return a signature with types from provided map substituted.
-
-      Note that this function does not substitute type parameters declared by the
-      function itself, which may shadow the names of type parameters in the
-      provided map.
-
-      This signature's own type parameters will be subtituted by the
-      `check_with_generics` function. *)
-  val subst : Context.t -> Type.t SMap.t -> (* type params map *)
-                                            t -> t
-
-  (** Invoke callback with type parameters substituted by upper/lower bounds. *)
-  val check_with_generics : Context.t -> (t -> 'a) -> t -> 'a
-
   val toplevels :
-    (ALoc.t, ALoc.t) Flow_ast.Identifier.t option ->
-    (* id *)
     Context.t ->
-    (func_params -> Type.t * Scope.Entry.t) ->
-    (* this recipe *)
-    Scope.Entry.t ->
     t ->
-    Type.t (* this *)
-    * func_params_tast option
+    func_params_tast option
     * (ALoc.t, ALoc.t * Type.t) Flow_ast.Function.body option
     * (ALoc.t, ALoc.t * Type.t) Flow_ast.Expression.t option
 
@@ -95,11 +62,18 @@ module type S = sig
   (** 1. Type Conversion *)
 
   (** Create a function type for function declarations/expressions. *)
-  val functiontype : Context.t -> Type.t -> (* this *)
-                                            t -> Type.t
+  val functiontype :
+    Context.t ->
+    arrow:bool ->
+    (* function this loc *) ALoc.t option ->
+    Type.t ->
+    (* this *)
+    t ->
+    Type.t
 
   (** Create a function type for class/interface methods. *)
-  val methodtype : Context.t -> (* this *) Type.t -> t -> Type.t
+  val methodtype :
+    Context.t -> (* method this loc *) ALoc.t option -> (* this *) Type.t -> t -> Type.t
 
   (** Create a type of the return expression of a getter function.
 

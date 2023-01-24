@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -60,14 +60,14 @@ let parse_args path args =
    - args is mandatory command args; see parse_args above
 *)
 let main base_flags option_values json pretty root strip_root path wait_for_recheck args () =
-  let (file, line, column) = parse_args path args in
+  let (input, line, char) = parse_args path args in
   let flowconfig_name = base_flags.Base_flags.flowconfig_name in
   let root =
     guess_root
       flowconfig_name
       (match root with
       | Some root -> Some root
-      | None -> File_input.path_of_file_input file)
+      | None -> File_input.path_of_file_input input)
   in
   let strip_root =
     if strip_root then
@@ -75,9 +75,7 @@ let main base_flags option_values json pretty root strip_root path wait_for_rech
     else
       None
   in
-  let request =
-    ServerProt.Request.GET_DEF { filename = file; line; char = column; wait_for_recheck }
-  in
+  let request = ServerProt.Request.GET_DEF { input; line; char; wait_for_recheck } in
   match connect_and_make_request flowconfig_name option_values root request with
   | ServerProt.Response.GET_DEF (Ok loc) ->
     (* format output *)
@@ -95,12 +93,16 @@ let main base_flags option_values json pretty root strip_root path wait_for_rech
       else
         print_endline (range_string_of_loc ~strip_root loc)
   | ServerProt.Response.GET_DEF (Error exn_msg) ->
-    let file_str =
-      match File_input.filename_of_file_input file with
-      | "-" as s -> s
-      | s -> File_key.SourceFile s |> Reason.string_of_source ~strip_root
-    in
-    Utils_js.prerr_endlinef "Could not get definition for %s:%d:%d\n%s" file_str line column exn_msg
+    if json || pretty then
+      let open Hh_json in
+      print_json_endline ~pretty (JSON_Object [("error", JSON_String exn_msg)])
+    else
+      let file_str =
+        match File_input.filename_of_file_input input with
+        | "-" as s -> s
+        | s -> File_key.SourceFile s |> Reason.string_of_source ~strip_root
+      in
+      Utils_js.prerr_endlinef "Could not get definition for %s:%d:%d\n%s" file_str line char exn_msg
   | response -> failwith_bad_response ~request ~response
 
 let command = CommandSpec.command spec main

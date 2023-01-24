@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -33,7 +33,7 @@ module Kit (Flow : Flow_common.S) : OBJECT = struct
     | OpenT (r, id) ->
       let open Constraint in
       begin
-        match Lazy.force (Context.find_graph cx id) with
+        match Context.find_graph cx id with
         | Unresolved _ ->
           let open Object in
           let widened_id = Tvar.mk_no_wrap cx r in
@@ -319,13 +319,13 @@ module Kit (Flow : Flow_common.S) : OBJECT = struct
           in
           let (exact, changed) =
             if
-              Obj_type.is_legacy_exact_DO_NOT_USE widest.Object.flags.obj_kind
-              && not (Obj_type.is_legacy_exact_DO_NOT_USE slice.Object.flags.obj_kind)
+              Obj_type.is_exact widest.Object.flags.obj_kind
+              && not (Obj_type.is_exact slice.Object.flags.obj_kind)
             then
               (false, true)
             else
-              ( Obj_type.is_legacy_exact_DO_NOT_USE widest.Object.flags.obj_kind
-                && Obj_type.is_legacy_exact_DO_NOT_USE slice.Object.flags.obj_kind,
+              ( Obj_type.is_exact widest.Object.flags.obj_kind
+                && Obj_type.is_exact slice.Object.flags.obj_kind,
                 changed
               )
           in
@@ -445,7 +445,7 @@ module Kit (Flow : Flow_common.S) : OBJECT = struct
               in
               (* Merge the dictionary from our config with the defaults dictionary. *)
               let dict =
-                Base.Option.merge config_dict defaults_dict (fun d1 d2 ->
+                Base.Option.merge config_dict defaults_dict ~f:(fun d1 d2 ->
                     {
                       dict_name = None;
                       key = UnionT (reason, UnionRep.make d1.key d2.key []);
@@ -469,8 +469,8 @@ module Kit (Flow : Flow_common.S) : OBJECT = struct
                 | Some d -> Indexed d
                 | None ->
                   if
-                    Obj_type.is_exact_or_sealed reason config_flags.obj_kind
-                    && Obj_type.is_exact_or_sealed reason defaults_flags.obj_kind
+                    Obj_type.is_exact config_flags.obj_kind
+                    && Obj_type.is_exact defaults_flags.obj_kind
                   then
                     Exact
                   else
@@ -487,7 +487,7 @@ module Kit (Flow : Flow_common.S) : OBJECT = struct
               (* Create a new dictionary from our config's dictionary with a
                * positive polarity. *)
               let dict =
-                Base.Option.map config_dict (fun d ->
+                Base.Option.map config_dict ~f:(fun d ->
                     {
                       dict_name = None;
                       key = d.key;
@@ -502,7 +502,7 @@ module Kit (Flow : Flow_common.S) : OBJECT = struct
                 Obj_type.obj_kind_from_optional_dict
                   ~dict
                   ~otherwise:
-                    ( if Obj_type.is_exact_or_sealed reason config_flags.obj_kind then
+                    ( if Obj_type.is_exact config_flags.obj_kind then
                       Exact
                     else
                       Inexact
@@ -547,7 +547,6 @@ module Kit (Flow : Flow_common.S) : OBJECT = struct
               (fun _ (t, _) -> rec_flow_t cx trace ~use_op (t, react_transport_value))
               props_map;
             match flags.obj_kind with
-            | UnsealedInFile _ -> failwith "React config should never be unsealed"
             | Exact -> ()
             | Inexact ->
               let r =

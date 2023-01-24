@@ -1,0 +1,283 @@
+Error -------------------------------------------------------------------------------------------------------- as.js:4:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   4| m as T; // ERROR
+      ^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------------- as.js:8:6
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   8| b || m as T; // ERROR
+           ^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------------- as.js:9:6
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   9| b && m as T; // ERROR
+           ^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:10:7
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   10| b === m as T; // ERROR
+             ^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:13:5
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   13| x = m as T; // ERROR
+           ^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:17:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   17| new C as T; // ERROR
+       ^^^^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:20:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   20| n + n as T; // ERROR
+       ^^^^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:22:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   22| n as T + n; // ERROR
+       ^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:23:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   23| n as T && n; // ERROR
+       ^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:24:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   24| n as T || n; // ERROR
+       ^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:25:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. [ts-syntax]
+
+   25| n as T === n; // ERROR
+       ^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------------- as.js:27:1
+
+The closest equivalent of TypeScript's `as` cast in Flow has the form `(<expr>: <type>)` - using a colon and wrapped in
+parentheses. Flow does not have an equivalent of `as const`. Try adding an annotation instead. [ts-syntax]
+
+   27| n as const; // ERROR
+       ^^^^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------ in_out_variance.js:1:20
+
+The equivalent of TypeScript's `in` variance annotation is `-` in Flow. [ts-syntax]
+
+   1| declare function f<in A>(A): void; // ERROR
+                         ^^
+
+
+Error ------------------------------------------------------------------------------------------ in_out_variance.js:2:20
+
+The equivalent of TypeScript's `out` variance annotation is `+` in Flow. [ts-syntax]
+
+   2| declare function f<out A>(): A; // ERROR
+                         ^^^
+
+
+Error ------------------------------------------------------------------------------------------ in_out_variance.js:3:20
+
+The equivalent of TypeScript's `in out` variance annotation in Flow is to simply leave it out - it's the default if you
+don't have a variance annotation. [ts-syntax]
+
+   3| declare function f<in out A>(A): A; // ERROR
+                         ^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------------------- keyof.js:3:10
+
+The equivalent of TypeScript's `keyof` type operator in Flow is the `$Keys` utility type, used in the form `$Keys<T>`.
+[ts-syntax]
+
+   3| type T = keyof O; // ERROR
+               ^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------------------- never.js:1:10
+
+The closest equivalent of TypeScript's `never` type in Flow is `empty`. [ts-syntax]
+
+   1| type T = never; // ERROR
+               ^^^^^
+
+
+Error -------------------------------------------------------------------------------------------- readonly_type.js:1:10
+
+The equivalent of TypeScript's `readonly` type operator applied to a tuple type is `$ReadOnly<[T, S]>`. [ts-syntax]
+
+   1| type A = readonly [string, number]; // ERROR
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------- readonly_type.js:2:10
+
+The equivalent of TypeScript's `readonly` type operator applied to an array type is `$ReadOnlyArray<T>`. [ts-syntax]
+
+   2| type B = readonly string[]; // ERROR
+               ^^^^^^^^^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------- readonly_type.js:3:10
+
+TypeScript's `readonly` type operator is not valid in Flow. For array types, you can use `$ReadOnlyArray<T>`. For object
+and tuple types you can use `$ReadOnly<T>`. [ts-syntax]
+
+   3| type C = readonly number; // ERROR
+               ^^^^^^^^^^^^^^^
+
+
+Error ----------------------------------------------------------------------------------------- readonly_variance.js:2:3
+
+While TypeScript uses `readonly` to specify read only properties, Flow uses `+` in the form `+foo: T` for class and
+object type properties, and `+[string]: T` for dictionaries. [ts-syntax]
+
+   2|   readonly foo: string, // ERROR
+        ^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------- readonly_variance.js:11:3
+
+While TypeScript uses `readonly` to specify read only properties, Flow uses `+` in the form `+foo: T` for class and
+object type properties, and `+[string]: T` for dictionaries. [ts-syntax]
+
+   11|   readonly [string]: mixed; // ERROR
+         ^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------- readonly_variance.js:15:3
+
+While TypeScript uses `readonly` to specify read only properties, Flow uses `+` in the form `+foo: T` for class and
+object type properties, and `+[string]: T` for dictionaries. [ts-syntax]
+
+   15|   readonly prop: string; // ERROR
+         ^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------- readonly_variance.js:19:3
+
+While TypeScript uses `readonly` to specify read only properties, Flow uses `+` in the form `+foo: T` for class and
+object type properties, and `+[string]: T` for dictionaries. [ts-syntax]
+
+   19|   readonly prop: string; // ERROR
+         ^^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------- satisfies.js:4:1
+
+The closest equivalent of TypeScript's `satisfies` cast in Flow has the form `(<expr>: <type>)` - using a colon and
+wrapped in parentheses. [ts-syntax]
+
+   4| m satisfies T; // ERROR
+      ^^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------- type_param_extends.js:1:8
+
+While TypeScript uses `extends` to specify type parameter bounds, Flow uses `:` in the form `type T<A: B> = ...`.
+[ts-syntax]
+
+   1| type A<T extends string> = [T];
+             ^^^^^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------- type_param_extends.js:2:8
+
+While TypeScript uses `extends` to specify type parameter bounds, Flow uses `:` in the form `type T<A: B> = ...`.
+[ts-syntax]
+
+   2| type B<+T extends string> = [T];
+             ^^^^^^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------- type_param_extends.js:3:8
+
+While TypeScript uses `extends` to specify type parameter bounds, Flow uses `:` in the form `type T<A: B> = ...`.
+[ts-syntax]
+
+   3| type C<T extends string = "hi"> = [T];
+             ^^^^^^^^^^^^^^^^^^^^^^^
+
+
+Error ---------------------------------------------------------------------------------------- type_param_extends.js:4:8
+
+While TypeScript uses `extends` to specify type parameter bounds, Flow uses `:` in the form `type T<A: B> = ...`.
+[ts-syntax]
+
+   4| type D<+T extends string = "hi"> = [T];
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+Error ------------------------------------------------------------------------------------------------ undefined.js:1:10
+
+The equivalent of TypeScript's `undefined` type in Flow is `void`. Flow does not have separate `void` and `undefined`
+types. [ts-syntax]
+
+   1| type T = undefined; // ERROR
+               ^^^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unknown.js:1:10
+
+The equivalent of TypeScript's `unknown` type in Flow is `mixed`. [ts-syntax]
+
+   1| type T = unknown; // ERROR
+               ^^^^^^^
+
+
+Error -------------------------------------------------------------------------------------------------- unknown.js:3:10
+
+The equivalent of TypeScript's `unknown` type in Flow is `mixed`. [ts-syntax]
+
+   3| const x: unknown = 1; // ERROR
+               ^^^^^^^
+
+
+
+Found 32 errors

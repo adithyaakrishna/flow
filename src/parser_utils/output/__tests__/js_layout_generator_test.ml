@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -1515,6 +1515,10 @@ let tests =
            assert_statement_string ~ctxt ~pretty:true "class a {\n  @a\n  @b\n  a() {}\n}";
            assert_statement_string ~ctxt "class a{*b(){}}"
          );
+         ( "class_private_methods" >:: fun ctxt ->
+           assert_statement_string ~ctxt "class a{#a(){}}";
+           assert_statement_string ~ctxt "class a{static #a(){}}"
+         );
          ( "class_properties" >:: fun ctxt ->
            assert_statement_string ~ctxt "class a{a;}";
            assert_statement_string ~ctxt "class a{a:a;}";
@@ -1784,6 +1788,22 @@ let tests =
            assert_output ~ctxt "for(a of b);" layout;
            assert_output ~ctxt ~pretty:true "for (a of b);" layout
          );
+         ( "forof_space" >:: fun ctxt ->
+           assert_statement_string ~ctxt "for(let x of y);";
+           assert_statement_string ~ctxt ~pretty:true "for (let x of y);";
+
+           assert_statement_string ~ctxt "for(let x of[]);";
+           assert_statement_string ~ctxt ~pretty:true "for (let x of []);";
+
+           assert_statement_string ~ctxt "for(let{x,y}of z);";
+           assert_statement_string ~ctxt ~pretty:true "for (let {x, y} of z);"
+         );
+         ( "forof_async" >:: fun ctxt ->
+           (* the parens are required *)
+           assert_statement_string ~ctxt "for((async)of y);";
+           assert_statement_string ~ctxt ~pretty:true "for ((async) of y);";
+           assert_statement_string ~ctxt ~pretty:true "for ((/* needs parens */ async) of y);"
+         );
          ( "yield_expressions" >:: fun ctxt ->
            assert_expression_string ~ctxt "function* f(){yield}";
            assert_expression_string ~ctxt "function* f(){yield a}";
@@ -1893,7 +1913,7 @@ let tests =
          );
          ( "type_cast_expression" >:: fun ctxt ->
            let layout =
-             Js_layout_generator.expression ~opts (E.typecast (E.identifier "a") Types.mixed)
+             Js_layout_generator.expression ~opts (E.typecast (E.identifier "a") (Types.mixed ()))
            in
            assert_layout
              ~ctxt
@@ -1914,13 +1934,27 @@ let tests =
 
            let a80 = String.make 80 'a' in
            let layout =
-             Js_layout_generator.expression ~opts (E.typecast (E.identifier a80) Types.mixed)
+             Js_layout_generator.expression ~opts (E.typecast (E.identifier a80) (Types.mixed ()))
            in
            assert_output ~ctxt ("(" ^ a80 ^ ":mixed)") layout;
            assert_output ~ctxt ~pretty:true ("(" ^ a80 ^ ": mixed)") layout;
            assert_statement_string ~ctxt ~pretty:true "var a = (b: mixed);";
            (* Arrow function with type params is wrapped in parens *)
            assert_expression_string ~ctxt "((<A>()=>B):C)"
+         );
+         ( "readonly_variance" >:: fun ctxt ->
+           assert_statement_string ~ctxt "type a={readonly foo:string};";
+           assert_statement_string ~ctxt "type a={readonly [string]:mixed};"
+         );
+         ( "in_out_variance" >:: fun ctxt ->
+           assert_statement_string ~ctxt "type T<in A>=A;";
+           assert_statement_string ~ctxt "type T<out A>=A;";
+           assert_statement_string ~ctxt "type T<in out A>=A;"
+         );
+         ( "ts_type_cast_expression" >:: fun ctxt ->
+           assert_expression_string ~ctxt "a as T";
+           assert_expression_string ~ctxt "a satisfies T";
+           assert_expression_string ~ctxt "a as const"
          );
          ( "type_parameter" >:: fun ctxt ->
            assert_statement_string ~ctxt "type a<a>=a;";
@@ -1938,9 +1972,17 @@ let tests =
            assert_statement_string
              ~ctxt
              ~pretty:true
-             ("type a<\n  a,\n  b,\n> = " ^ String.make 80 'a' ^ ";")
+             ("type a<\n  a,\n  b,\n> = " ^ String.make 80 'a' ^ ";");
+           assert_statement_string ~ctxt "type a<a extends b>=a;";
+           assert_statement_string ~ctxt "type a<+a extends b>=a;";
+           assert_statement_string ~ctxt "type a<a extends b=c>=a;";
+           assert_statement_string ~ctxt "type a<+a extends b=c>=a;"
          );
          ( "type" >:: fun ctxt ->
+           assert_output ~ctxt "mixed" (Js_layout_generator.type_ ~opts (Ast_builder.Types.mixed ()));
+           assert_output ~ctxt "empty" (Js_layout_generator.type_ ~opts (Ast_builder.Types.empty ()));
+           assert_output ~ctxt "void" (Js_layout_generator.type_ ~opts (Ast_builder.Types.void ()));
+           assert_statement_string ~ctxt "type a=mixed;";
            assert_statement_string ~ctxt "type a=any;";
            assert_statement_string ~ctxt "type a=mixed;";
            assert_statement_string ~ctxt "type a=empty;";
@@ -1972,7 +2014,13 @@ let tests =
            assert_statement_string ~ctxt "type a=*;";
            assert_statement_string ~ctxt "type a='';";
            assert_statement_string ~ctxt "type a=1;";
-           assert_statement_string ~ctxt "type a=true;"
+           assert_statement_string ~ctxt "type a=true;";
+           assert_statement_string ~ctxt "type a=unknown;";
+           assert_statement_string ~ctxt "type a=never;";
+           assert_statement_string ~ctxt "type a=undefined;";
+           assert_statement_string ~ctxt "type a=keyof O;";
+           assert_statement_string ~ctxt "type a=readonly T;";
+           assert_statement_string ~ctxt "type a=readonly [string,number];"
          );
          ( "type_function" >:: fun ctxt ->
            assert_statement_string ~ctxt "type a=()=>c;";
@@ -2051,6 +2099,25 @@ let tests =
            assert_statement_string ~ctxt ~pretty:true "type T = {\n  // foo\n  ...\n};";
            assert_statement_string ~ctxt ~pretty:true "type T = {\n  /* foo */\n  ...\n};"
          );
+         ( "type_tuple" >:: fun ctxt ->
+           assert_statement_string ~ctxt "type T=[];";
+           assert_statement_string ~ctxt ~pretty:true "type T = [];";
+           assert_statement_string ~ctxt "type T=[string,number];";
+           assert_statement_string ~ctxt ~pretty:true "type T = [string, number];";
+           assert_statement_string ~ctxt "type T=[foo:string,bar:number];";
+           assert_statement_string ~ctxt ~pretty:true "type T = [foo: string, bar: number];";
+           assert_statement_string ~ctxt "type T=[+foo:string,-bar:number];";
+           assert_statement_string ~ctxt ~pretty:true "type T = [+foo: string, -bar: number];";
+           assert_statement_string ~ctxt "type T=[foo?:string,+bar?:number,-baz?:boolean];";
+           assert_statement_string
+             ~ctxt
+             ~pretty:true
+             "type T = [foo?: string, +bar?: number, -baz?: boolean];";
+           assert_statement_string ~ctxt "type T=[...S];";
+           assert_statement_string ~ctxt ~pretty:true "type T = [...S];";
+           assert_statement_string ~ctxt "type T=[...bar:S];";
+           assert_statement_string ~ctxt ~pretty:true "type T = [...bar: S];"
+         );
          ( "type_union_or_intersection" >:: fun ctxt ->
            assert_statement_string ~ctxt "type a=a|b;";
            assert_statement_string ~ctxt "type a=a|b|c;";
@@ -2095,6 +2162,10 @@ let tests =
              ~pretty:true
              ("declare class a {\n  static a: b,\n  static d(): " ^ String.make 80 'c' ^ ",\n}")
          );
+         ( "declare_enum_statements" >:: fun ctxt ->
+           assert_statement_string ~ctxt "declare enum E{A,}";
+           assert_statement_string ~ctxt ~pretty:true "declare enum E {\n  A,\n}"
+         );
          ( "declare_function_statements" >:: fun ctxt ->
            assert_statement_string ~ctxt "declare function a():b;";
            assert_statement_string ~ctxt ~pretty:true "declare function a(): b;";
@@ -2118,6 +2189,7 @@ let tests =
            assert_statement_string ~ctxt "declare export default function a():a;";
            assert_statement_string ~ctxt "declare export class a{}";
            assert_statement_string ~ctxt "declare export default class a{}";
+           assert_statement_string ~ctxt "declare export enum E{A,}";
            assert_statement_string ~ctxt "declare export{}";
            assert_statement_string ~ctxt "declare export{a,b}";
            assert_statement_string ~ctxt "declare export{a,b}from\"a\"";
@@ -2570,14 +2642,12 @@ let tests =
                     (I.identifier "E")
                     (symbol_body
                        ~comments:
-                         Flow_ast.Syntax.
-                           {
-                             leading = [];
-                             trailing = [];
-                             internal =
-                               [Ast_builder.Comments.line ~on_newline:true " internal comment"];
-                           }
-                         
+                         {
+                           Flow_ast.Syntax.leading = [];
+                           trailing = [];
+                           internal =
+                             [Ast_builder.Comments.line ~on_newline:true " internal comment"];
+                         }
                        [defaulted_member (I.identifier "A"); defaulted_member (I.identifier "B")]
                     )
              in

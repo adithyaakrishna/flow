@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -9,7 +9,6 @@ module Ast = Flow_ast
 open Token
 open Parser_env
 open Flow_ast
-module SSet = Flow_set.Make (String)
 open Parser_common
 open Comment_attachment
 
@@ -76,6 +75,8 @@ module Statement
     (Declaration : Declaration_parser.DECLARATION)
     (Object : Object_parser.OBJECT)
     (Pattern_cover : Pattern_cover.COVER) : STATEMENT = struct
+  module Enum = Enum_parser.Enum (Parse)
+
   type for_lhs =
     | For_expression of pattern_cover
     | For_declaration of (Loc.t * (Loc.t, Loc.t) Ast.Statement.VariableDeclaration.t)
@@ -102,40 +103,6 @@ module Statement
       | _ -> ()
     );
     func
-
-  (* https://tc39.es/ecma262/#sec-exports-static-semantics-early-errors *)
-  let assert_identifier_name_is_identifier
-      ?restricted_error env (loc, { Ast.Identifier.name; comments = _ }) =
-    match name with
-    | "let" ->
-      (* "let" is disallowed as an identifier in a few situations. 11.6.2.1
-         lists them out. It is always disallowed in strict mode *)
-      if in_strict_mode env then
-        strict_error_at env (loc, Parse_error.StrictReservedWord)
-      else if no_let env then
-        error_at env (loc, Parse_error.Unexpected (Token.quote_token_value name))
-    | "await" ->
-      (* `allow_await` means that `await` is allowed to be a keyword,
-         which makes it illegal to use as an identifier.
-         https://tc39.github.io/ecma262/#sec-identifiers-static-semantics-early-errors *)
-      if allow_await env then error_at env (loc, Parse_error.UnexpectedReserved)
-    | "yield" ->
-      (* `allow_yield` means that `yield` is allowed to be a keyword,
-         which makes it illegal to use as an identifier.
-         https://tc39.github.io/ecma262/#sec-identifiers-static-semantics-early-errors *)
-      if allow_yield env then
-        error_at env (loc, Parse_error.UnexpectedReserved)
-      else
-        strict_error_at env (loc, Parse_error.StrictReservedWord)
-    | _ when is_strict_reserved name -> strict_error_at env (loc, Parse_error.StrictReservedWord)
-    | _ when is_reserved name ->
-      error_at env (loc, Parse_error.Unexpected (Token.quote_token_value name))
-    | _ ->
-      begin
-        match restricted_error with
-        | Some err when is_restricted name -> strict_error_at env (loc, err)
-        | _ -> ()
-      end
 
   let string_literal env (loc, value, raw, octal) =
     if octal then strict_error env Parse_error.StrictOctalLiteral;
@@ -367,11 +334,16 @@ module Statement
         let leading = leading @ Peek.comments env in
         Expect.token env T_LPAREN;
         let comments = Flow_ast_utils.mk_comments_opt ~leading () in
+        let init_starts_with_async =
+          match Peek.token env with
+          | T_ASYNC -> true
+          | _ -> false
+        in
         let (init, errs) =
           let env = env |> with_no_in true in
           match Peek.token env with
           | T_SEMICOLON -> (None, [])
-          | T_LET ->
+          | T_LET when Peek.ith_token env ~i:1 <> T_IN ->
             let (loc, (declarations, leading, errs)) = with_loc Declaration.let_ env in
             ( Some
                 (For_declaration
@@ -414,25 +386,42 @@ module Statement
               errs
             )
           | _ ->
-            let expr = Parse.expression_or_pattern (env |> with_no_let true) in
+            let expr = Parse.expression_or_pattern env in
             (Some (For_expression expr), [])
         in
         match Peek.token env with
-        (* If `async` is true, this must be a for-await-of loop. *)
-        | t when t = T_OF || async ->
+        | T_OF ->
+          (* This is a for of loop *)
           let left =
-            let open Statement in
             match init with
             | Some (For_declaration decl) ->
               assert_can_be_forin_or_forof env Parse_error.InvalidLHSInForOf decl;
-              ForOf.LeftDeclaration decl
+              Statement.ForOf.LeftDeclaration decl
             | Some (For_expression expr) ->
               (* #sec-for-in-and-for-of-statements-static-semantics-early-errors *)
               let patt = Pattern_cover.as_pattern ~err:Parse_error.InvalidLHSInForOf env expr in
-              ForOf.LeftPattern patt
+              (match ((not async) && init_starts_with_async, patt) with
+              | ( true,
+                  ( _,
+                    Pattern.Identifier
+                      {
+                        Pattern.Identifier.name =
+                          (id_loc, { Identifier.name = "async"; comments = _ });
+                        annot = _;
+                        optional = _;
+                      }
+                  )
+                ) ->
+                (* #prod-nLtPS4oB - `for (async of ...)` is forbidden because it is
+                   ambiguous whether it's a for-of with an `async` identifier, or a
+                   regular for loop with an async arrow function with a param named
+                   `of`. We can backtrack, so we know it's a for-of, but the spec
+                   still disallows it. *)
+                error_at env (id_loc, Parse_error.InvalidLHSInForOf)
+              | _ -> ());
+              Statement.ForOf.LeftPattern patt
             | None -> assert false
           in
-          (* This is a for of loop *)
           Expect.token env T_OF;
           let right = Parse.assignment env in
           Expect.token env T_RPAREN;
@@ -440,6 +429,7 @@ module Statement
           assert_not_labelled_function env body;
           Statement.ForOf { Statement.ForOf.left; right; body; await = async; comments }
         | T_IN ->
+          (* This is a for in loop *)
           let left =
             match init with
             | Some (For_declaration decl) ->
@@ -451,8 +441,12 @@ module Statement
               Statement.ForIn.LeftPattern patt
             | None -> assert false
           in
-          (* This is a for in loop *)
-          Expect.token env T_IN;
+          if async then
+            (* If `async` is true, this should have been a for-await-of loop, but we
+               recover by trying to parse like a for-in loop. *)
+            Expect.token env T_OF
+          else
+            Expect.token env T_IN;
           let right = Parse.expression env in
           Expect.token env T_RPAREN;
           let body = Parse.statement (env |> with_in_loop true) in
@@ -461,7 +455,12 @@ module Statement
         | _ ->
           (* This is a for loop *)
           errs |> List.iter (error_at env);
-          Expect.token env T_SEMICOLON;
+          if async then
+            (* If `async` is true, this should have been a for-await-of loop, but we
+               recover by trying to parse like a normal loop. *)
+            Expect.token env T_OF
+          else
+            Expect.token env T_SEMICOLON;
           let init =
             match init with
             | Some (For_declaration decl) -> Some (Statement.For.InitDeclaration decl)
@@ -542,6 +541,7 @@ module Statement
     with_loc (fun env ->
         if not (in_function env) then error env Parse_error.IllegalReturn;
         let leading = Peek.comments env in
+        let start_loc = Peek.loc env in
         Expect.token env T_RETURN;
         let trailing =
           if Peek.token env = T_SEMICOLON then
@@ -555,6 +555,7 @@ module Statement
           else
             Some (Parse.expression env)
         in
+        let return_out = Loc.btwn start_loc (Peek.loc env) in
         let (trailing, argument) =
           match (semicolon env, argument) with
           | (Explicit comments, _)
@@ -566,55 +567,48 @@ module Statement
         Statement.Return
           {
             Statement.Return.argument;
+            return_out;
             comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
           }
     )
 
   and switch =
+    let case ~seen_default env =
+      let leading = Peek.comments env in
+      let (test, trailing) =
+        match Peek.token env with
+        | T_DEFAULT ->
+          if seen_default then error env Parse_error.MultipleDefaultsInSwitch;
+          Expect.token env T_DEFAULT;
+          (None, Eat.trailing_comments env)
+        | _ ->
+          Expect.token env T_CASE;
+          (Some (Parse.expression env), [])
+      in
+      let seen_default = seen_default || test = None in
+      Expect.token env T_COLON;
+      let { trailing = line_end_trailing; _ } = statement_end_trailing_comments env in
+      let trailing = trailing @ line_end_trailing in
+      let term_fn = function
+        | T_RCURLY
+        | T_DEFAULT
+        | T_CASE ->
+          true
+        | _ -> false
+      in
+      let consequent = Parse.statement_list ~term_fn (env |> with_in_switch true) in
+      let comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () in
+      let case = { Statement.Switch.Case.test; consequent; comments } in
+      (case, seen_default)
+    in
     let rec case_list env (seen_default, acc) =
       match Peek.token env with
       | T_EOF
       | T_RCURLY ->
         List.rev acc
       | _ ->
-        let start_loc = Peek.loc env in
-        let leading = Peek.comments env in
-        let (test, trailing) =
-          match Peek.token env with
-          | T_DEFAULT ->
-            if seen_default then error env Parse_error.MultipleDefaultsInSwitch;
-            Expect.token env T_DEFAULT;
-            (None, Eat.trailing_comments env)
-          | _ ->
-            Expect.token env T_CASE;
-            (Some (Parse.expression env), [])
-        in
-        let seen_default = seen_default || test = None in
-        let end_loc = Peek.loc env in
-        Expect.token env T_COLON;
-        let { trailing = line_end_trailing; _ } = statement_end_trailing_comments env in
-        let trailing = trailing @ line_end_trailing in
-        let term_fn = function
-          | T_RCURLY
-          | T_DEFAULT
-          | T_CASE ->
-            true
-          | _ -> false
-        in
-        let consequent = Parse.statement_list ~term_fn (env |> with_in_switch true) in
-        let end_loc =
-          match List.rev consequent with
-          | last_stmt :: _ -> fst last_stmt
-          | _ -> end_loc
-        in
-        let acc =
-          ( Loc.btwn start_loc end_loc,
-            Statement.Switch.Case.
-              { test; consequent; comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () }
-            
-          )
-          :: acc
-        in
+        let (case_, seen_default) = with_loc_extra (case ~seen_default) env in
+        let acc = case_ :: acc in
         case_list env (seen_default, acc)
     in
     with_loc (fun env ->
@@ -632,6 +626,7 @@ module Statement
             Statement.Switch.discriminant;
             cases;
             comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+            exhaustive_out = fst discriminant;
           }
     )
 
@@ -861,7 +856,13 @@ module Statement
           if allow_directive env then
             match expression with
             | (_, Ast.Expression.Literal { Ast.Literal.value = Ast.Literal.String _; raw; _ }) ->
-              Some (String.sub raw 1 (String.length raw - 2))
+              (* the parser may recover from errors and generate unclosed strings, where
+                 the opening quote should be reliable but the closing one might not exist.
+                 be defensive. *)
+              if String.length raw > 1 && raw.[0] = raw.[String.length raw - 1] then
+                Some (String.sub raw 1 (String.length raw - 2))
+              else
+                None
             | _ -> None
           else
             None
@@ -896,9 +897,13 @@ module Statement
       | Implicit { remove_trailing; _ } ->
         ([], remove_trailing right (fun remover right -> remover#type_ right))
     in
-    Statement.TypeAlias.
-      { id; tparams; right; comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () }
-    
+
+    {
+      Statement.TypeAlias.id;
+      tparams;
+      right;
+      comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+    }
 
   and declare_type_alias env =
     with_loc
@@ -992,15 +997,14 @@ module Statement
       | (Implicit { remove_trailing; _ }, None, None, None) ->
         ([], remove_trailing id (fun remover id -> remover#identifier id), None, None, None)
     in
-    Statement.OpaqueType.
-      {
-        id;
-        tparams;
-        impltype;
-        supertype;
-        comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
-      }
-    
+
+    {
+      Statement.OpaqueType.id;
+      tparams;
+      impltype;
+      supertype;
+      comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+    }
 
   and declare_opaque_type env =
     with_loc
@@ -1041,9 +1045,14 @@ module Statement
     let body =
       remove_trailing body (fun remover (loc, body) -> (loc, remover#object_type loc body))
     in
-    Statement.Interface.
-      { id; tparams; body; extends; comments = Flow_ast_utils.mk_comments_opt ~leading () }
-    
+
+    {
+      Statement.Interface.id;
+      tparams;
+      body;
+      extends;
+      comments = Flow_ast_utils.mk_comments_opt ~leading ();
+    }
 
   and declare_interface env =
     with_loc
@@ -1137,30 +1146,41 @@ module Statement
         Statement.DeclareClass fn)
       env
 
+  and declare_enum env =
+    with_loc
+      (fun env ->
+        let leading = Peek.comments env in
+        Expect.token env T_DECLARE;
+        let enum = Enum.declaration ~leading env in
+        Statement.DeclareEnum enum)
+      env
+
   and declare_function ?(leading = []) env =
     let leading = leading @ Peek.comments env in
     Expect.token env T_FUNCTION;
     let id = id_remove_trailing env (Parse.identifier env) in
-    let start_sig_loc = Peek.loc env in
-    let tparams = type_params_remove_trailing env (Type.type_params env) in
-    let params = Type.function_param_list env in
-    Expect.token env T_COLON;
-    let return =
-      let return = Type._type env in
-      let has_predicate =
-        Eat.push_lex_mode env Lex_mode.TYPE;
-        let type_token = Peek.token env in
-        Eat.pop_lex_mode env;
-        type_token = T_CHECKS
-      in
-      if has_predicate then
-        type_remove_trailing env return
-      else
-        return
+    let annot =
+      with_loc
+        (fun env ->
+          let tparams = type_params_remove_trailing env (Type.type_params env) in
+          let params = Type.function_param_list env in
+          Expect.token env T_COLON;
+          let return =
+            let return = Type._type env in
+            let has_predicate =
+              Eat.push_lex_mode env Lex_mode.TYPE;
+              let type_token = Peek.token env in
+              Eat.pop_lex_mode env;
+              type_token = T_CHECKS
+            in
+            if has_predicate then
+              type_remove_trailing env return
+            else
+              return
+          in
+          Ast.Type.(Function { Function.params; return; tparams; comments = None }))
+        env
     in
-    let end_loc = fst return in
-    let loc = Loc.btwn start_sig_loc end_loc in
-    let annot = (loc, Ast.Type.(Function { Function.params; return; tparams; comments = None })) in
     let predicate = Type.predicate_opt env in
     let (trailing, annot, predicate) =
       match (semicolon env, predicate) with
@@ -1170,10 +1190,14 @@ module Statement
       | (Implicit { remove_trailing; _ }, Some pred) ->
         ([], annot, Some (remove_trailing pred (fun remover pred -> remover#predicate pred)))
     in
-    let annot = (loc, annot) in
-    Statement.DeclareFunction.
-      { id; annot; predicate; comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () }
-    
+    let annot = (fst annot, annot) in
+
+    {
+      Statement.DeclareFunction.id;
+      annot;
+      predicate;
+      comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+    }
 
   and declare_function_statement env =
     with_loc
@@ -1204,9 +1228,12 @@ module Statement
       | Implicit { remove_trailing; _ } ->
         ([], name, remove_trailing annot (fun remover annot -> remover#type_annotation annot))
     in
-    Statement.DeclareVariable.
-      { id = name; annot; comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing () }
-    
+
+    {
+      Statement.DeclareVariable.id = name;
+      annot;
+      comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+    }
 
   and declare_var_statement env =
     with_loc
@@ -1228,7 +1255,7 @@ module Statement
         (* TODO: This is a semantic analysis and shouldn't be in the parser *)
         let module_kind =
           let open Statement in
-          let (loc, stmt) = stmt in
+          let (_loc, stmt) = stmt in
           match (module_kind, stmt) with
           (*
            * The first time we see either a `declare export` or a
@@ -1238,17 +1265,17 @@ module Statement
            * exceptions to this rule because they are valid in both CommonJS
            * and ES modules (and thus do not indicate an intent for either).
            *)
-          | (None, DeclareModuleExports _) -> Some (DeclareModule.CommonJS loc)
+          | (None, DeclareModuleExports _) -> Some DeclareModule.CommonJS
           | (None, DeclareExportDeclaration { DeclareExportDeclaration.declaration; _ }) ->
             (match declaration with
             | Some (DeclareExportDeclaration.NamedType _)
             | Some (DeclareExportDeclaration.Interface _) ->
               module_kind
-            | _ -> Some (DeclareModule.ES loc))
+            | _ -> Some DeclareModule.ES)
           (*
            * There should never be more than one `declare module.exports`
            * statement *)
-          | (Some (DeclareModule.CommonJS _), DeclareModuleExports _) ->
+          | (Some DeclareModule.CommonJS, DeclareModuleExports _) ->
             error env Parse_error.DuplicateDeclareModuleExports;
             module_kind
           (*
@@ -1259,10 +1286,10 @@ module Statement
            * The 1 exception to this rule is that `export type/interface` are
            * both ok in CommonJS modules.
            *)
-          | (Some (DeclareModule.ES _), DeclareModuleExports _) ->
+          | (Some DeclareModule.ES, DeclareModuleExports _) ->
             error env Parse_error.AmbiguousDeclareModuleKind;
             module_kind
-          | ( Some (DeclareModule.CommonJS _),
+          | ( Some DeclareModule.CommonJS,
               DeclareExportDeclaration { DeclareExportDeclaration.declaration; _ }
             ) ->
             (match declaration with
@@ -1275,7 +1302,7 @@ module Statement
         in
         module_items env ~module_kind (stmt :: acc)
     in
-    let declare_module_ env start_loc leading =
+    let declare_module_ ~leading env =
       let id =
         match Peek.token env with
         | T_STRING str ->
@@ -1283,8 +1310,8 @@ module Statement
             (string_literal_remove_trailing env (string_literal env str))
         | _ -> Statement.DeclareModule.Identifier (id_remove_trailing env (Parse.identifier env))
       in
-      let (body_loc, ((module_kind, body), comments)) =
-        with_loc
+      let (body, module_kind) =
+        with_loc_extra
           (fun env ->
             let leading = Peek.comments env in
             Expect.token env T_LCURLY;
@@ -1297,32 +1324,31 @@ module Statement
             in
             Expect.token env T_RCURLY;
             let { trailing; _ } = statement_end_trailing_comments env in
-            ( (module_kind, body),
+            let comments =
               Flow_ast_utils.mk_comments_with_internal_opt ~leading ~trailing ~internal ()
-            ))
+            in
+            let body = { Statement.Block.body; comments } in
+            (body, module_kind))
           env
       in
-      let body = (body_loc, { Statement.Block.body; comments }) in
-      let loc = Loc.btwn start_loc body_loc in
       let kind =
         match module_kind with
         | Some k -> k
-        | None -> Statement.DeclareModule.CommonJS loc
+        | None -> Statement.DeclareModule.CommonJS
       in
       let comments = Flow_ast_utils.mk_comments_opt ~leading () in
-      (loc, Statement.(DeclareModule DeclareModule.{ id; body; kind; comments }))
+      Statement.(DeclareModule DeclareModule.{ id; body; kind; comments })
     in
-    fun ?(in_module = false) env ->
+    fun ~in_module env ->
       let start_loc = Peek.loc env in
       let leading = Peek.comments env in
       Expect.token env T_DECLARE;
       let leading = leading @ Peek.comments env in
       Expect.identifier env "module";
       if in_module || Peek.token env = T_PERIOD then
-        let (loc, exports) = with_loc (declare_module_exports ~leading) env in
-        (Loc.btwn start_loc loc, exports)
+        with_loc ~start_loc (declare_module_exports ~leading) env
       else
-        declare_module_ env start_loc leading
+        with_loc ~start_loc (declare_module_ ~leading) env
 
   and declare_module_exports ~leading env =
     let leading_period = Peek.comments env in
@@ -1347,6 +1373,7 @@ module Statement
     (* eventually, just emit a wrapper AST node *)
     match Peek.ith_token ~i:1 env with
     | T_CLASS -> declare_class_statement env
+    | T_ENUM when (parse_options env).enums -> declare_enum env
     | T_INTERFACE -> declare_interface env
     | T_TYPE ->
       (match Peek.token env with
@@ -1394,36 +1421,6 @@ module Statement
         []
       )
 
-  and extract_pattern_binding_names =
-    let rec fold acc =
-      let open Pattern in
-      function
-      | (_, Object { Object.properties; _ }) ->
-        List.fold_left
-          (fun acc prop ->
-            match prop with
-            | Object.Property (_, { Object.Property.pattern; _ })
-            | Object.RestElement (_, { RestElement.argument = pattern; comments = _ }) ->
-              fold acc pattern)
-          acc
-          properties
-      | (_, Array { Array.elements; _ }) ->
-        List.fold_left
-          (fun acc elem ->
-            match elem with
-            | Array.Element (_, { Array.Element.argument = pattern; default = _ })
-            | Array.RestElement (_, { RestElement.argument = pattern; comments = _ }) ->
-              fold acc pattern
-            | Array.Hole _ -> acc)
-          acc
-          elements
-      | (_, Identifier { Pattern.Identifier.name; _ }) -> name :: acc
-      | (_, Expression _) -> failwith "Parser error: No such thing as an expression pattern!"
-    in
-    List.fold_left fold
-
-  and extract_ident_name (_, { Identifier.name; comments = _ }) = name
-
   and export_specifiers ?(preceding_comma = true) env specifiers =
     match Peek.token env with
     | T_EOF
@@ -1439,12 +1436,8 @@ module Statement
               match Peek.token env with
               | T_IDENTIFIER { raw = "as"; _ } ->
                 Eat.token env;
-                let exported = identifier_name env in
-                record_export env exported;
-                Some exported
-              | _ ->
-                record_export env local;
-                None
+                Some (identifier_name env)
+              | _ -> None
             in
             { Statement.ExportNamedDeclaration.ExportSpecifier.local; exported })
           env
@@ -1453,231 +1446,234 @@ module Statement
       export_specifiers ~preceding_comma env (specifier :: specifiers)
 
   and assert_export_specifier_identifiers env specifiers =
-    Statement.ExportNamedDeclaration.ExportSpecifier.(
-      List.iter
-        (function
-          | (_, { local = id; exported = None }) ->
-            assert_identifier_name_is_identifier ~restricted_error:Parse_error.StrictVarName env id
-          | _ -> ())
-        specifiers
-    )
+    List.iter
+      (function
+        | (_, { Statement.ExportNamedDeclaration.ExportSpecifier.local = id; exported = _ }) ->
+          assert_identifier_name_is_identifier ~restricted_error:Parse_error.StrictVarName env id)
+      specifiers
 
-  and export_declaration ~decorators =
-    with_loc (fun env ->
-        let env = env |> with_strict true |> with_in_export true in
-        let start_loc = Peek.loc env in
-        let leading = Peek.comments env in
-        Expect.token env T_EXPORT;
-        match Peek.token env with
-        | T_DEFAULT ->
-          (* export default ... *)
-          Statement.ExportDefaultDeclaration.(
-            let leading = leading @ Peek.comments env in
-            let (default, ()) = with_loc (fun env -> Expect.token env T_DEFAULT) env in
-            record_export
-              env
-              (Flow_ast_utils.ident_of_source (Loc.btwn start_loc (Peek.loc env), "default"));
-            let (declaration, trailing) =
-              if Peek.is_function env then
-                (* export default [async] function [foo] (...) { ... } *)
-                let fn = Declaration._function env in
-                (Declaration fn, [])
-              else if Peek.is_class env then
-                (* export default class foo { ... } *)
-                let _class = Object.class_declaration env decorators in
-                (Declaration _class, [])
-              else if Peek.token env = T_ENUM then
-                (* export default enum foo { ... } *)
-                (Declaration (Declaration.enum_declaration env), [])
-              else
-                (* export default [assignment expression]; *)
-                let expr = Parse.assignment env in
-                let (expr, trailing) =
-                  match semicolon env with
-                  | Explicit trailing -> (expr, trailing)
-                  | Implicit { remove_trailing; _ } ->
-                    (remove_trailing expr (fun remover expr -> remover#expression expr), [])
-                in
-                (Expression expr, trailing)
-            in
-            Statement.ExportDefaultDeclaration
-              {
-                default;
-                declaration;
-                comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
-              }
-          )
-        | T_TYPE when Peek.ith_token ~i:1 env <> T_LCURLY ->
-          (* export type ... *)
-          Statement.ExportNamedDeclaration.(
-            if not (should_parse_types env) then error env Parse_error.UnexpectedTypeExport;
-            (match Peek.ith_token ~i:1 env with
-            | T_MULT ->
-              Expect.token env T_TYPE;
-              let specifier_loc = Peek.loc env in
-              Expect.token env T_MULT;
-              let (source, trailing) = export_source_and_semicolon env in
-              Statement.ExportNamedDeclaration
-                {
-                  declaration = None;
-                  specifiers = Some (ExportBatchSpecifier (specifier_loc, None));
-                  source = Some source;
-                  export_kind = Statement.ExportType;
-                  comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
-                }
-            | T_ENUM ->
-              error env Parse_error.EnumInvalidExport;
-              Expect.token env T_TYPE;
-              Statement.ExportNamedDeclaration
-                {
-                  declaration = None;
-                  specifiers = None;
-                  source = None;
-                  export_kind = Statement.ExportType;
-                  comments = Flow_ast_utils.mk_comments_opt ~leading ();
-                }
-            | _ ->
-              let (loc, type_alias) = with_loc (type_alias_helper ~leading:[]) env in
-              record_export
-                env
-                (Flow_ast_utils.ident_of_source
-                   (loc, extract_ident_name type_alias.Statement.TypeAlias.id)
-                );
-              let type_alias = (loc, Statement.TypeAlias type_alias) in
-              Statement.ExportNamedDeclaration
-                {
-                  declaration = Some type_alias;
-                  specifiers = None;
-                  source = None;
-                  export_kind = Statement.ExportType;
-                  comments = Flow_ast_utils.mk_comments_opt ~leading ();
-                })
-          )
-        | T_OPAQUE ->
-          (* export opaque type ... *)
-          Statement.ExportNamedDeclaration.(
-            let (loc, opaque_t) = with_loc (opaque_type_helper ~leading:[]) env in
-            record_export
-              env
-              (Flow_ast_utils.ident_of_source
-                 (loc, extract_ident_name opaque_t.Statement.OpaqueType.id)
-              );
-            let opaque_t = (loc, Statement.OpaqueType opaque_t) in
-            Statement.ExportNamedDeclaration
-              {
-                declaration = Some opaque_t;
-                specifiers = None;
-                source = None;
-                export_kind = Statement.ExportType;
-                comments = Flow_ast_utils.mk_comments_opt ~leading ();
-              }
-          )
-        | T_INTERFACE ->
-          (* export interface I { ... } *)
-          Statement.ExportNamedDeclaration.(
-            if not (should_parse_types env) then error env Parse_error.UnexpectedTypeExport;
-            let interface = interface env in
-            (match interface with
-            | (loc, Statement.InterfaceDeclaration { Statement.Interface.id; _ }) ->
-              record_export env (Flow_ast_utils.ident_of_source (loc, extract_ident_name id))
-            | _ ->
-              failwith
-                ("Internal Flow Error! Parsed `export interface` into something "
-                ^ "other than an interface declaration!"
-                ));
-            Statement.ExportNamedDeclaration
-              {
-                declaration = Some interface;
-                specifiers = None;
-                source = None;
-                export_kind = Statement.ExportType;
-                comments = Flow_ast_utils.mk_comments_opt ~leading ();
-              }
-          )
-        | T_LET
-        | T_CONST
-        | T_VAR
-        (* not using Peek.is_class here because it would guard all of the
-         * cases *)
-        | T_AT
-        | T_CLASS
-        (* not using Peek.is_function here because it would guard all of the
-         * cases *)
-        | T_ASYNC
-        | T_FUNCTION
-        | T_ENUM ->
-          Statement.ExportNamedDeclaration.(
-            let stmt = Parse.statement_list_item env ~decorators in
-            let names =
-              let open Statement in
-              match stmt with
-              | (_, VariableDeclaration { VariableDeclaration.declarations; _ }) ->
-                List.fold_left
-                  (fun names (_, declaration) ->
-                    let id = declaration.VariableDeclaration.Declarator.id in
-                    extract_pattern_binding_names names [id])
-                  []
-                  declarations
-              | (loc, ClassDeclaration { Class.id = Some id; _ })
-              | (loc, FunctionDeclaration { Function.id = Some id; _ })
-              | (loc, EnumDeclaration { EnumDeclaration.id; _ }) ->
-                [Flow_ast_utils.ident_of_source (loc, extract_ident_name id)]
-              | (loc, ClassDeclaration { Class.id = None; _ }) ->
-                error_at env (loc, Parse_error.ExportNamelessClass);
-                []
-              | (loc, FunctionDeclaration { Function.id = None; _ }) ->
-                error_at env (loc, Parse_error.ExportNamelessFunction);
-                []
-              | _ -> failwith "Internal Flow Error! Unexpected export statement declaration!"
-            in
-            List.iter (record_export env) names;
-            Statement.ExportNamedDeclaration
-              {
-                declaration = Some stmt;
-                specifiers = None;
-                source = None;
-                export_kind = Statement.ExportValue;
-                comments = Flow_ast_utils.mk_comments_opt ~leading ();
-              }
-          )
-        | T_MULT ->
-          Statement.ExportNamedDeclaration.(
-            let loc = Peek.loc env in
+  and export_declaration ~decorators env =
+    let env = env |> with_strict true |> with_in_export true in
+    let leading = Peek.comments env in
+    let start_loc = Peek.loc env in
+    Expect.token env T_EXPORT;
+    match Peek.token env with
+    | T_DEFAULT ->
+      (* export default ... *)
+      with_loc
+        ~start_loc
+        (fun env ->
+          let open Statement.ExportDefaultDeclaration in
+          let leading = leading @ Peek.comments env in
+          let (default, ()) = with_loc (fun env -> Expect.token env T_DEFAULT) env in
+          let env = with_in_export_default true env in
+          let (declaration, trailing) =
+            if Peek.is_function env then
+              (* export default [async] function [foo] (...) { ... } *)
+              let fn = Declaration._function env in
+              (Declaration fn, [])
+            else if Peek.is_class env then
+              (* export default class foo { ... } *)
+              let _class = Object.class_declaration env decorators in
+              (Declaration _class, [])
+            else if Peek.token env = T_ENUM then
+              (* export default enum foo { ... } *)
+              (Declaration (Declaration.enum_declaration env), [])
+            else
+              (* export default [assignment expression]; *)
+              let expr = Parse.assignment env in
+              let (expr, trailing) =
+                match semicolon env with
+                | Explicit trailing -> (expr, trailing)
+                | Implicit { remove_trailing; _ } ->
+                  (remove_trailing expr (fun remover expr -> remover#expression expr), [])
+              in
+              (Expression expr, trailing)
+          in
+          Statement.ExportDefaultDeclaration
+            {
+              default;
+              declaration;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+            })
+        env
+    | T_TYPE when Peek.ith_token ~i:1 env <> T_LCURLY ->
+      (* export type ... *)
+      with_loc
+        ~start_loc
+        (fun env ->
+          let open Statement.ExportNamedDeclaration in
+          if not (should_parse_types env) then error env Parse_error.UnexpectedTypeExport;
+          match Peek.ith_token ~i:1 env with
+          | T_MULT ->
+            Expect.token env T_TYPE;
+            let specifier_loc = Peek.loc env in
             Expect.token env T_MULT;
-            let local_name =
-              let parse_export_star_as = (parse_options env).esproposal_export_star_as in
-              match Peek.token env with
-              | T_IDENTIFIER { raw = "as"; _ } ->
-                Eat.token env;
-                if parse_export_star_as then
-                  Some (Parse.identifier env)
-                else (
-                  error env Parse_error.UnexpectedTypeDeclaration;
-                  None
-                )
-              | _ -> None
-            in
-            let specifiers = Some (ExportBatchSpecifier (loc, local_name)) in
             let (source, trailing) = export_source_and_semicolon env in
             Statement.ExportNamedDeclaration
               {
                 declaration = None;
-                specifiers;
+                specifiers = Some (ExportBatchSpecifier (specifier_loc, None));
                 source = Some source;
-                export_kind = Statement.ExportValue;
+                export_kind = Statement.ExportType;
                 comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
               }
-          )
-        | _ ->
-          Statement.ExportNamedDeclaration.(
-            let export_kind =
-              match Peek.token env with
-              | T_TYPE ->
-                Eat.token env;
-                Statement.ExportType
-              | _ -> Statement.ExportValue
-            in
-            Expect.token env T_LCURLY;
+          | T_ENUM ->
+            error env Parse_error.EnumInvalidExport;
+            Expect.token env T_TYPE;
+            Statement.ExportNamedDeclaration
+              {
+                declaration = None;
+                specifiers = None;
+                source = None;
+                export_kind = Statement.ExportType;
+                comments = Flow_ast_utils.mk_comments_opt ~leading ();
+              }
+          | _ ->
+            let (loc, type_alias) = with_loc (type_alias_helper ~leading:[]) env in
+            let type_alias = (loc, Statement.TypeAlias type_alias) in
+            Statement.ExportNamedDeclaration
+              {
+                declaration = Some type_alias;
+                specifiers = None;
+                source = None;
+                export_kind = Statement.ExportType;
+                comments = Flow_ast_utils.mk_comments_opt ~leading ();
+              })
+        env
+    | T_OPAQUE ->
+      (* export opaque type ... *)
+      with_loc
+        ~start_loc
+        (fun env ->
+          let open Statement.ExportNamedDeclaration in
+          let (loc, opaque_t) = with_loc (opaque_type_helper ~leading:[]) env in
+          let opaque_t = (loc, Statement.OpaqueType opaque_t) in
+          Statement.ExportNamedDeclaration
+            {
+              declaration = Some opaque_t;
+              specifiers = None;
+              source = None;
+              export_kind = Statement.ExportType;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ();
+            })
+        env
+    | T_INTERFACE ->
+      (* export interface I { ... } *)
+      with_loc
+        ~start_loc
+        (fun env ->
+          let open Statement.ExportNamedDeclaration in
+          if not (should_parse_types env) then error env Parse_error.UnexpectedTypeExport;
+          let interface =
+            let (loc, iface) = with_loc (interface_helper ~leading:[]) env in
+            (loc, Statement.InterfaceDeclaration iface)
+          in
+          Statement.ExportNamedDeclaration
+            {
+              declaration = Some interface;
+              specifiers = None;
+              source = None;
+              export_kind = Statement.ExportType;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ();
+            })
+        env
+    | _ when Peek.is_class env ->
+      with_loc
+        ~start_loc
+        (fun env ->
+          let stmt = Object.class_declaration env decorators in
+          Statement.ExportNamedDeclaration
+            {
+              Statement.ExportNamedDeclaration.declaration = Some stmt;
+              specifiers = None;
+              source = None;
+              export_kind = Statement.ExportValue;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ();
+            })
+        env
+    | _ when Peek.is_function env ->
+      with_loc
+        ~start_loc
+        (fun env ->
+          error_on_decorators env decorators;
+          let stmt = Declaration._function env in
+          Statement.ExportNamedDeclaration
+            {
+              Statement.ExportNamedDeclaration.declaration = Some stmt;
+              specifiers = None;
+              source = None;
+              export_kind = Statement.ExportValue;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ();
+            })
+        env
+    | T_LET
+    | T_CONST
+    | T_VAR ->
+      with_loc
+        ~start_loc
+        (fun env ->
+          let stmt = Parse.statement_list_item env ~decorators in
+          Statement.ExportNamedDeclaration
+            {
+              Statement.ExportNamedDeclaration.declaration = Some stmt;
+              specifiers = None;
+              source = None;
+              export_kind = Statement.ExportValue;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ();
+            })
+        env
+    | T_ENUM when (parse_options env).enums ->
+      with_loc
+        ~start_loc
+        (fun env ->
+          let stmt = Parse.statement_list_item env ~decorators in
+          Statement.ExportNamedDeclaration
+            {
+              Statement.ExportNamedDeclaration.declaration = Some stmt;
+              specifiers = None;
+              source = None;
+              export_kind = Statement.ExportValue;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ();
+            })
+        env
+    | T_MULT ->
+      with_loc
+        ~start_loc
+        (fun env ->
+          let open Statement.ExportNamedDeclaration in
+          let loc = Peek.loc env in
+          Expect.token env T_MULT;
+          let local_name =
+            match Peek.token env with
+            | T_IDENTIFIER { raw = "as"; _ } ->
+              Eat.token env;
+              Some (identifier_name env)
+            | _ -> None
+          in
+          let specifiers = Some (ExportBatchSpecifier (loc, local_name)) in
+          let (source, trailing) = export_source_and_semicolon env in
+          Statement.ExportNamedDeclaration
+            {
+              declaration = None;
+              specifiers;
+              source = Some source;
+              export_kind = Statement.ExportValue;
+              comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
+            })
+        env
+    | _ ->
+      let open Statement.ExportNamedDeclaration in
+      let export_kind =
+        if Eat.maybe env T_TYPE then
+          Statement.ExportType
+        else
+          Statement.ExportValue
+      in
+      if Eat.maybe env T_LCURLY then
+        with_loc
+          ~start_loc
+          (fun env ->
             let specifiers = export_specifiers env [] in
             Expect.token env T_RCURLY;
             let (source, trailing) =
@@ -1701,9 +1697,13 @@ module Statement
                 source;
                 export_kind;
                 comments = Flow_ast_utils.mk_comments_opt ~leading ~trailing ();
-              }
-          )
-    )
+              })
+          env
+      else (
+        (* error. recover by ignoring the `export` *)
+        error_unexpected ~expected:"a declaration, statement or export specifiers" env;
+        Parse.statement_list_item env ~decorators
+      )
 
   and declare_export_declaration ?(allow_export_type = false) =
     with_loc (fun env ->
@@ -1719,6 +1719,7 @@ module Statement
             (* declare export default ... *)
             let leading = leading @ Peek.comments env in
             let (default, ()) = with_loc (fun env -> Expect.token env T_DEFAULT) env in
+            let env = with_in_export_default true env in
             let (declaration, trailing) =
               match Peek.token env with
               | T_FUNCTION ->
@@ -1776,17 +1777,11 @@ module Statement
             (* declare export * from 'foo' *)
             let loc = Peek.loc env in
             Expect.token env T_MULT;
-            let parse_export_star_as = (parse_options env).esproposal_export_star_as in
             let local_name =
               match Peek.token env with
               | T_IDENTIFIER { raw = "as"; _ } ->
                 Eat.token env;
-                if parse_export_star_as then
-                  Some (Parse.identifier env)
-                else (
-                  error env Parse_error.UnexpectedTypeDeclaration;
-                  None
-                )
+                Some (Parse.identifier env)
               | _ -> None
             in
             let specifiers =
@@ -1828,6 +1823,18 @@ module Statement
               {
                 default = None;
                 declaration = Some (Interface iface);
+                specifiers = None;
+                source = None;
+                comments;
+              }
+          | T_ENUM when (parse_options env).enums ->
+            (* declare export enum ... *)
+            let enum = with_loc Enum.declaration env in
+            let comments = Flow_ast_utils.mk_comments_opt ~leading () in
+            Statement.DeclareExportDeclaration
+              {
+                default = None;
+                declaration = Some (Enum enum);
                 specifiers = None;
                 source = None;
                 comments;
@@ -1912,18 +1919,17 @@ module Statement
         | T_COMMA
         | T_RCURLY ->
           (identifier env, None)
-        | _ ->
-          begin
-            match (error_if_type, Peek.token env) with
-            | (Some error_if_type, T_TYPE)
-            | (Some error_if_type, T_TYPEOF) ->
-              error env error_if_type;
-              Eat.token env;
+        | _ -> begin
+          match (error_if_type, Peek.token env) with
+          | (Some error_if_type, T_TYPE)
+          | (Some error_if_type, T_TYPEOF) ->
+            error env error_if_type;
+            Eat.token env;
 
-              (* consume `type` or `typeof` *)
-              (Type.type_identifier env, None)
-            | _ -> (identifier env, None)
-          end
+            (* consume `type` or `typeof` *)
+            (Type.type_identifier env, None)
+          | _ -> (identifier env, None)
+        end
         (*
            ImportSpecifier[Type]:
              [~Type] ImportedBinding
@@ -1968,35 +1974,34 @@ module Statement
             assert_identifier_name_is_identifier env remote;
             { remote; local = None; kind = None }
           (* `type as foo` (value named `type`) or `type as,` (type named `as`) *)
-          | T_IDENTIFIER { raw = "as"; _ } ->
-            begin
-              match Peek.ith_token ~i:1 env with
-              | T_EOF
-              | T_RCURLY
-              | T_COMMA ->
-                (* `type as` *)
-                { remote = Type.type_identifier env; local = None; kind }
-              | T_IDENTIFIER { raw = "as"; _ } ->
-                (* `type as as foo` *)
-                let remote = identifier_name env in
-                (* first `as` *)
-                Eat.token env;
+          | T_IDENTIFIER { raw = "as"; _ } -> begin
+            match Peek.ith_token ~i:1 env with
+            | T_EOF
+            | T_RCURLY
+            | T_COMMA ->
+              (* `type as` *)
+              { remote = Type.type_identifier env; local = None; kind }
+            | T_IDENTIFIER { raw = "as"; _ } ->
+              (* `type as as foo` *)
+              let remote = identifier_name env in
+              (* first `as` *)
+              Eat.token env;
 
-                (* second `as` *)
-                let local = Some (Type.type_identifier env) in
-                (* `foo` *)
-                { remote; local; kind }
-              | _ ->
-                (* `type as foo` *)
-                let remote = type_keyword_or_remote in
-                (* `type` becomes a value *)
-                assert_identifier_name_is_identifier env remote;
-                Eat.token env;
+              (* second `as` *)
+              let local = Some (Type.type_identifier env) in
+              (* `foo` *)
+              { remote; local; kind }
+            | _ ->
+              (* `type as foo` *)
+              let remote = type_keyword_or_remote in
+              (* `type` becomes a value *)
+              assert_identifier_name_is_identifier env remote;
+              Eat.token env;
 
-                (* `as` *)
-                let local = Some (Parse.identifier env) in
-                { remote; local; kind = None }
-            end
+              (* `as` *)
+              let local = Some (Parse.identifier env) in
+              { remote; local; kind = None }
+          end
           (* `type x`, or `type x as y` *)
           | _ ->
             let (remote, local) = with_maybe_as ~for_type:true env in
@@ -2147,35 +2152,34 @@ module Statement
               }
           (* `import type [...] from "ModuleName";`
              note that if [...] is missing, we're importing a value named `type`! *)
-          | T_TYPE when should_parse_types env ->
-            begin
-              match Peek.ith_token ~i:1 env with
-              (* `import type, { other, names } from "ModuleName";` *)
-              | T_COMMA
-              (* `import type from "ModuleName";` *)
-              | T_IDENTIFIER { raw = "from"; _ } ->
-                (* Importing the exported value named "type". This is not a type-import.*)
-                with_default ImportValue env leading
-              (* `import type *` is invalid, since the namespace can't be a type *)
-              | T_MULT ->
-                (* consume `type` *)
-                Eat.token env;
+          | T_TYPE when should_parse_types env -> begin
+            match Peek.ith_token ~i:1 env with
+            (* `import type, { other, names } from "ModuleName";` *)
+            | T_COMMA
+            (* `import type from "ModuleName";` *)
+            | T_IDENTIFIER { raw = "from"; _ } ->
+              (* Importing the exported value named "type". This is not a type-import.*)
+              with_default ImportValue env leading
+            (* `import type *` is invalid, since the namespace can't be a type *)
+            | T_MULT ->
+              (* consume `type` *)
+              Eat.token env;
 
-                (* unexpected `*` *)
-                error_unexpected env;
+              (* unexpected `*` *)
+              error_unexpected env;
 
-                with_specifiers ImportType env leading
-              | T_LCURLY ->
-                (* consume `type` *)
-                Eat.token env;
+              with_specifiers ImportType env leading
+            | T_LCURLY ->
+              (* consume `type` *)
+              Eat.token env;
 
-                with_specifiers ImportType env leading
-              | _ ->
-                (* consume `type` *)
-                Eat.token env;
+              with_specifiers ImportType env leading
+            | _ ->
+              (* consume `type` *)
+              Eat.token env;
 
-                with_default ImportType env leading
-            end
+              with_default ImportType env leading
+          end
           (* `import typeof ... from "ModuleName";` *)
           | T_TYPEOF when should_parse_types env ->
             Expect.token env T_TYPEOF;

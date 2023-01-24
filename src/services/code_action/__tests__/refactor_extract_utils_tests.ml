@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,12 +10,7 @@ open Refactor_extract_utils
 open Loc_collections
 
 let parse contents =
-  let (ast, _) =
-    Parser_flow.program
-      ~parse_options:
-        (Some Parser_env.{ default_parse_options with esproposal_class_instance_fields = true })
-      contents
-  in
+  let (ast, _) = Parser_flow.program contents in
   ast
 
 let pretty_print layout =
@@ -25,61 +20,61 @@ let pretty_print layout =
 let stub_metadata ~root ~checked =
   {
     Context.checked (* local *);
-    munge_underscores = false;
-    verbose = None;
+    include_suppressions = false;
     jsx = Options.Jsx_react;
+    munge_underscores = false;
     strict = false;
     strict_local = false;
-    include_suppressions = false;
+    verbose = None;
     (* global *)
     any_propagation = true;
     automatic_require_default = false;
     babel_loose_array_spread = false;
-    max_literal_length = 100;
+    conditional_type = false;
+    cycle_errors = false;
+    cycle_errors_includes = [];
     enable_const_params = false;
     enable_enums = true;
     enable_relay_integration = false;
-    enforce_local_inference_annotations = false;
-    local_inference_annotation_dirs = [];
-    enforce_this_annotations = false;
-    experimental_infer_indexers = false;
     enforce_strict_call_arity = true;
+    inference_mode = Options.ConstrainWrites;
+    inference_mode_lti_includes = [];
     exact_by_default = false;
     facebook_fbs = None;
     facebook_fbt = None;
     facebook_module_interop = false;
     haste_module_ref_prefix = None;
     ignore_non_literal_requires = false;
+    max_literal_length = 100;
     max_trace_depth = 0;
     max_workers = 0;
+    missing_module_generators = [];
+    array_literal_providers = false;
+    array_literal_providers_includes = [];
     react_runtime = Options.ReactRuntimeClassic;
     react_server_component_exts = SSet.empty;
     recursion_limit = 10000;
     relay_integration_excludes = [];
     relay_integration_module_prefix = None;
     relay_integration_module_prefix_includes = [];
-    statement_reorder_checking = Options.Lexical;
     root;
     run_post_inference_implicit_instantiation = false;
+    enable_post_inference_targ_widened_check = false;
+    save_implicit_instantiation_results = false;
     strict_es6_import_export = false;
     strict_es6_import_export_excludes = [];
     strip_root = true;
     suppress_types = SSet.empty;
     trust_mode = Options.NoTrust;
-    type_asserts = false;
-    env_mode = Options.ClassicEnv [];
-    env_mode_constrain_write_dirs = [];
-    cycle_errors = false;
   }
 
 let dummy_filename = File_key.SourceFile ""
 
 let file_sig_of_ast ast =
-  match File_sig.With_Loc.program ~ast ~opts:File_sig.With_Loc.default_opts with
-  | Ok (a, _) -> File_sig.abstractify_locs a
-  | Error _ -> failwith "failed to construct file signature"
+  let (file_sig, _) = File_sig.With_Loc.program ~ast ~opts:File_sig.With_Loc.default_opts in
+  File_sig.abstractify_locs file_sig
 
-let dummy_context =
+let dummy_context () =
   let root = Path.dummy_path in
   let master_cx = Context.empty_master_cx () in
   let () =
@@ -107,6 +102,11 @@ let dummy_context =
     Builtins.set_builtin
       ~flow_t:(fun _ -> ())
       master_cx.Context.builtins
+      (Reason.OrdinaryName "AsyncGenerator")
+      (Type.AnyT (reason, Type.AnyError (Some Type.UnresolvedName)));
+    Builtins.set_builtin
+      ~flow_t:(fun _ -> ())
+      master_cx.Context.builtins
       (Reason.OrdinaryName "Promise")
       (Type.AnyT (reason, Type.AnyError (Some Type.UnresolvedName)));
     Builtins.set_builtin
@@ -123,20 +123,24 @@ let dummy_context =
       ~flow_t:(fun _ -> ())
       master_cx.Context.builtins
       (Reason.OrdinaryName "$AsyncIterable")
+      (Type.AnyT (reason, Type.AnyError (Some Type.UnresolvedName)));
+    Builtins.set_builtin
+      ~flow_t:(fun _ -> ())
+      master_cx.Context.builtins
+      (Reason.OrdinaryName "$Iterable")
       (Type.AnyT (reason, Type.AnyError (Some Type.UnresolvedName)))
   in
   let ccx = Context.make_ccx master_cx in
   let metadata = stub_metadata ~root ~checked:true in
   let aloc_table = lazy (ALoc.empty_table dummy_filename) in
-  let module_ref = Reason.OrdinaryName (Files.module_ref dummy_filename) in
-  Context.make ccx metadata dummy_filename aloc_table module_ref Context.Checking
+  Context.make ccx metadata dummy_filename aloc_table Context.Checking
 
-let typed_ast_of_ast ast =
+let typed_ast_of_ast cx ast =
   let (_, { Flow_ast.Program.all_comments = comments; _ }) = ast in
   let aloc_ast = Ast_loc_utils.loc_to_aloc_mapper#program ast in
   Type_inference_js.infer_ast
     ~lint_severities:LintSettings.empty_severities
-    dummy_context
+    cx
     dummy_filename
     comments
     aloc_ast
@@ -521,7 +525,7 @@ function foo<A>() {
 }
         |}
       in
-      let typed_ast = source |> parse |> typed_ast_of_ast in
+      let typed_ast = source |> parse |> typed_ast_of_ast (dummy_context ()) in
       let extracted_loc = mk_loc (9, 12) (9, 42) in
       let reader = State_reader.create () in
       let actual =
@@ -534,7 +538,8 @@ function foo<A>() {
                ( function_name,
                  body_loc,
                  is_method,
-                 tparams_rev |> List.map (fun { Type.name; _ } -> name)
+                 tparams_rev
+                 |> List.map (fun { Type.name; _ } -> Subst_name.string_of_subst_name name)
                )
            )
       in
@@ -564,7 +569,7 @@ function foo<A>() {
 
 let find_closest_enclosing_class_tests =
   let assert_closest_enclosing_class_scope ~ctxt ?expected source extracted_loc =
-    let typed_ast = source |> parse |> typed_ast_of_ast in
+    let typed_ast = source |> parse |> typed_ast_of_ast (dummy_context ()) in
     let reader = State_reader.create () in
     let actual =
       match
@@ -572,7 +577,11 @@ let find_closest_enclosing_class_tests =
       with
       | None -> None
       | Some { InsertionPointCollectors.class_name; body_loc; tparams_rev } ->
-        Some (class_name, body_loc, tparams_rev |> List.map (fun { Type.name; _ } -> name))
+        Some
+          ( class_name,
+            body_loc,
+            tparams_rev |> List.map (fun { Type.name; _ } -> Subst_name.string_of_subst_name name)
+          )
     in
     let printer = function
       | None -> "None"
@@ -1021,11 +1030,12 @@ let type_synthesizer_tests =
   let reader = State_reader.create () in
   let create_context source locs =
     let ast = parse source in
-    let typed_ast = typed_ast_of_ast ast in
+    let cx = dummy_context () in
+    let typed_ast = typed_ast_of_ast cx ast in
     let file_sig = file_sig_of_ast ast in
     let locs = LocSet.of_list locs in
     TypeSynthesizer.create_synthesizer_context
-      ~full_cx:dummy_context
+      ~full_cx:cx
       ~file:dummy_filename
       ~file_sig
       ~typed_ast

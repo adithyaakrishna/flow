@@ -188,9 +188,8 @@ Cannot cast `x9` to empty because module `./export_named_any` [1] is incompatibl
         ^^
 
 References:
-   main.js:40:1
-   40| import * as x9 from './export_named_any';
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ [1]
+   export_named_any.js
+   ^^^^^^^^^^^^^^^^^^^ [1]
    main.js:41:6
    41| (x9: empty); // error module ~> empty
             ^^^^^ [2]
@@ -257,8 +256,8 @@ Cannot cast `f15()` to empty because `Promise` [1] is incompatible with empty [2
           ^^^^^
 
 References:
-   <BUILTINS>/core.js:1812:15
-   1812| declare class Promise<+R> {
+   <BUILTINS>/core.js:1838:15
+   1838| declare class Promise<+R = mixed> {
                        ^^^^^^^ [1]
    main.js:58:9
      58| (f15(): empty);
@@ -320,6 +319,23 @@ References:
    main.js:73:7
    73| (E17: empty); // error enum ~> empty
              ^^^^^ [2]
+
+
+Error ----------------------------------------------------------------------------------------------------- main.js:74:2
+
+Cannot cast `E17.A` to empty because `E` [1] is incompatible with empty [2]. [incompatible-cast]
+
+   main.js:74:2
+   74| (E17.A: empty); // error enum ~> empty
+        ^^^^^
+
+References:
+   enums.js:3:13
+    3| export enum E {
+                   ^ [1]
+   main.js:74:9
+   74| (E17.A: empty); // error enum ~> empty
+               ^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------------- main.js:75:6
@@ -406,20 +422,20 @@ References:
 
 Error ----------------------------------------------------------------------------------------------------- main.js:85:2
 
-Cannot cast `y19` to object type because undefined [1] is incompatible with number [2] in property `a`.
-[incompatible-cast]
+Cannot cast `y19` to object type because property `a` is missing in object literal [1] but exists in object type [2].
+[prop-missing]
 
    main.js:85:2
    85| (y19: { a: number }); // error undefined ~> number
         ^^^
 
 References:
-   main.js:84:13
-   84| (y19: { a?: number }); // okay
-                   ^^^^^^ [1]
-   main.js:85:12
+   spread.js:10:18
+   10| export const y = { ...t };
+                        ^^^^^^^^ [1]
+   main.js:85:7
    85| (y19: { a: number }); // error undefined ~> number
-                  ^^^^^^ [2]
+             ^^^^^^^^^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------------- main.js:89:2
@@ -798,5 +814,22 @@ References:
                 ^^^^^^ [2]
 
 
+Error ---------------------------------------------------------------------------------------------------- main.js:180:2
 
-Found 50 errors
+Cannot cast `t28` to empty because number [1] is incompatible with empty [2]. [incompatible-cast]
+
+   main.js:180:2
+   180| (t28: empty); // error number (length) ~> empty
+         ^^^
+
+References:
+   main.js:179:18
+   179| declare var t28: T28;
+                         ^^^ [1]
+   main.js:180:7
+   180| (t28: empty); // error number (length) ~> empty
+              ^^^^^ [2]
+
+
+
+Found 52 errors

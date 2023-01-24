@@ -1,21 +1,21 @@
 var x:string = 0;
 var x:number = 1;
 
-function foo(p: bool) {}
+function foo(p: boolean) {}
 
-function sorry(really: bool) {
+function sorry(really: boolean) {
     if (really) {
         var x: number | string = 1337;
     } else {
-        var x: bool = true;
+        var x: boolean = true;
     }
     foo(x);
 }
 
-function foo0(b: bool): number {
-  var x = 0;
+function foo0(b: boolean): number {
+  var x: number | string = 0;
   if (b) {
-    var x = ""; // error: string ~> number
+    x = "";
   }
-  return x;
+  return x;  // error: string ~> number
 }

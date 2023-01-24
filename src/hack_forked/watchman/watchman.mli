@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -23,13 +23,11 @@ type init_settings = {
   expression_terms: Hh_json.json list;  (** See watchman expression terms. *)
   mergebase_with: string;  (** symbolic commit to find changes against *)
   roots: Path.t list;
+  should_track_mergebase: bool;
   subscribe_mode: subscribe_mode;
   subscription_prefix: string;
   sync_timeout: int option;
 }
-
-(** The message's clock. *)
-type clock = string
 
 type pushed_changes =
   (*
@@ -49,18 +47,15 @@ type pushed_changes =
    *)
   | State_enter of string * Hh_json.json option
   | State_leave of string * Hh_json.json option
-  | Changed_merge_base of string * SSet.t * clock
-  | Files_changed of SSet.t
-
-type changes =
-  | Watchman_unavailable
-  | Watchman_pushed of pushed_changes
-
-type mergebase_and_changes = {
-  clock: clock;
-  mergebase: string;
-  changes: SSet.t;
-}
+  | Files_changed of {
+      changes: SSet.t;
+      changed_mergebase: bool option;
+    }
+  | Missed_changes of {
+      prev_mergebase: string;
+      mergebase: string;
+      changes_since_mergebase: SSet.t;
+    }
 
 type failure =
   | Dead
@@ -68,15 +63,13 @@ type failure =
 
 type env
 
-val init : init_settings -> env option Lwt.t
+val init : init_settings -> (env * SSet.t, string) Result.t Lwt.t
 
-val get_mergebase_and_changes : env -> (mergebase_and_changes option, failure) Result.t Lwt.t
+val recover_from_restart : env -> (env * pushed_changes, failure) Result.t Lwt.t
 
 val get_changes : env -> (env * pushed_changes, failure) Result.t Lwt.t
 
 val close : env -> unit Lwt.t
-
-val force_update_clockspec : clock -> env -> unit
 
 (* Expose some things for testing. *)
 module Testing : sig
@@ -87,5 +80,5 @@ module Testing : sig
   val test_settings : init_settings
 
   val transform_asynchronous_get_changes_response :
-    env -> Hh_json.json -> (env * pushed_changes, error_kind) Result.t
+    env -> Hh_json.json -> (env * pushed_changes, error_kind) Result.t Lwt.t
 end

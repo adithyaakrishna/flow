@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -24,7 +24,7 @@ type ('M, 'T) t =
   | Type of 'T
   | Typeof of 'T
   | Member of ('M, 'T) member_info
-  | Require of ('M * string) * 'M
+  | Require of ('M * string)
   | JsxAttribute of {
       component_t: 'T;
       name: string;

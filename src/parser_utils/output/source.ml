@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -71,13 +71,12 @@ let add_string ?name str src =
             | None -> "<stdin>"
           in
           let original =
-            Sourcemap.
-              {
-                name;
-                source;
-                original_loc = { line = loc.Loc.start.Loc.line; col = loc.Loc.start.Loc.column };
-              }
-            
+            {
+              Sourcemap.name;
+              source;
+              original_loc =
+                { Sourcemap.line = loc.Loc.start.Loc.line; col = loc.Loc.start.Loc.column };
+            }
           in
 
           Sourcemap.add_mapping ~original ~generated:src.pos sourcemap

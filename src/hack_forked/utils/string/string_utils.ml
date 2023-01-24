@@ -1,85 +1,15 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  *)
 
-exception Incorrect_format
-
-let soi = string_of_int
-
-let string_of_char = String.make 1
-
-let string_before s n = String.sub s 0 n
-
-let string_after s n = String.sub s n (String.length s - n)
-
-let string_starts_with long short =
-  try
-    let long = String.sub long 0 (String.length short) in
-    long = short
-  with
-  | Invalid_argument _ -> false
-
-let string_ends_with long short =
-  try
-    let len = String.length short in
-    let long = String.sub long (String.length long - len) len in
-    long = short
-  with
-  | Invalid_argument _ -> false
-
-(** [substring_index needle haystack] returns the index of the first occurrence of
-    string [needle] in string [haystack]. If not found, returns [-1].
-
-    An implementation of the Knuth-Morris-Pratt (KMP) algorithm. *)
-let substring_index needle =
-  (* see Wikipedia pseudocode *)
-  let needle_len = String.length needle in
-  if needle_len = 0 then raise (Invalid_argument needle);
-  let table = Array.make needle_len 0 in
-  table.(0) <- -1;
-  let pos = ref 2 and cnd = ref 0 in
-  while !pos < needle_len do
-    if needle.[!pos - 1] = needle.[!cnd] then (
-      table.(!pos) <- !cnd + 1;
-      incr pos;
-      incr cnd
-    ) else if !cnd > 0 then
-      cnd := table.(!cnd)
-    else (
-      table.(!pos) <- 0;
-      incr pos
-    )
-  done;
-  fun haystack ->
-    let len = String.length haystack in
-    let p = ref 0 in
-    let q = ref 0 in
-    while !p < len && !q < needle_len do
-      if haystack.[!p] = needle.[!q] then (
-        incr p;
-        incr q
-      ) else if !q = 0 then
-        incr p
-      else
-        q := table.(!q)
-    done;
-    if !q >= needle_len then
-      !p - needle_len
-    else
-      -1
-
-let is_substring needle =
-  let substring_index_memo = substring_index needle in
-  (fun haystack -> substring_index_memo haystack >= 0)
-
 (** [lstrip s prefix] returns a copy of [s] with [prefix] removed from
     the beginning if [s] begins with [prefix], or [s] itself if not.
     Physical equality is maintained in the latter case. *)
 let lstrip s prefix =
-  if string_starts_with s prefix then
+  if String.starts_with ~prefix s then
     let prefix_length = String.length prefix in
     String.sub s prefix_length (String.length s - prefix_length)
   else
@@ -89,17 +19,11 @@ let lstrip s prefix =
     the end if [s] ends with [suffix], or [s] itself if not. Physical
     equality is maintained in the latter case. *)
 let rstrip s suffix =
-  if string_ends_with s suffix then
+  if String.ends_with ~suffix s then
     let result_length = String.length s - String.length suffix in
     String.sub s 0 result_length
   else
     s
-
-let rpartition s c =
-  let sep_idx = String.rindex s c in
-  let first = String.sub s 0 sep_idx in
-  let second = String.sub s (sep_idx + 1) (String.length s - sep_idx - 1) in
-  (first, second)
 
 (** If s is longer than length len, return a copy of s truncated to length len. *)
 let truncate len s =
@@ -139,12 +63,6 @@ let rec rindex_not_from_opt str i chars =
     [str] that is not in [chars] if it exists, or [None] otherwise. *)
 let rindex_not_opt str chars = rindex_not_from_opt str (String.length str - 1) chars
 
-let (zero_code, nine_code) = (Char.code '0', Char.code '9')
-
-let is_decimal_digit chr =
-  let code = Char.code chr in
-  zero_code <= code && code <= nine_code
-
 let is_lowercase_char =
   let (a_code, z_code) = (Char.code 'a', Char.code 'z') in
   fun chr ->
@@ -166,19 +84,6 @@ let fold_left ~f ~acc str =
   let acc = ref acc in
   String.iter (fun c -> acc := f !acc c) str;
   !acc
-
-let split c = Str.split (Str.regexp @@ Char.escaped c)
-
-let split2 c s =
-  let parts = split c s in
-  match parts with
-  | [first; second] -> Some (first, second)
-  | _ -> None
-
-let split2_exn c s =
-  match split2 c s with
-  | Some s -> s
-  | None -> raise Incorrect_format
 
 (** [replace_char needle replacement str] replaces all instances of the [needle]
     character in [str] with the [replacement] character *)
@@ -239,6 +144,51 @@ let split_on_newlines content =
   match List.rev lines with
   | "" :: rest -> List.rev rest
   | _ -> lines
+
+(** Escapes special characters to make the given string a valid filename *)
+let filename_escape path =
+  let buf = Buffer.create (String.length path) in
+  String.iter
+    (fun ch ->
+      match ch with
+      | '\\' -> Buffer.add_string buf "zB"
+      | ':' -> Buffer.add_string buf "zC"
+      | '/' -> Buffer.add_string buf "zS"
+      | '\x00' -> Buffer.add_string buf "z0"
+      | 'z' -> Buffer.add_string buf "zZ"
+      | _ -> Buffer.add_char buf ch)
+    path;
+  Buffer.contents buf
+
+let filename_unescape str =
+  let length = String.length str in
+  let buf = Buffer.create length in
+  let rec consume i =
+    if i >= length then
+      ()
+    else
+      let replacement =
+        if i < length - 1 && str.[i] = 'z' then
+          match str.[i + 1] with
+          | 'B' -> Some '\\'
+          | 'C' -> Some ':'
+          | 'S' -> Some '/'
+          | '0' -> Some '\x00'
+          | 'Z' -> Some 'z'
+          | _ -> None
+        else
+          None
+      in
+      let (c, next_i) =
+        match replacement with
+        | Some r -> (r, i + 2)
+        | None -> (str.[i], i + 1)
+      in
+      Buffer.add_char buf c;
+      consume next_i
+  in
+  consume 0;
+  Buffer.contents buf
 
 module Internal = struct
   let to_list s =

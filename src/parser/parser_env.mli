@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -8,7 +8,7 @@
 (* This module provides a layer between the lexer and the parser which includes
  * some parser state and some lexer state *)
 
-module SSet : Flow_set.S with type t = Flow_set.Make(String).t
+module SSet : Flow_set.S with type elt = string
 
 module Lex_mode : sig
   type t =
@@ -30,12 +30,7 @@ type token_sink_result = {
 
 type parse_options = {
   enums: bool;  (** enable parsing of Flow enums *)
-  esproposal_class_instance_fields: bool;  (** enable parsing of class instance fields *)
-  esproposal_class_static_fields: bool;  (** enable parsing of class static fields *)
   esproposal_decorators: bool;  (** enable parsing of decorators *)
-  esproposal_export_star_as: bool;  (** enable parsing of `export * as` syntax *)
-  esproposal_nullish_coalescing: bool;  (** enable parsing of nullish coalescing (`??`) *)
-  esproposal_optional_chaining: bool;  (** enable parsing of optional chaining (`?.`) *)
   types: bool;  (** enable parsing of Flow types *)
   use_strict: bool;  (** treat the file as strict, without needing a "use strict" directive *)
 }
@@ -66,6 +61,8 @@ val last_token : env -> Token.t option
 
 val in_export : env -> bool
 
+val in_export_default : env -> bool
+
 val labels : env -> SSet.t
 
 val comments : env -> Loc.t Flow_ast.Comment.t list
@@ -85,6 +82,8 @@ val allow_await : env -> bool
 val allow_directive : env -> bool
 
 val allow_super : env -> allowed_super
+
+val has_simple_parameters : env -> bool
 
 val no_in : env -> bool
 
@@ -113,6 +112,8 @@ val error_unexpected : ?expected:string -> env -> unit
 
 val error_on_decorators : env -> (Loc.t * 'a) list -> unit
 
+val error_nameless_declaration : env -> string -> unit
+
 val strict_error : env -> Parse_error.t -> unit
 
 val strict_error_at : env -> Loc.t * Parse_error.t -> unit
@@ -120,8 +121,6 @@ val strict_error_at : env -> Loc.t * Parse_error.t -> unit
 val function_as_statement_error_at : env -> Loc.t -> unit
 
 val error_list : env -> (Loc.t * Parse_error.t) list -> unit
-
-val record_export : env -> (Loc.t, Loc.t) Flow_ast.Identifier.t -> unit
 
 val enter_class : env -> unit
 
@@ -163,6 +162,8 @@ val with_in_switch : bool -> env -> env
 
 val with_in_export : bool -> env -> env
 
+val with_in_export_default : bool -> env -> env
+
 val with_no_call : bool -> env -> env
 
 val with_error_callback : (env -> Parse_error.t -> unit) -> env -> env
@@ -171,13 +172,21 @@ val without_error_callback : env -> env
 
 val add_label : env -> string -> env
 
-val enter_function : env -> async:bool -> generator:bool -> env
+val enter_function : env -> async:bool -> generator:bool -> simple_params:bool -> env
+
+val is_contextually_reserved : string -> bool
 
 val is_reserved : string -> bool
 
+val token_is_contextually_reserved : Token.t -> bool
+
 val token_is_reserved : Token.t -> bool
 
-val is_future_reserved : string -> bool
+val token_is_reserved_type : Token.t -> bool
+
+val token_is_type_identifier : env -> Token.t -> bool
+
+val token_is_variance : Token.t -> bool
 
 val is_strict_reserved : string -> bool
 
@@ -186,8 +195,6 @@ val token_is_strict_reserved : Token.t -> bool
 val is_restricted : string -> bool
 
 val is_reserved_type : string -> bool
-
-val token_is_restricted : Token.t -> bool
 
 module Peek : sig
   val token : env -> Token.t
@@ -254,11 +261,15 @@ module Eat : sig
 end
 
 module Expect : sig
+  val get_error : env -> Token.t -> Loc.t * Parse_error.t
+
   val error : env -> Token.t -> unit
 
   val token : env -> Token.t -> unit
 
   val token_opt : env -> Token.t -> unit
+
+  val token_maybe : env -> Token.t -> bool
 
   val identifier : env -> string -> unit
 end

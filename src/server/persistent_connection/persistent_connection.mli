@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -11,7 +11,18 @@ type t
 type single_client
 
 module Client_config : sig
-  type t = { suggest_autoimports: bool }
+  type rank_autoimports_by_usage =
+    [ `Default
+    | `True
+    | `False
+    ]
+
+  type t = {
+    rank_autoimports_by_usage: rank_autoimports_by_usage;
+    suggest_autoimports: bool;
+  }
+
+  val rank_autoimports_by_usage : t -> rank_autoimports_by_usage
 
   val suggest_autoimports : t -> bool
 end
@@ -92,3 +103,5 @@ val clear_type_parse_artifacts_caches : unit -> unit
 val push_outstanding_handler : single_client -> Lsp.lsp_id -> unit Lsp.lsp_handler -> unit
 
 val pop_outstanding_handler : single_client -> Lsp.lsp_id -> unit Lsp.lsp_handler option
+
+val autocomplete_session : single_client -> int * int * File_key.t option -> int

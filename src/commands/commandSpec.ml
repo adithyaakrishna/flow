@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,17 +7,23 @@
 
 exception Show_help
 
-exception Failed_to_parse of string * string
+exception
+  Failed_to_parse of {
+    msg: string;
+    arg: string;
+    details: string option;
+  }
 
 module ArgSpec = struct
   type values_t = string list SMap.t
 
   type flag_arg_count =
-    | No_Arg
-    | Arg
-    | Arg_List
-    | Arg_Rest (* consumes a '--' and all remaining args *)
-    | Arg_Command
+    | Truthy  (** if present, true; otherwise false *)
+    | No_Arg  (** --foo or --no-foo: consumes no args *)
+    | Arg  (** --foo=value or --foo value: consumes one arg *)
+    | Arg_List  (** --foo a b c: consumes until another arg is found *)
+    | Arg_Rest  (** consumes a '--' and all remaining args *)
+    | Arg_Command  (** consumes a subcommand *)
 
   (* consumes all the remaining args verbatim, to pass to a subcommand *)
 
@@ -69,12 +75,23 @@ module ArgSpec = struct
   let bool =
     {
       parse =
-        (fun ~name:_ -> function
+        (fun ~name -> function
           | Some ["0"]
           | Some ["false"]
           | None ->
             Some false
-          | Some _ -> Some true);
+          | Some ["1"]
+          | Some ["true"] ->
+            Some true
+          | Some _ ->
+            raise
+              (Failed_to_parse
+                 {
+                   arg = name;
+                   msg = "Invalid argument";
+                   details = Some "expected one of: true, false, 0, 1";
+                 }
+              ));
       arg = Arg;
     }
 
@@ -86,7 +103,14 @@ module ArgSpec = struct
             Some
               (try int_of_string x with
               | Failure _ ->
-                raise (Failed_to_parse (name, Utils_js.spf "expected an integer, got %S" x)))
+                raise
+                  (Failed_to_parse
+                     {
+                       arg = name;
+                       msg = "Invalid argument";
+                       details = Some (Printf.sprintf "expected an integer, got %S" x);
+                     }
+                  ))
           | _ -> None);
       arg = Arg;
     }
@@ -99,10 +123,24 @@ module ArgSpec = struct
             let i =
               try int_of_string x with
               | Failure _ ->
-                raise (Failed_to_parse (name, Utils_js.spf "expected an unsigned integer, got %S" x))
+                raise
+                  (Failed_to_parse
+                     {
+                       arg = name;
+                       msg = "Invalid argument";
+                       details = Some (Printf.sprintf "expected an unsigned integer, got %S" x);
+                     }
+                  )
             in
             if i < 0 then
-              raise (Failed_to_parse (name, Utils_js.spf "expected an unsigned integer, got %S" x))
+              raise
+                (Failed_to_parse
+                   {
+                     arg = name;
+                     msg = "Invalid argument";
+                     details = Some (Printf.sprintf "expected an unsigned integer, got %S" x);
+                   }
+                )
             else
               Some i
           | _ -> None);
@@ -113,20 +151,24 @@ module ArgSpec = struct
     {
       parse =
         (fun ~name -> function
-          | Some [x] ->
-            begin
-              match Base.List.find ~f:(fun (s, _) -> s = x) values with
-              | Some (_, v) -> Some v
-              | None ->
-                raise
-                  (Failed_to_parse
-                     ( name,
-                       Utils_js.spf
-                         "expected one of: %s"
-                         (String.concat ", " (Base.List.map ~f:fst values))
-                     )
-                  )
-            end
+          | Some [x] -> begin
+            match Base.List.find ~f:(fun (s, _) -> s = x) values with
+            | Some (_, v) -> Some v
+            | None ->
+              raise
+                (Failed_to_parse
+                   {
+                     arg = name;
+                     msg = "Invalid argument";
+                     details =
+                       Some
+                         (Printf.sprintf
+                            "expected one of: %s"
+                            (String.concat ", " (Base.List.map ~f:fst values))
+                         );
+                   }
+                )
+          end
           | _ -> None);
       arg = Arg;
     }
@@ -135,24 +177,33 @@ module ArgSpec = struct
     {
       parse =
         (fun ~name -> function
-          | Some (cmd_name :: argv) ->
-            begin
-              match (enum cmds).parse ~name (Some [cmd_name]) with
-              | Some cmd -> Some (cmd, argv)
-              | None -> None
-            end
+          | Some (cmd_name :: argv) -> begin
+            match (enum cmds).parse ~name (Some [cmd_name]) with
+            | Some cmd -> Some (cmd, argv)
+            | None -> None
+          end
           | Some []
           | None ->
             None);
       arg = Arg_Command;
     }
 
-  let no_arg =
+  let truthy =
     {
       parse =
         (fun ~name:_ -> function
           | Some _ -> true
           | None -> false);
+      arg = Truthy;
+    }
+
+  let no_arg =
+    {
+      parse =
+        (fun ~name:_ -> function
+          | None -> None
+          | Some ["false"] -> Some false
+          | Some _ -> Some true);
       arg = No_Arg;
     }
 
@@ -160,24 +211,26 @@ module ArgSpec = struct
     {
       parse =
         (fun ~name -> function
-          | None ->
-            begin
-              match default with
-              | Some default -> default
-              | None -> raise (Failed_to_parse (name, "missing required arguments"))
-            end
+          | None -> begin
+            match default with
+            | Some default -> default
+            | None ->
+              raise
+                (Failed_to_parse { arg = name; msg = "Missing required arguments"; details = None })
+          end
           | value ->
             (match arg_type.parse ~name value with
             | None ->
               raise
                 (Failed_to_parse
-                   ( name,
-                     Utils_js.spf
-                       "wrong type for required argument%s"
+                   {
+                     arg = name;
+                     msg = "Wrong type for required argument";
+                     details =
                        (match value with
-                       | Some [x] -> ": " ^ x
-                       | _ -> "")
-                   )
+                       | Some [x] -> Some ("got " ^ x)
+                       | _ -> None);
+                   }
                 )
             | Some result -> result));
       arg = arg_type.arg;
@@ -206,7 +259,11 @@ module ArgSpec = struct
                    | None ->
                      raise
                        (Failed_to_parse
-                          (name, Utils_js.spf "wrong type for argument list item: %s" x)
+                          {
+                            arg = name;
+                            msg = "Invalid argument";
+                            details = Some (Printf.sprintf "wrong type for argument list item: %s" x);
+                          }
                        ))
                  values
               ));
@@ -224,7 +281,14 @@ module ArgSpec = struct
                  ~f:(fun arg ->
                    match arg_type.parse ~name (Some [arg]) with
                    | None ->
-                     raise (Failed_to_parse (name, Utils_js.spf "wrong type for value: %s" arg))
+                     raise
+                       (Failed_to_parse
+                          {
+                            arg = name;
+                            msg = "Invalid argument";
+                            details = Some (Printf.sprintf "wrong type for value: %s" arg);
+                          }
+                       )
                    | Some result -> result)
                  args
               )
@@ -241,11 +305,27 @@ module ArgSpec = struct
               match Str.bounded_split (Str.regexp_string delim) x 2 with
               | [key; value] -> (key, Some [value])
               | [key] -> (key, None)
-              | _ -> raise (Failed_to_parse (name, Utils_js.spf "unexpected value: %s" x))
+              | _ ->
+                raise
+                  (Failed_to_parse
+                     {
+                       arg = name;
+                       msg = "Unexpected value";
+                       details = Some (Printf.sprintf "got %s" x);
+                     }
+                  )
             in
             let key =
               match key_type.parse ~name (Some [key]) with
-              | None -> raise (Failed_to_parse (name, Utils_js.spf "wrong type for key: %s" key))
+              | None ->
+                raise
+                  (Failed_to_parse
+                     {
+                       arg = name;
+                       msg = "Invalid argument";
+                       details = Some (Printf.sprintf "wrong type for key: %s" key);
+                     }
+                  )
               | Some result -> result
             in
             let value = value_type.parse ~name value in
@@ -255,14 +335,14 @@ module ArgSpec = struct
     }
 
   let help_flag =
-    SMap.empty |> SMap.add "--help" { doc = "This list of options"; env = None; arg_count = No_Arg }
+    SMap.empty |> SMap.add "--help" { doc = "This list of options"; env = None; arg_count = Truthy }
 
   let apply_help (values, main) =
     let main help =
       if help then raise Show_help;
       main
     in
-    apply_arg "--help" no_arg (fun x -> x) (values, main)
+    apply_arg "--help" truthy (fun x -> x) (values, main)
 
   (* Base spec, defines --help *)
   let empty = { f = apply_help; flags = help_flag; anons = [] }
@@ -316,10 +396,12 @@ type ('a, 'b) builder_t = {
   args: ('a, 'b) ArgSpec.t;
 }
 
+type flags = ArgSpec.flag_metadata SMap.t
+
 type t = {
   cmdname: string;
   cmddoc: string;
-  flags: ArgSpec.flag_metadata SMap.t;
+  flags: flags;
   args_of_argv: string list -> string list SMap.t;
   string_of_usage: unit -> string;
   main: string list SMap.t -> unit;
@@ -343,6 +425,24 @@ let consume_args args =
       not !is_done)
     args
 
+(** [find_flag "--foo" flags] looks up the spec for the "--foo" flag.
+    If the flag starts with "--no-" and there isn't an explicit flag
+    by that name, then the flag without "no-" is looked up.
+
+    Raises [Not_found] if [name] is not a valid flag. *)
+let find_flag name flags =
+  match SMap.find_opt name flags with
+  | Some flag -> (name, flag)
+  | None ->
+    if String.starts_with ~prefix:"--no-" name then
+      let p = String.length "--no-" in
+      let name = "--" ^ String.sub name p (String.length name - p) in
+      match SMap.find name flags with
+      | { ArgSpec.arg_count = ArgSpec.No_Arg; _ } as flag -> (name, flag)
+      | _ -> raise Not_found
+    else
+      raise Not_found
+
 let rec parse values spec = function
   | [] -> values
   | arg :: args ->
@@ -361,20 +461,29 @@ let rec parse values spec = function
 and parse_flag values spec arg args =
   let flags = spec.ArgSpec.flags in
   try
-    let flag = SMap.find arg flags in
+    let (arg', flag) = find_flag arg flags in
     match flag.ArgSpec.arg_count with
-    | ArgSpec.No_Arg ->
+    | ArgSpec.Truthy ->
       let values = SMap.add arg ["true"] values in
       parse values spec args
-    | ArgSpec.Arg ->
-      begin
-        match args with
-        | [] -> raise (Failed_to_parse (arg, "option needs an argument."))
-        | value :: args ->
-          if is_arg value then raise (Failed_to_parse (arg, "option needs an argument."));
-          let values = SMap.add arg [value] values in
-          parse values spec args
-      end
+    | ArgSpec.No_Arg ->
+      let value =
+        if String.equal arg arg' then
+          "true"
+        else
+          "false"
+      in
+      let values = SMap.add arg' [value] values in
+      parse values spec args
+    | ArgSpec.Arg -> begin
+      match args with
+      | [] -> raise (Failed_to_parse { arg; msg = "Option needs an argument"; details = None })
+      | value :: args ->
+        if is_arg value then
+          raise (Failed_to_parse { arg; msg = "Option needs an argument"; details = None });
+        let values = SMap.add arg [value] values in
+        parse values spec args
+    end
     | ArgSpec.Arg_List ->
       let (value_list, args) = consume_args args in
       let values = SMap.add arg value_list values in
@@ -382,7 +491,7 @@ and parse_flag values spec arg args =
     | ArgSpec.Arg_Rest -> failwith "Not supported"
     | ArgSpec.Arg_Command -> failwith "Not supported"
   with
-  | Not_found -> raise (Failed_to_parse (arg, "unknown option"))
+  | Not_found -> raise (Failed_to_parse { arg; msg = "Unknown option"; details = None })
 
 and parse_anon values spec arg args =
   let (anon, spec) = ArgSpec.pop_anon spec in
@@ -406,21 +515,21 @@ and parse_anon values spec arg args =
   | Some (name, ArgSpec.Arg_Command) ->
     let values = SMap.add name (arg :: args) values in
     parse values spec []
+  | Some (_, ArgSpec.Truthy) -> assert false
   | Some (_, ArgSpec.No_Arg) -> assert false
-  | None -> raise (Failed_to_parse ("anon", Utils_js.spf "unexpected argument '%s'." arg))
+  | None -> raise (Failed_to_parse { arg; msg = "Unexpected argument"; details = None })
 
 let init_from_env spec =
   let flags = spec.ArgSpec.flags in
   SMap.fold
     (fun arg flag acc ->
       match flag.ArgSpec.env with
-      | Some env ->
-        begin
-          match Sys.getenv env with
-          | "" -> acc
-          | env -> SMap.add arg [env] acc
-          | exception Not_found -> acc
-        end
+      | Some env -> begin
+        match Sys.getenv env with
+        | "" -> acc
+        | env -> SMap.add arg [env] acc
+        | exception Not_found -> acc
+      end
       | None -> acc)
     flags
     SMap.empty

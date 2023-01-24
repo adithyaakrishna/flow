@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -50,11 +50,11 @@ let (process_fsnotify_event : DfindEnv.t -> SSet.t -> Fsnotify.event -> SSet.t) 
   dirty
 
 let run_daemon (scuba_table, roots) (ic, oc) =
-  Printexc.record_backtrace true;
+  Exception.record_backtrace true;
   let t = Unix.gettimeofday () in
   let infd = Daemon.descr_of_in_channel ic in
   let outfd = Daemon.descr_of_out_channel oc in
-  let roots = Base.List.map ~f:Path.to_string roots in
+  let roots = Base.List.map roots ~f:Path.to_string in
   let env = DfindEnv.make roots in
   Base.List.iter ~f:(DfindAddFile.path env) roots;
   FlowEventLogger.dfind_ready scuba_table t;
@@ -68,7 +68,7 @@ let run_daemon (scuba_table, roots) (ic, oc) =
   let message_in_callback () =
     let () = Marshal_tools.from_fd_with_preamble infd in
     let count = SSet.cardinal !acc in
-    if count > 0 then Hh_logger.log "Sending %d file updates\n%!" count;
+    if count > 0 then Hh_logger.log "Sending %d file updates" count;
     Marshal_tools.to_fd_with_preamble outfd (Updates !acc) |> ignore;
     acc := SSet.empty
   in

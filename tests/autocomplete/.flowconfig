@@ -6,5 +6,6 @@
 
 [options]
 no_flowlib=false
-experimental.enums=true
+enums=true
 format.single_quotes=true
+autoimports_ranked_by_usage=true

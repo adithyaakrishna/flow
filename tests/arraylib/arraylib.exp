@@ -97,58 +97,36 @@ References:
 
 Error ----------------------------------------------------------------------------------------------- array_lib.js:46:29
 
-Cannot perform arithmetic operation because string [1] is not a number. [unsafe-addition]
+Cannot use operator `*` with operands string [1] and number [2] [unsafe-arithmetic]
 
    array_lib.js:46:29
-   46|   [""].reduce((acc, str) => acc * str.length); // error, string ~> number
-                                   ^^^
+     46|   [""].reduce((acc, str) => acc * str.length); // error, string ~> number
+                                     ^^^^^^^^^^^^^^^^
 
 References:
    array_lib.js:46:4
-   46|   [""].reduce((acc, str) => acc * str.length); // error, string ~> number
-          ^^ [1]
-
-
-Error ----------------------------------------------------------------------------------------------- array_lib.js:46:39
-
-Cannot get `str.length` because property `length` is missing in `Number` [1]. [prop-missing]
-
-   array_lib.js:46:39
-   46|   [""].reduce((acc, str) => acc * str.length); // error, string ~> number
-                                             ^^^^^^
-
-References:
-   array_lib.js:46:29
-   46|   [""].reduce((acc, str) => acc * str.length); // error, string ~> number
-                                   ^^^^^^^^^^^^^^^^ [1]
+     46|   [""].reduce((acc, str) => acc * str.length); // error, string ~> number
+            ^^ [1]
+   <BUILTINS>/core.js:1288:13
+   1288|     length: number;
+                     ^^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------- array_lib.js:47:34
 
-Cannot perform arithmetic operation because string [1] is not a number. [unsafe-addition]
+Cannot use operator `*` with operands string [1] and number [2] [unsafe-arithmetic]
 
    array_lib.js:47:34
-   47|   [""].reduceRight((acc, str) => acc * str.length); // error, string ~> number
-                                        ^^^
+     47|   [""].reduceRight((acc, str) => acc * str.length); // error, string ~> number
+                                          ^^^^^^^^^^^^^^^^
 
 References:
    array_lib.js:47:4
-   47|   [""].reduceRight((acc, str) => acc * str.length); // error, string ~> number
-          ^^ [1]
-
-
-Error ----------------------------------------------------------------------------------------------- array_lib.js:47:44
-
-Cannot get `str.length` because property `length` is missing in `Number` [1]. [prop-missing]
-
-   array_lib.js:47:44
-   47|   [""].reduceRight((acc, str) => acc * str.length); // error, string ~> number
-                                                  ^^^^^^
-
-References:
-   array_lib.js:47:34
-   47|   [""].reduceRight((acc, str) => acc * str.length); // error, string ~> number
-                                        ^^^^^^^^^^^^^^^^ [1]
+     47|   [""].reduceRight((acc, str) => acc * str.length); // error, string ~> number
+            ^^ [1]
+   <BUILTINS>/core.js:1288:13
+   1288|     length: number;
+                     ^^^^^^ [2]
 
 
 Error ----------------------------------------------------------------------------------------------- array_lib.js:63:57
@@ -181,21 +159,75 @@ References:
                                             ^^^^^^ [2]
 
 
-Error -------------------------------------------------------------------------------------------- callback_this.js:8:18
+Error -------------------------------------------------------------------------------------------------------- at.js:8:5
+
+Cannot call `arr.at` because function [1] requires another argument. [incompatible-call]
+
+   at.js:8:5
+     8| arr.at(); // ERROR
+            ^^
+
+References:
+   <BUILTINS>/core.js:701:5
+   701|     at(index: number): T | void;
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ [1]
+
+
+Error -------------------------------------------------------------------------------------------------------- at.js:9:8
+
+Cannot call `arr.at` with `"1"` bound to `index` because string [1] is incompatible with number [2]. [incompatible-call]
+
+   at.js:9:8
+     9| arr.at("1"); // ERROR
+               ^^^ [1]
+
+References:
+   <BUILTINS>/core.js:701:15
+   701|     at(index: number): T | void;
+                      ^^^^^^ [2]
+
+
+Error ------------------------------------------------------------------------------------------------------- at.js:16:7
+
+Cannot call `roArr.at` because function [1] requires another argument. [incompatible-call]
+
+   at.js:16:7
+    16| roArr.at(); // ERROR
+              ^^
+
+References:
+   <BUILTINS>/core.js:701:5
+   701|     at(index: number): T | void;
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ [1]
+
+
+Error ------------------------------------------------------------------------------------------------------ at.js:17:10
+
+Cannot call `roArr.at` with `"1"` bound to `index` because string [1] is incompatible with number [2].
+[incompatible-call]
+
+   at.js:17:10
+    17| roArr.at("1"); // ERROR
+                 ^^^ [1]
+
+References:
+   <BUILTINS>/core.js:701:15
+   701|     at(index: number): T | void;
+                      ^^^^^^ [2]
+
+
+Error -------------------------------------------------------------------------------------------- callback_this.js:8:25
 
 Cannot get `this.y` because property `y` is missing in undefined [1]. [incompatible-use]
 
-   callback_this.js:8:18
-   8|             this.y; // error, function has wrong this
-                       ^
+   callback_this.js:8:25
+   8|             return this.y; // error, function has wrong this
+                              ^
 
 References:
-   callback_this.js:7:18
-                       v------------------------
-   7|         this.x = this.x.map(function (z) {
-   8|             this.y; // error, function has wrong this
-   9|         });
-              -^ [1]
+   callback_this.js:7:45
+   7|         this.x = this.x.map(function (this: void, z) {
+                                                  ^^^^ [1]
 
 
 Error ----------------------------------------------------------------------------------------------------- flat.js:5:34
@@ -316,8 +348,8 @@ Cannot assign `arr3.flat(...)` to `result3_2` because mixed [1] is incompatible 
                                          ^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/core.js:818:32
-   818|     flat(depth: number): Array<mixed>;
+   <BUILTINS>/core.js:832:32
+   832|     flat(depth: number): Array<mixed>;
                                        ^^^^^ [1]
    flat.js:22:24
     22| const result3_2: Array<number> = arr3.flat(2); // Error - don't support this
@@ -334,8 +366,8 @@ Cannot assign `arr2.flat(...)` to `result2_6` because mixed [1] is incompatible 
                                          ^^^^^^^^^^^^
 
 References:
-   <BUILTINS>/core.js:818:32
-   818|     flat(depth: number): Array<mixed>;
+   <BUILTINS>/core.js:832:32
+   832|     flat(depth: number): Array<mixed>;
                                        ^^^^^ [1]
    flat.js:27:24
     27| const result2_6: Array<number> = arr2.flat(x); // Error - don't support this
@@ -395,4 +427,4 @@ Cannot assign `7` to `t.length` because property `length` is not writable. [cann
 
 
 
-Found 25 errors
+Found 27 errors

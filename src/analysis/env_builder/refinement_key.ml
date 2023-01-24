@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -10,9 +10,12 @@ open Utils_js
 module type REFINEMENT_KEY = sig
   module L : Loc_sig.S
 
-  type proj
+  type proj =
+    | Prop of string
+    | Elem of lookup
+    | PrivateField of string
 
-  type lookup = {
+  and lookup = {
     base: string;
     projections: proj list;
   }
@@ -107,6 +110,8 @@ module Make (L : Loc_sig.S) : REFINEMENT_KEY with module L = L = struct
     let open Flow_ast.Expression in
     function
     | (_, Identifier id) -> Some (lookup_of_identifier id)
+    | (_, This _) -> Some lookup_of_this
+    | (_, Super _) -> Some lookup_of_super
     | (_, OptionalMember { OptionalMember.member; _ }) when allow_optional ->
       lookup_of_member ~allow_optional member
     | (_, Member member) -> lookup_of_member ~allow_optional member
@@ -144,6 +149,10 @@ module Make (L : Loc_sig.S) : REFINEMENT_KEY with module L = L = struct
   and lookup_of_identifier (_, { Flow_ast.Identifier.name; comments = _ }) =
     { base = name; projections = [] }
 
+  and lookup_of_this = { base = "this"; projections = [] }
+
+  and lookup_of_super = { base = "super"; projections = [] }
+
   let of_expression expr =
     let loc = fst expr in
     match lookup_of_expression expr with
@@ -161,7 +170,7 @@ module Make (L : Loc_sig.S) : REFINEMENT_KEY with module L = L = struct
 
   let of_name name loc = { loc; lookup = lookup_of_name name }
 
-  let rec lookup_of_optional_chain expr =
+  let rec of_optional_chain expr =
     let open Flow_ast.Expression in
     match expr with
     | (_, Call _) -> None
@@ -170,21 +179,15 @@ module Make (L : Loc_sig.S) : REFINEMENT_KEY with module L = L = struct
         OptionalMember
           {
             OptionalMember.member =
-              { Member._object = (_, Identifier (_, { Flow_ast.Identifier.name; _ })); _ };
+              { Member._object = (loc, Identifier (_, { Flow_ast.Identifier.name; _ })); _ };
             _;
           }
       ) ->
-      Some (lookup_of_name name)
+      Some { loc; lookup = lookup_of_name name }
     | (_, OptionalMember { OptionalMember.member = { Member._object = subject; _ }; _ })
     | (_, OptionalCall { OptionalCall.call = { Call.callee = subject; _ }; _ }) ->
-      lookup_of_optional_chain subject
+      of_optional_chain subject
     | _ -> None
-
-  let of_optional_chain expr =
-    let loc = fst expr in
-    match lookup_of_optional_chain expr with
-    | None -> None
-    | Some lookup -> Some { loc; lookup }
 
   let reason_desc refinement_key =
     let { lookup; _ } = refinement_key in

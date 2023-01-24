@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -56,15 +56,52 @@ module LogFlusher = LwtLoop.Make (struct
     Exception.reraise exn
 end)
 
+let fallback_error_handler msg exn =
+  let msg =
+    Printf.sprintf
+      "%s: %s\n%s"
+      msg
+      (Exception.get_ctor_string exn)
+      (Exception.get_full_backtrace_string max_int exn)
+  in
+  Logger.fatal_s ~exn "%s. Exiting" msg;
+  Exit.(exit ~msg Unknown_error)
+
+let log_monitor_options monitor_options =
+  let {
+    FlowServerMonitorOptions.argv;
+    autostop;
+    file_watcher_mergebase_with;
+    file_watcher_timeout;
+    file_watcher;
+    no_restart;
+    server_options;
+    shared_mem_config;
+    (* don't need to log our own filename *)
+    log_file = _;
+    server_log_file = _;
+  } =
+    monitor_options
+  in
+  Logger.info "argv=%s" (argv |> Array.to_list |> String.concat " ");
+  Logger.info "autostop=%b" autostop;
+  Logger.info "file_watcher=%s" (FlowServerMonitorOptions.string_of_file_watcher file_watcher);
+  Base.Option.iter ~f:(Logger.info "file_watcher_timeout=%.0f") file_watcher_timeout;
+  Logger.info "file_watcher_mergebase_with=%s" file_watcher_mergebase_with;
+  Logger.info "no_restart=%b" no_restart;
+  Logger.info "shm_heap_size=%d" shared_mem_config.SharedMem.heap_size;
+  Logger.info "shm_hash_table_pow=%d" shared_mem_config.SharedMem.hash_table_pow;
+
+  (* rollouts affect the flowconfig, and the monitor uses the flowconfig, so
+     log the rollouts in the monitor log. *)
+  SMap.iter (Logger.info "Rollout %S set to %S") (Options.enabled_rollouts server_options)
+
 (* This is the common entry point for both daemonize and start. *)
 let internal_start ~is_daemon ?waiting_fd monitor_options =
-  let { FlowServerMonitorOptions.server_options; argv; _ } = monitor_options in
+  let { FlowServerMonitorOptions.server_options; file_watcher; log_file; _ } = monitor_options in
   let root = Options.root server_options in
   let () =
-    let file_watcher =
-      let open FlowServerMonitorOptions in
-      string_of_file_watcher monitor_options.file_watcher
-    in
+    let file_watcher = FlowServerMonitorOptions.string_of_file_watcher file_watcher in
     let vcs =
       match Vcs.find root with
       | None -> "none"
@@ -72,6 +109,7 @@ let internal_start ~is_daemon ?waiting_fd monitor_options =
       | Some Vcs.Git -> "git"
     in
     FlowEventLogger.set_monitor_options ~file_watcher ~vcs;
+    FlowEventLogger.set_eden (Some (Eden.is_eden root));
     LoggingUtils.set_server_options ~server_options
   in
   let tmp_dir = Options.temp_dir server_options in
@@ -89,7 +127,6 @@ let internal_start ~is_daemon ?waiting_fd monitor_options =
    * `flow server` wants to output to both stderr and the log, so we initialize Logger with this fd
    *)
   let log_fd =
-    let log_file = monitor_options.FlowServerMonitorOptions.log_file in
     let fd = Server_daemon.open_log_file log_file in
     if is_daemon then (
       Unix.dup2 fd Unix.stderr;
@@ -121,49 +158,53 @@ let internal_start ~is_daemon ?waiting_fd monitor_options =
     (Lwt.async_exception_hook :=
        fun exn ->
          let exn = Exception.wrap exn in
-         let msg =
-           Printf.sprintf
-             "Uncaught async exception: %s\n%s"
-             (Exception.get_ctor_string exn)
-             (Exception.get_full_backtrace_string max_int exn)
-         in
-         Logger.fatal_s ~exn "Uncaught async exception. Exiting";
-         Exit.(exit ~msg Unknown_error)
+         fallback_error_handler "Uncaught async exception" exn
     );
 
     Logger.init_logger log_fd;
-    Logger.info "argv=%s" (argv |> Array.to_list |> String.concat " ");
-    LoggingUtils.dump_server_options
-      ~server_options:monitor_options.FlowServerMonitorOptions.server_options
-      ~log:(Logger.info "%s");
+    log_monitor_options monitor_options;
 
     (* If there is a waiting fd, start up a thread that will message it *)
     let handle_waiting_start_command =
       match waiting_fd with
       | None -> Lwt.return_unit
       | Some fd ->
-        let fd = Lwt_unix.of_unix_file_descr ~blocking:false ~set_flags:true fd in
+        let fd = Lwt_unix.of_unix_file_descr fd in
         handle_waiting_start_command fd
     in
     (* Don't start the server until we've set up the threads to handle the waiting channel *)
     Lwt.async (fun () ->
-        let%lwt () = handle_waiting_start_command in
-        FlowServerMonitorServer.start monitor_options
+        try%lwt
+          let%lwt () = handle_waiting_start_command in
+          FlowServerMonitorServer.start monitor_options
+        with
+        | e ->
+          let e = Exception.wrap e in
+          fallback_error_handler "Uncaught exception in FlowServerMonitorServer thread" e
     );
 
     (* We can start up the socket acceptor even before the server starts *)
     Lwt.async (fun () ->
-        SocketAcceptor.run
-          (Lwt_unix.of_unix_file_descr ~blocking:false ~set_flags:true monitor_socket_fd)
-          monitor_options.FlowServerMonitorOptions.autostop
+        try%lwt
+          SocketAcceptor.run
+            (Lwt_unix.of_unix_file_descr monitor_socket_fd)
+            ~autostop:monitor_options.FlowServerMonitorOptions.autostop
+        with
+        | exn ->
+          let exn = Exception.wrap exn in
+          fallback_error_handler "Uncaught exception in SocketAcceptor thread" exn
     );
     Lwt.async (fun () ->
-        SocketAcceptor.run_legacy
-          (Lwt_unix.of_unix_file_descr ~blocking:false ~set_flags:true legacy2_socket_fd)
+        try%lwt SocketAcceptor.run_legacy (Lwt_unix.of_unix_file_descr legacy2_socket_fd) with
+        | exn ->
+          let exn = Exception.wrap exn in
+          fallback_error_handler "Uncaught exception in SocketAcceptor legacy thread" exn
     );
     Lwt.async (fun () ->
-        SocketAcceptor.run_legacy
-          (Lwt_unix.of_unix_file_descr ~blocking:false ~set_flags:true legacy1_socket_fd)
+        try%lwt SocketAcceptor.run_legacy (Lwt_unix.of_unix_file_descr legacy1_socket_fd) with
+        | exn ->
+          let exn = Exception.wrap exn in
+          fallback_error_handler "Uncaught exception in SocketAcceptor legacy thread" exn
     );
 
     (* Wait forever! Mwhahahahahaha *)

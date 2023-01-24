@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -27,8 +27,16 @@ let spec =
         |> root_flag
         |> from_flag
         |> flag
+             "--missed-changes"
+             truthy
+             ~doc:"Invalidate the server's view of the file system (e.g. unknown changes occurred)"
+        |> flag
+             "--changed-mergebase"
+             truthy
+             ~doc:"Notify the server that the SCM mergebase has changed"
+        |> flag
              "--focus"
-             no_arg
+             truthy
              ~doc:"If the server is running in lazy mode, force it to focus on these files"
         |> flag
              "--input-file"
@@ -54,7 +62,7 @@ let rec find_parent_that_exists path =
     else
       find_parent_that_exists newpath
 
-let main base_flags connect_flags root focus input_file files () =
+let main base_flags connect_flags root missed_changes changed_mergebase focus input_file files () =
   begin
     match (input_file, files) with
     | (None, (None | Some [])) ->
@@ -76,7 +84,9 @@ let main base_flags connect_flags root focus input_file files () =
   in
 
   let files = Base.List.map ~f:get_path_of_file files in
-  let request = ServerProt.Request.FORCE_RECHECK { files; focus } in
+  let request =
+    ServerProt.Request.FORCE_RECHECK { files; focus; missed_changes; changed_mergebase }
+  in
   let () =
     match connect_and_make_request flowconfig_name connect_flags root request with
     | ServerProt.Response.FORCE_RECHECK -> ()

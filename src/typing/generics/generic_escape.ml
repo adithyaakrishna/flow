@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -16,6 +16,7 @@ type acc = {
   annot_reason: reason option;
   scope_id: Scope_id.t;
   use_op: use_op;
+  names_in_scope: Subst_name.Set.t;
 }
 
 class escape_finder ~gcx ~(add_output : Context.t -> ?trace:Type.trace -> Error_message.t -> unit) =
@@ -27,7 +28,15 @@ class escape_finder ~gcx ~(add_output : Context.t -> ?trace:Type.trace -> Error_
         self#type_
           cx
           Polarity.Positive
-          { seen; tvar_ids; top_level_reason; annot_reason; scope_id; use_op }
+          {
+            seen;
+            tvar_ids;
+            top_level_reason;
+            annot_reason;
+            scope_id;
+            use_op;
+            names_in_scope = Subst_name.Set.empty;
+          }
           ty
       in
       seen
@@ -35,12 +44,22 @@ class escape_finder ~gcx ~(add_output : Context.t -> ?trace:Type.trace -> Error_
     method! type_
         cx
         pole
-        ({ seen = _; top_level_reason; annot_reason; scope_id; use_op; tvar_ids = _ } as acc)
+        ( {
+            seen = _;
+            top_level_reason;
+            annot_reason;
+            scope_id;
+            use_op;
+            tvar_ids = _;
+            names_in_scope;
+          } as acc
+        )
         ty =
       match (ty, ALoc.source (def_aloc_of_reason (reason_of_t ty))) with
-      | (GenericT { id; _ }, _) ->
+      | (GenericT { id; name; _ }, _) when not (Subst_name.Set.mem name names_in_scope) ->
         let err_fn id name acc =
           let is_escaped = not @@ Generic_cx.in_scope gcx scope_id id in
+          let name = Subst_name.string_of_subst_name name in
           if is_escaped then
             add_output
               cx
@@ -61,6 +80,27 @@ class escape_finder ~gcx ~(add_output : Context.t -> ?trace:Type.trace -> Error_
           acc
         else
           super#type_ cx pole acc ty
+      | (GenericT _, _) -> acc
+      | (DefT (_, _, PolyT { tparams; _ }), _) ->
+        let prev_names = names_in_scope in
+        let names_in_scope =
+          Nel.map (fun { name; _ } -> name) tparams
+          |> Nel.to_list
+          |> Subst_name.Set.of_list
+          |> Subst_name.Set.union names_in_scope
+        in
+        let acc = super#type_ cx pole { acc with names_in_scope } ty in
+        { acc with names_in_scope = prev_names }
+      | (ThisClassT (_, _, _, this_name), _) ->
+        let prev_names = names_in_scope in
+        let acc =
+          super#type_
+            cx
+            pole
+            { acc with names_in_scope = Subst_name.Set.add this_name names_in_scope }
+            ty
+        in
+        { acc with names_in_scope = prev_names }
       | (DefT (_, _, InstanceT (_, _, _, { type_args; _ })), Some key) when key <> Context.file cx
         ->
         (* It's really expensive to explore imported instances, and it's usually not necessary to do
@@ -77,8 +117,6 @@ class escape_finder ~gcx ~(add_output : Context.t -> ?trace:Type.trace -> Error_
         in
         acc
       | _ -> super#type_ cx pole acc ty
-
-    method! use_type_ _cx acc _ty = acc
 
     (* Don't check evaluated types: the evaluated type in an EvalT theoretically "leaks"
        generic information that shouldn't actually cause issues *)
@@ -112,7 +150,7 @@ class escape_finder ~gcx ~(add_output : Context.t -> ?trace:Type.trace -> Error_
     method! tvar cx pole ({ seen; tvar_ids; annot_reason; use_op; top_level_reason; _ } as acc) r id
         =
       let open Constraint in
-      let (root_id, (lazy constraints)) = Context.find_constraints cx id in
+      let (root_id, constraints) = Context.find_constraints cx id in
       if id != root_id then
         self#tvar cx pole acc r root_id
       else if IMap.mem id tvar_ids then
@@ -172,7 +210,7 @@ let scan_for_escapes
         seen
       else
         let seen = ISet.add var_id seen in
-        match Lazy.force (Context.find_graph cx var_id) with
+        match Context.find_graph cx var_id with
         | Unresolved bounds -> Type.TypeMap.fold scan_type bounds.lower seen
         | Resolved (use_op, ty) -> scan_type ty (Trace.dummy_trace, use_op) seen
         | FullyResolved _ -> seen

@@ -1,5 +1,5 @@
 (*
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -7,9 +7,13 @@
 
 val default_flowconfig_name : string
 
+val default_temp_dir : string
+
 val config_file : string -> Path.t -> string
 
 val log_file : flowconfig_name:string -> tmp_dir:string -> Path.t -> string
+
+val dfind_log_file : flowconfig_name:string -> tmp_dir:string -> Path.t -> string
 
 val monitor_log_file : flowconfig_name:string -> tmp_dir:string -> Path.t -> string
 

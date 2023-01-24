@@ -1,5 +1,5 @@
 /**
- * Copyright (c) Facebook, Inc. and its affiliates.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
@@ -15,11 +15,11 @@ const {execManual} = require('./utils/async');
 import type {FlowError, FlowLoc, FlowResult} from './flowResult';
 
 async function getFlowErrorsImpl(
-  bin,
-  errorCheckCommand,
-  root,
-  withWarnings,
-  flowconfigName,
+  bin: string,
+  errorCheckCommand: 'check' | 'status',
+  root: string,
+  withWarnings: boolean,
+  flowconfigName: string,
 ) {
   const includeWarnings = withWarnings ? '--include-warnings' : '';
   const flowconfigNameFlag = '--flowconfig-name ' + flowconfigName;
